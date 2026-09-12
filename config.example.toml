@@ -1,0 +1,27 @@
+[dexscreener]
+chain_id = "solana"
+min_liquidity_usd = 5000.0
+min_volume_h1_usd = 2000.0
+
+[radar]
+poll_interval_seconds = 90
+alert_cooldown_minutes = 60
+score_alert_threshold = 70.0
+top_n_candidates = 40
+verbose = false
+
+[scoring_weights]
+volume_h1 = 0.35
+price_change_h1 = 0.25
+price_change_h6 = 0.15
+liquidity = 0.15
+boosted = 0.10
+
+[telegram]
+# Reusa el bot_token de tu bot de Telegram existente si quieres
+# que las alertas lleguen al mismo chat que pump_bot.py
+bot_token = "TU_BOT_TOKEN_AQUI"
+chat_id = "TU_CHAT_ID_AQUI"
+# Opcional: solo si quieres mandar las alertas a un tema (topic) concreto
+# dentro de un grupo con "Temas" activados. Omite esta línea si no aplica.
+# message_thread_id = 123

@@ -44,6 +44,9 @@ class Config:
         """Lee config.toml y arma un Config, usando los defaults del dataclass
         para cualquier clave ausente en el archivo (config.toml no necesita
         tener todas las secciones/claves)."""
+        if not path.is_file():
+            raise FileNotFoundError(f"Archivo de configuración no encontrado: {path}")
+        
         with open(path, "rb") as f:
             raw = tomllib.load(f)
 

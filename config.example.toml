@@ -18,8 +18,8 @@ liquidity = 0.15
 boosted = 0.10
 
 [telegram]
-# Reusa el bot_token de tu bot de Telegram existente si quieres
-# que las alertas lleguen al mismo chat que pump_bot.py
+# token del bot y chat_id del usuario o canal que debe recibir las alertas.
+# Usa @userinfobot de tg para obtener el ChatID
 bot_token = "TU_BOT_TOKEN_AQUI"
 chat_id = "TU_CHAT_ID_AQUI"
 # Opcional: solo si quieres mandar las alertas a un tema (topic) concreto

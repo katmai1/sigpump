@@ -1,3 +1,12 @@
+"""
+sigpump/telegram.py
+
+Formatea y envía la alerta de un par de mercado como mensaje de Telegram
+(HTML) usando python-telegram-bot.
+"""
+
+import html
+
 from telegram import Bot  # type: ignore[import-not-found]
 from telegram.constants import ParseMode  # type: ignore[import-not-found]
 
@@ -6,12 +15,16 @@ class TelegramAlerter:
     def __init__(self, bot_token: str, chat_id: str, message_thread_id: int | None = None):
         self._bot = Bot(token=bot_token)
         self._chat_id = chat_id
+        # Opcional: ID de un "topic" dentro de un grupo con Temas activados.
         self._message_thread_id = message_thread_id
 
     async def send(self, pair: dict, score: float) -> None:
+        """Arma y envía el mensaje de alerta para `pair` con su `score` ya calculado."""
         base = pair.get("baseToken", {})
-        symbol = base.get("symbol", "?")
-        name = base.get("name", "?")
+        # symbol/name vienen de la API y son controlados por quien crea el token:
+        # deben escaparse antes de insertarlos en un mensaje con parse_mode HTML.
+        symbol = html.escape(str(base.get("symbol", "?")))
+        name = html.escape(str(base.get("name", "?")))
         address = base.get("address", "?")
         price_usd = pair.get("priceUsd", "?")
         liquidity_usd = (pair.get("liquidity") or {}).get("usd", 0)

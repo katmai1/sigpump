@@ -17,6 +17,11 @@ API_BASE = "https://api.dexscreener.com"
 MAX_ADDRESSES_PER_CALL = 30  # límite de la API para /latest/dex/tokens/{addrs}
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 2.0
+REQUEST_TIMEOUT_SECONDS = 15
+# Fallos transitorios del lado del servidor: se reintentan igual que el 429.
+# Un 4xx distinto de 429 es un error nuestro (URL mal armada) y no se reintenta.
+RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+
 
 class DexScreenerClient:
     """Thin async client for the public DexScreener REST API."""
@@ -25,37 +30,56 @@ class DexScreenerClient:
         self._session = session
 
     async def _get(self, path: str) -> Any:
-        """GET genérico con reintentos y backoff exponencial ante 429
-        (rate limit). Devuelve None si se agotan los reintentos, para que
-        el llamador pueda tratarlo como "sin datos esta vez" sin romper el scan."""
+        """GET genérico con reintentos y backoff exponencial ante rate limit,
+        errores 5xx y fallos de red/timeout. Devuelve None si se agotan los
+        reintentos, para que el llamador pueda tratarlo como "sin datos esta
+        vez" sin romper el scan."""
         url = f"{API_BASE}{path}"
         for attempt in range(MAX_RETRIES + 1):
-            async with self._session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status == 429:
-                    if attempt == MAX_RETRIES:
-                        log.warning("DexScreener rate limit hit on %s, sin más reintentos", path)
-                        return None
-                    wait = RETRY_BACKOFF_SECONDS * (2 ** attempt)
-                    log.warning("DexScreener rate limit hit on %s, reintentando en %.1fs", path, wait)
-                    await asyncio.sleep(wait)
-                    continue
-                resp.raise_for_status()
-                return await resp.json()
+            try:
+                timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
+                async with self._session.get(url, timeout=timeout) as resp:
+                    if resp.status not in RETRYABLE_STATUSES:
+                        resp.raise_for_status()
+                        # content_type=None: la API a veces responde con un
+                        # Content-Type que aiohttp no reconoce como JSON.
+                        return await resp.json(content_type=None)
+                    reason = f"HTTP {resp.status}"
+            except aiohttp.ClientResponseError:
+                # Viene de raise_for_status(): es un 4xx real, no se reintenta.
+                raise
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                # Corte de red, DNS, timeout: transitorios, se reintentan.
+                reason = f"{type(exc).__name__}: {exc}"
+
+            if attempt == MAX_RETRIES:
+                log.warning("DexScreener %s en %s, sin más reintentos", reason, path)
+                return None
+            wait = RETRY_BACKOFF_SECONDS * (2 ** attempt)
+            log.warning("DexScreener %s en %s, reintentando en %.1fs", reason, path, wait)
+            await asyncio.sleep(wait)
+        return None
+
+    async def _get_list(self, path: str) -> list[dict]:
+        """GET que espera una lista de objetos JSON. Filtra cualquier cosa que
+        no sea un dict para que un cambio de forma en la API no se propague
+        como AttributeError al resto del código."""
+        data = await self._get(path)
+        if not isinstance(data, list):
+            return []
+        return [item for item in data if isinstance(item, dict)]
 
     async def get_latest_boosted(self) -> list[dict]:
         """Tokens con boost (promoción paga) reciente, cualquier chain."""
-        data = await self._get("/token-boosts/latest/v1")
-        return data or []
+        return await self._get_list("/token-boosts/latest/v1")
 
     async def get_top_boosted(self) -> list[dict]:
         """Tokens con más boosts activos acumulados, cualquier chain."""
-        data = await self._get("/token-boosts/top/v1")
-        return data or []
+        return await self._get_list("/token-boosts/top/v1")
 
     async def get_latest_profiles(self) -> list[dict]:
         """Perfiles de token nuevos o actualizados recientemente, cualquier chain."""
-        data = await self._get("/token-profiles/latest/v1")
-        return data or []
+        return await self._get_list("/token-profiles/latest/v1")
 
     async def get_pairs_for_tokens(self, chain_id: str, addresses: list[str]) -> list[dict]:
         """Fetch full pair/market data for up to 30 token addresses at once."""
@@ -73,8 +97,6 @@ class DexScreenerClient:
             for pair in batch_pairs or []:
                 # Filtro extra por las dudas: la API a veces devuelve pares
                 # de otras chains aunque se haya pedido por dirección específica.
-                if pair.get("chainId") == chain_id:
+                if isinstance(pair, dict) and pair.get("chainId") == chain_id:
                     pairs.append(pair)
         return pairs
-
-

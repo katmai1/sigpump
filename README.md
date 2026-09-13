@@ -75,6 +75,15 @@ python run.py --config config.toml
 El proceso corre indefinidamente, escaneando cada `poll_interval_seconds`
 hasta que se lo interrumpa (Ctrl+C).
 
+## Tests
+
+Los tests usan solo `unittest` de la stdlib (no hace falta instalar nada
+más) y no tocan la red: la sesión HTTP y el bot de Telegram son dobles.
+
+```bash
+python -m unittest discover -s tests -t .
+```
+
 ## Estructura del proyecto
 
 ```
@@ -84,4 +93,6 @@ sigpump/
   screener.py               Cliente HTTP async de la API de DexScreener
   radar.py                   Orquesta el ciclo descubrir -> puntuar -> alertar
   telegram.py                 Formateo y envío de alertas por Telegram
+  util.py                      Conversión defensiva de los campos de la API
+tests/                    Tests (stdlib unittest, sin red)
 ```

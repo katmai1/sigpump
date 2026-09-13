@@ -14,8 +14,14 @@ import aiohttp  # type: ignore[import-not-found]
 from sigpump.config import Config, score_pair
 from sigpump.screener import DexScreenerClient
 from sigpump.telegram import TelegramAlerter
+from sigpump.util import to_float
 
 log = logging.getLogger()
+
+
+def _liquidity_usd(pair: dict) -> float:
+    """Liquidez en USD del par, 0.0 si la API no la informa."""
+    return to_float((pair.get("liquidity") or {}).get("usd"))
 
 
 class MemecoinRadar:
@@ -49,28 +55,65 @@ class MemecoinRadar:
         — el segundo valor se reutiliza luego en score_pair() para el bonus de boost.
         """
         # Las tres fuentes se piden en paralelo porque son independientes entre sí.
-        latest_boosted, top_boosted, profiles = await asyncio.gather(
+        # return_exceptions: si una falla, se sigue con las otras dos en vez de
+        # perder la pasada completa.
+        results = await asyncio.gather(
             client.get_latest_boosted(),
             client.get_top_boosted(),
             client.get_latest_profiles(),
+            return_exceptions=True,
         )
+        sources: list[list[dict]] = []
+        for name, result in zip(("latest_boosted", "top_boosted", "profiles"), results):
+            if isinstance(result, BaseException):
+                log.warning("Fuente %s falló: %s", name, result)
+                sources.append([])
+            else:
+                sources.append(result)
+        latest_boosted, top_boosted, profiles = sources
 
         chain = self._config.chain_id
-        boosted_addresses = {
-            item["tokenAddress"]
-            for item in (latest_boosted + top_boosted)
-            if item.get("chainId") == chain and item.get("tokenAddress")
-        }
-        profile_addresses = {
-            item["tokenAddress"]
-            for item in profiles
-            if item.get("chainId") == chain and item.get("tokenAddress")
-        }
 
-        # boosted primero (señal de interés/marketing más fuerte), preservando
-        # orden de llegada en vez de depender del orden arbitrario de un set.
-        candidates = list(dict.fromkeys([*boosted_addresses, *profile_addresses]))
+        def _addresses(items: list[dict]) -> list[str]:
+            """Direcciones de la chain configurada, en el orden que las devolvió
+            la API (ese orden ya es el ranking de DexScreener)."""
+            return [
+                item["tokenAddress"]
+                for item in items
+                if item.get("chainId") == chain and item.get("tokenAddress")
+            ]
+
+        boosted_ordered = _addresses(latest_boosted) + _addresses(top_boosted)
+        boosted_addresses = set(boosted_ordered)
+
+        # boosted primero (señal de interés/marketing más fuerte). Se trabaja
+        # sobre listas y no sobre sets para que el recorte a top_n_candidates
+        # sea determinista: con sets, el orden es arbitrario y cada pasada
+        # descartaba tokens distintos sin criterio.
+        candidates = list(dict.fromkeys(boosted_ordered + _addresses(profiles)))
         return candidates[: self._config.top_n_candidates], boosted_addresses
+
+    def _best_pair_per_token(self, pairs: list[dict], addresses: list[str]) -> list[dict]:
+        """
+        Un token suele cotizar en varios pools. Se queda con el par de mayor
+        liquidez por token, que es el que mejor representa su mercado real;
+        antes se evaluaba pool por pool y la alerta salía con los datos del
+        primero que devolvía la API, no del más profundo.
+
+        Además descarta los pares donde el token pedido es el quote (p. ej.
+        SOL en un par SOL/TOKEN): ahí el baseToken es otro token y alertar
+        sobre él sería alertar sobre el token equivocado.
+        """
+        wanted = set(addresses)
+        best: dict[str, dict] = {}
+        for pair in pairs:
+            address = (pair.get("baseToken") or {}).get("address") or ""
+            if address not in wanted:
+                continue
+            current = best.get(address)
+            if current is None or _liquidity_usd(pair) > _liquidity_usd(current):
+                best[address] = pair
+        return list(best.values())
 
     async def _scan_once(self, client: DexScreenerClient, alerter: TelegramAlerter) -> None:
         """Ejecuta una pasada completa: descubrir -> traer datos de mercado ->
@@ -83,16 +126,25 @@ class MemecoinRadar:
 
         # Un solo llamado (paginado internamente) trae liquidez/volumen/precio
         # real de mercado para todos los candidatos descubiertos.
-        pairs = await client.get_pairs_for_tokens(self._config.chain_id, addresses)
-        log.info("Analizando %d pares de %d candidatos", len(pairs), len(addresses))
+        all_pairs = await client.get_pairs_for_tokens(self._config.chain_id, addresses)
+        pairs = self._best_pair_per_token(all_pairs, addresses)
+        log.info(
+            "Analizando %d tokens (%d pares) de %d candidatos",
+            len(pairs),
+            len(all_pairs),
+            len(addresses),
+        )
 
         for pair in pairs:
-            liquidity_usd = float((pair.get("liquidity") or {}).get("usd") or 0.0)
-            volume_h1 = float((pair.get("volume") or {}).get("h1") or 0.0)
+            liquidity_usd = _liquidity_usd(pair)
+            volume_h1 = to_float((pair.get("volume") or {}).get("h1"))
             # marketCap suele venir ausente en tokens nuevos (sin supply circulante
             # conocido); fdv (fully diluted valuation) es el fallback de DexScreener.
-            market_cap_usd = float(pair.get("marketCap") or pair.get("fdv") or 0.0)
-            pair_created_at = pair.get("pairCreatedAt")
+            market_cap_usd = to_float(pair.get("marketCap")) or to_float(pair.get("fdv"))
+            # to_float: pairCreatedAt llega como epoch en ms, pero si la API lo
+            # manda como string un cast directo tiraba TypeError y mataba la
+            # pasada entera, no solo este par.
+            pair_created_at = to_float(pair.get("pairCreatedAt"))
 
             # Filtros duros antes de puntuar: descartan pares demasiado
             # ilíquidos, sin actividad real o de capitalización muy baja
@@ -107,12 +159,14 @@ class MemecoinRadar:
             # exige que tengan al menos min_pair_age_minutes de vida.
             # Si la API no informa pairCreatedAt no se puede evaluar la edad,
             # así que no se descarta por este filtro.
-            if pair_created_at:
+            if pair_created_at > 0:
                 age_minutes = (time.time() - pair_created_at / 1000) / 60
                 if age_minutes < self._config.min_pair_age_minutes:
                     continue
 
             score = score_pair(pair, self._config.weights, boosted_addresses)
+            # _best_pair_per_token ya garantizó que address es una de las
+            # direcciones pedidas, así que nunca es "".
             address = (pair.get("baseToken") or {}).get("address", "")
 
             if score < self._config.score_alert_threshold:
@@ -143,8 +197,11 @@ class MemecoinRadar:
             self._config.telegram_bot_token,
             self._config.telegram_chat_id,
             self._config.telegram_message_thread_id,
+            self._config.chain_id,
         )
-        async with aiohttp.ClientSession() as session:
+        # `async with alerter` valida el token al arrancar y cierra el cliente
+        # HTTP de Telegram al salir.
+        async with aiohttp.ClientSession() as session, alerter:
             client = DexScreenerClient(session)
             while True:
                 try:

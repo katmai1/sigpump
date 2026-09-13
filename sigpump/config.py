@@ -6,9 +6,14 @@ contiene la función de scoring (score_pair) que puntúa cada par de
 mercado para decidir si dispara una alerta.
 """
 
+import logging
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
+
+from sigpump.util import to_float
+
+log = logging.getLogger()
 
 
 @dataclass
@@ -22,6 +27,50 @@ class ScoringWeights:
     price_change_h6: float = 0.15
     liquidity: float = 0.15
     boosted: float = 0.10
+
+    @property
+    def total(self) -> float:
+        """Suma de todos los pesos; define el score máximo alcanzable."""
+        return (
+            self.volume_h1
+            + self.price_change_h1
+            + self.price_change_h6
+            + self.liquidity
+            + self.boosted
+        )
+
+    @classmethod
+    def from_raw(cls, raw: dict) -> "ScoringWeights":
+        """Construye los pesos desde [scoring_weights], validando las claves.
+
+        Sin esta validación una clave mal escrita en el TOML terminaba en un
+        `TypeError: unexpected keyword argument` sin contexto útil."""
+        known = {f.name for f in fields(cls)}
+        unknown = sorted(set(raw) - known)
+        if unknown:
+            raise ValueError(
+                f"Claves desconocidas en [scoring_weights]: {', '.join(unknown)}. "
+                f"Válidas: {', '.join(sorted(known))}"
+            )
+        for key, value in raw.items():
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise ValueError(f"[scoring_weights].{key} debe ser un número, no {value!r}")
+            if value < 0:
+                raise ValueError(f"[scoring_weights].{key} no puede ser negativo ({value})")
+
+        weights = cls(**raw)
+        # Los pesos definen el score máximo: si suman 0.5, ningún token puede
+        # pasar de 50 y un umbral de 70 no dispara jamás. Es un error silencioso
+        # difícil de diagnosticar, así que al menos se avisa.
+        if abs(weights.total - 1.0) > 0.01:
+            log.warning(
+                "Los pesos de [scoring_weights] suman %.2f en vez de 1.0: "
+                "el score máximo posible es %.1f, no 100",
+                weights.total,
+                weights.total * 100,
+            )
+        return weights
+
 
 @dataclass
 class Config:
@@ -41,6 +90,34 @@ class Config:
     telegram_chat_id: str = ""
     telegram_message_thread_id: int | None = None
 
+    def __post_init__(self) -> None:
+        """Valida los rangos apenas se construye el Config, para que un TOML
+        inconsistente falle al arrancar y no a mitad de una pasada."""
+        if not self.chain_id:
+            raise ValueError("[dexscreener].chain_id no puede estar vacío")
+        if self.poll_interval_seconds <= 0:
+            raise ValueError(
+                f"[radar].poll_interval_seconds debe ser > 0 ({self.poll_interval_seconds})"
+            )
+        if self.top_n_candidates <= 0:
+            raise ValueError(
+                f"[radar].top_n_candidates debe ser > 0 ({self.top_n_candidates})"
+            )
+        if not 0 <= self.score_alert_threshold <= 100:
+            raise ValueError(
+                f"[radar].score_alert_threshold debe estar entre 0 y 100 "
+                f"({self.score_alert_threshold})"
+            )
+        for name in (
+            "alert_cooldown_minutes",
+            "min_liquidity_usd",
+            "min_volume_h1_usd",
+            "min_market_cap_usd",
+            "min_pair_age_minutes",
+        ):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} no puede ser negativo ({getattr(self, name)})")
+
     @classmethod
     def from_toml(cls, path: Path) -> "Config":
         """Lee config.toml y arma un Config, usando los defaults del dataclass
@@ -48,7 +125,7 @@ class Config:
         tener todas las secciones/claves)."""
         if not path.is_file():
             raise FileNotFoundError(f"Archivo de configuración no encontrado: {path}")
-        
+
         with open(path, "rb") as f:
             raw = tomllib.load(f)
 
@@ -69,9 +146,9 @@ class Config:
             score_alert_threshold=radar.get("score_alert_threshold", 70.0),
             top_n_candidates=radar.get("top_n_candidates", 40),
             verbose=radar.get("verbose", False),
-            # **weights_raw solo cubre las claves presentes en el TOML; el resto
+            # from_raw solo cubre las claves presentes en el TOML; el resto
             # toma los defaults de ScoringWeights.
-            weights=ScoringWeights(**weights_raw) if weights_raw else ScoringWeights(),
+            weights=ScoringWeights.from_raw(weights_raw),
             telegram_bot_token=telegram.get("bot_token", ""),
             telegram_chat_id=telegram.get("chat_id", ""),
             telegram_message_thread_id=telegram.get("message_thread_id"),
@@ -95,11 +172,11 @@ def score_pair(pair: dict, weights: ScoringWeights, boosted_addresses: set[str])
       - si el token tiene boost activo (señal de marketing/interés)
     """
     # `pair` es el JSON crudo devuelto por DexScreener; los campos anidados
-    # pueden venir ausentes o null, de ahí el `or {}` / `or 0.0` defensivo.
-    volume_h1 = float((pair.get("volume") or {}).get("h1") or 0.0)
-    price_change_h1 = float((pair.get("priceChange") or {}).get("h1") or 0.0)
-    price_change_h6 = float((pair.get("priceChange") or {}).get("h6") or 0.0)
-    liquidity_usd = float((pair.get("liquidity") or {}).get("usd") or 0.0)
+    # pueden venir ausentes, null o como string, de ahí to_float().
+    volume_h1 = to_float((pair.get("volume") or {}).get("h1"))
+    price_change_h1 = to_float((pair.get("priceChange") or {}).get("h1"))
+    price_change_h6 = to_float((pair.get("priceChange") or {}).get("h6"))
+    liquidity_usd = to_float((pair.get("liquidity") or {}).get("usd"))
     token_address = (pair.get("baseToken") or {}).get("address", "")
     is_boosted = token_address in boosted_addresses
 
@@ -122,4 +199,3 @@ def score_pair(pair: dict, weights: ScoringWeights, boosted_addresses: set[str])
         + boost_score * weights.boosted
     )
     return round(_clamp(total), 1)
-

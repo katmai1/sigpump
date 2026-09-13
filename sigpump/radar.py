@@ -89,12 +89,18 @@ class MemecoinRadar:
         for pair in pairs:
             liquidity_usd = float((pair.get("liquidity") or {}).get("usd") or 0.0)
             volume_h1 = float((pair.get("volume") or {}).get("h1") or 0.0)
+            # marketCap suele venir ausente en tokens nuevos (sin supply circulante
+            # conocido); fdv (fully diluted valuation) es el fallback de DexScreener.
+            market_cap_usd = float(pair.get("marketCap") or pair.get("fdv") or 0.0)
 
             # Filtros duros antes de puntuar: descartan pares demasiado
-            # ilíquidos o sin actividad real, sin gastar cómputo de scoring en ellos.
+            # ilíquidos, sin actividad real o de capitalización muy baja
+            # (mayor riesgo de rug/manipulación), sin gastar cómputo de scoring en ellos.
             if liquidity_usd < self._config.min_liquidity_usd:
                 continue
             if volume_h1 < self._config.min_volume_h1_usd:
+                continue
+            if market_cap_usd < self._config.min_market_cap_usd:
                 continue
 
             score = score_pair(pair, self._config.weights, boosted_addresses)

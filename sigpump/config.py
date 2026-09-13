@@ -32,6 +32,7 @@ class Config:
     min_liquidity_usd: float = 5_000.0
     min_volume_h1_usd: float = 2_000.0
     min_market_cap_usd: float = 0.0
+    min_pair_age_minutes: float = 60.0
     score_alert_threshold: float = 70.0
     top_n_candidates: int = 40
     verbose: bool = False
@@ -64,6 +65,7 @@ class Config:
             min_liquidity_usd=dexscreener.get("min_liquidity_usd", 5_000.0),
             min_volume_h1_usd=dexscreener.get("min_volume_h1_usd", 2_000.0),
             min_market_cap_usd=dexscreener.get("min_market_cap_usd", 0.0),
+            min_pair_age_minutes=dexscreener.get("min_pair_age_minutes", 60.0),
             score_alert_threshold=radar.get("score_alert_threshold", 70.0),
             top_n_candidates=radar.get("top_n_candidates", 40),
             verbose=radar.get("verbose", False),

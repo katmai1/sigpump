@@ -30,6 +30,9 @@ class TelegramAlerter:
         liquidity_usd = (pair.get("liquidity") or {}).get("usd", 0)
         volume_h1 = (pair.get("volume") or {}).get("h1", 0)
         change_h1 = (pair.get("priceChange") or {}).get("h1", 0)
+        # marketCap suele venir ausente en tokens nuevos; fdv es el fallback de DexScreener.
+        market_cap_usd = float(pair.get("marketCap") or pair.get("fdv") or 0)
+        pool = html.escape(str(pair.get("dexId", "?")))
         url = pair.get("url", f"https://dexscreener.com/solana/{address}")
 
         text = (
@@ -39,6 +42,8 @@ class TelegramAlerter:
             f"Cambio 1h: {change_h1}%\n"
             f"Volumen 1h: ${volume_h1:,.0f}\n"
             f"Liquidez: ${liquidity_usd:,.0f}\n"
+            f"Cap. mercado: ${market_cap_usd:,.0f}\n"
+            f"Pool: {pool}\n"
             f"<a href=\"{url}\">Ver en DexScreener</a>\n"
             f"<code>{address}</code>"
         )

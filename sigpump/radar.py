@@ -92,6 +92,7 @@ class MemecoinRadar:
             # marketCap suele venir ausente en tokens nuevos (sin supply circulante
             # conocido); fdv (fully diluted valuation) es el fallback de DexScreener.
             market_cap_usd = float(pair.get("marketCap") or pair.get("fdv") or 0.0)
+            pair_created_at = pair.get("pairCreatedAt")
 
             # Filtros duros antes de puntuar: descartan pares demasiado
             # ilíquidos, sin actividad real o de capitalización muy baja
@@ -102,6 +103,14 @@ class MemecoinRadar:
                 continue
             if market_cap_usd < self._config.min_market_cap_usd:
                 continue
+            # Pares recién creados son los más propensos a rug pulls; se
+            # exige que tengan al menos min_pair_age_minutes de vida.
+            # Si la API no informa pairCreatedAt no se puede evaluar la edad,
+            # así que no se descarta por este filtro.
+            if pair_created_at:
+                age_minutes = (time.time() - pair_created_at / 1000) / 60
+                if age_minutes < self._config.min_pair_age_minutes:
+                    continue
 
             score = score_pair(pair, self._config.weights, boosted_addresses)
             address = (pair.get("baseToken") or {}).get("address", "")

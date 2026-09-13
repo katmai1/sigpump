@@ -5,6 +5,8 @@ min_volume_h1_usd = 2000.0
 # Descarta pares con market cap (o fdv si no hay market cap) por debajo de esto.
 # 0 = sin filtro de capitalización.
 min_market_cap_usd = 0.0
+# Descarta pares recién creados (mayor riesgo de rug pull). 0 = sin filtro de edad.
+min_pair_age_minutes = 60.0
 
 [radar]
 poll_interval_seconds = 90

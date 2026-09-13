@@ -50,29 +50,33 @@ class MemecoinRadar:
     async def _discover_candidates(self, client: DexScreenerClient) -> tuple[list[str], set[str]]:
         """
         Arma la lista de direcciones candidatas a evaluar en esta pasada,
-        combinando tokens con boost activo (pago) y perfiles nuevos/actualizados.
+        combinando tokens con boost activo (pago), pools trending de
+        GeckoTerminal, perfiles nuevos/actualizados, community takeovers y ads.
         Devuelve (direcciones recortadas a top_n_candidates, set de boosteadas)
         — el segundo valor se reutiliza luego en score_pair() para el bonus de boost.
         """
-        # Las tres fuentes se piden en paralelo porque son independientes entre sí.
-        # return_exceptions: si una falla, se sigue con las otras dos en vez de
+        chain = self._config.chain_id
+        # Las fuentes se piden en paralelo porque son independientes entre sí.
+        # return_exceptions: si una falla, se sigue con las demás en vez de
         # perder la pasada completa.
+        names = ("latest_boosted", "top_boosted", "profiles", "takeovers", "ads", "trending")
         results = await asyncio.gather(
             client.get_latest_boosted(),
             client.get_top_boosted(),
             client.get_latest_profiles(),
+            client.get_latest_takeovers(),
+            client.get_latest_ads(),
+            client.get_trending_tokens(chain, self._config.geckoterminal_pages),
             return_exceptions=True,
         )
-        sources: list[list[dict]] = []
-        for name, result in zip(("latest_boosted", "top_boosted", "profiles"), results):
+        sources: list[list] = []
+        for name, result in zip(names, results):
             if isinstance(result, BaseException):
                 log.warning("Fuente %s falló: %s", name, result)
                 sources.append([])
             else:
                 sources.append(result)
-        latest_boosted, top_boosted, profiles = sources
-
-        chain = self._config.chain_id
+        latest_boosted, top_boosted, profiles, takeovers, ads, trending = sources
 
         def _addresses(items: list[dict]) -> list[str]:
             """Direcciones de la chain configurada, en el orden que las devolvió
@@ -86,11 +90,26 @@ class MemecoinRadar:
         boosted_ordered = _addresses(latest_boosted) + _addresses(top_boosted)
         boosted_addresses = set(boosted_ordered)
 
-        # boosted primero (señal de interés/marketing más fuerte). Se trabaja
+        # boosted primero (señal de interés/marketing más fuerte), después
+        # trending (actividad real de mercado) y al final el resto. Se trabaja
         # sobre listas y no sobre sets para que el recorte a top_n_candidates
         # sea determinista: con sets, el orden es arbitrario y cada pasada
         # descartaba tokens distintos sin criterio.
-        candidates = list(dict.fromkeys(boosted_ordered + _addresses(profiles)))
+        candidates = list(
+            dict.fromkeys(
+                boosted_ordered
+                + trending
+                + _addresses(profiles)
+                + _addresses(takeovers)
+                + _addresses(ads)
+            )
+        )
+        log.debug(
+            "Candidatos: %d boosted, %d trending, %d únicos en total",
+            len(boosted_addresses),
+            len(trending),
+            len(candidates),
+        )
         return candidates[: self._config.top_n_candidates], boosted_addresses
 
     def _best_pair_per_token(self, pairs: list[dict], addresses: list[str]) -> list[dict]:

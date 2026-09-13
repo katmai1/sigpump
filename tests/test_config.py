@@ -110,6 +110,11 @@ class TestConfigValidation(unittest.TestCase):
         with self.assertRaises(ValueError):
             Config(top_n_candidates=0)
 
+    def test_paginas_de_geckoterminal_fuera_de_rango_da_error(self):
+        for pages in (-1, 11):
+            with self.subTest(pages=pages), self.assertRaises(ValueError):
+                Config(geckoterminal_pages=pages)
+
     def test_umbral_fuera_de_rango_da_error(self):
         with self.assertRaises(ValueError):
             Config(score_alert_threshold=150.0)

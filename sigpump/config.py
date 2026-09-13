@@ -83,7 +83,8 @@ class Config:
     min_market_cap_usd: float = 0.0
     min_pair_age_minutes: float = 60.0
     score_alert_threshold: float = 70.0
-    top_n_candidates: int = 40
+    top_n_candidates: int = 200
+    geckoterminal_pages: int = 5
     verbose: bool = False
     weights: ScoringWeights = field(default_factory=ScoringWeights)
     telegram_bot_token: str = ""
@@ -102,6 +103,11 @@ class Config:
         if self.top_n_candidates <= 0:
             raise ValueError(
                 f"[radar].top_n_candidates debe ser > 0 ({self.top_n_candidates})"
+            )
+        if not 0 <= self.geckoterminal_pages <= 10:
+            raise ValueError(
+                f"[geckoterminal].trending_pages debe estar entre 0 y 10 "
+                f"({self.geckoterminal_pages})"
             )
         if not 0 <= self.score_alert_threshold <= 100:
             raise ValueError(
@@ -132,6 +138,7 @@ class Config:
         # Cada sección del TOML se mapea a un grupo de campos de Config.
         radar = raw.get("radar", {})
         dexscreener = raw.get("dexscreener", {})
+        geckoterminal = raw.get("geckoterminal", {})
         telegram = raw.get("telegram", {})
         weights_raw = raw.get("scoring_weights", {})
 
@@ -144,7 +151,8 @@ class Config:
             min_market_cap_usd=dexscreener.get("min_market_cap_usd", 0.0),
             min_pair_age_minutes=dexscreener.get("min_pair_age_minutes", 60.0),
             score_alert_threshold=radar.get("score_alert_threshold", 70.0),
-            top_n_candidates=radar.get("top_n_candidates", 40),
+            top_n_candidates=radar.get("top_n_candidates", 200),
+            geckoterminal_pages=geckoterminal.get("trending_pages", 5),
             verbose=radar.get("verbose", False),
             # from_raw solo cubre las claves presentes en el TOML; el resto
             # toma los defaults de ScoringWeights.

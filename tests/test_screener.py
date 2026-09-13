@@ -7,7 +7,12 @@ from unittest.mock import AsyncMock, patch
 
 import aiohttp
 
-from sigpump.screener import MAX_ADDRESSES_PER_CALL, MAX_RETRIES, DexScreenerClient
+from sigpump.screener import (
+    GECKO_MAX_PAGES,
+    MAX_ADDRESSES_PER_CALL,
+    MAX_RETRIES,
+    DexScreenerClient,
+)
 
 
 class _FakeResponse:
@@ -125,6 +130,63 @@ class TestListEndpoints(ScreenerTestCase):
     async def test_sin_datos_devuelve_vacio(self):
         session = _FakeSession(*[_FakeResponse(429)] * (MAX_RETRIES + 1))
         self.assertEqual(await DexScreenerClient(session).get_latest_profiles(), [])
+
+
+def _pool(base, quote="SOL", network="solana"):
+    return {
+        "relationships": {
+            "base_token": {"data": {"id": f"{network}_{base}"}},
+            "quote_token": {"data": {"id": f"{network}_{quote}"}},
+        }
+    }
+
+
+class TestGetTrendingTokens(ScreenerTestCase):
+    async def test_pagina_y_conserva_el_orden_sin_repetidos(self):
+        session = _FakeSession(
+            _FakeResponse(200, {"data": [_pool("A"), _pool("B")]}),
+            _FakeResponse(200, {"data": [_pool("A"), _pool("C")]}),
+        )
+        tokens = await DexScreenerClient(session).get_trending_tokens("solana", 2)
+        self.assertEqual(tokens, ["A", "B", "C"])
+        self.assertIn("api.geckoterminal.com", session.urls[0])
+        self.assertTrue(session.urls[1].endswith("/networks/solana/trending_pools?page=2"))
+
+    async def test_descarta_bases_que_son_quote_en_otro_pool(self):
+        # Un pool SOL/USDC no debe meter a SOL como memecoin trending.
+        session = _FakeSession(
+            _FakeResponse(200, {"data": [_pool("SOL", quote="USDC"), _pool("MEME")]})
+        )
+        tokens = await DexScreenerClient(session).get_trending_tokens("solana", 1)
+        self.assertEqual(tokens, ["MEME"])
+
+    async def test_mapea_el_network_de_geckoterminal(self):
+        session = _FakeSession(_FakeResponse(200, {"data": [_pool("A", network="eth")]}))
+        tokens = await DexScreenerClient(session).get_trending_tokens("ethereum", 1)
+        self.assertEqual(tokens, ["A"])
+        self.assertIn("/networks/eth/", session.urls[0])
+
+    async def test_pagina_vacia_corta_la_paginacion(self):
+        session = _FakeSession(_FakeResponse(200, {"data": []}))
+        self.assertEqual(await DexScreenerClient(session).get_trending_tokens("solana", 5), [])
+        self.assertEqual(len(session.urls), 1)
+
+    async def test_no_pasa_del_maximo_de_paginas(self):
+        session = _FakeSession(
+            *[_FakeResponse(200, {"data": [_pool(f"T{i}")]}) for i in range(GECKO_MAX_PAGES)]
+        )
+        await DexScreenerClient(session).get_trending_tokens("solana", 50)
+        self.assertEqual(len(session.urls), GECKO_MAX_PAGES)
+
+    async def test_cero_paginas_no_hace_requests(self):
+        session = _FakeSession()
+        self.assertEqual(await DexScreenerClient(session).get_trending_tokens("solana", 0), [])
+        self.assertEqual(session.urls, [])
+
+    async def test_forma_inesperada_no_rompe(self):
+        payload = {"data": ["basura", {"relationships": None}, {"relationships": {}}, _pool("A")]}
+        session = _FakeSession(_FakeResponse(200, payload))
+        self.assertEqual(await DexScreenerClient(session).get_trending_tokens("solana", 1), ["A"])
 
 
 class TestGetPairsForTokens(ScreenerTestCase):

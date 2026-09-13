@@ -15,6 +15,14 @@ log = logging.getLogger()
 
 API_BASE = "https://api.dexscreener.com"
 MAX_ADDRESSES_PER_CALL = 30  # límite de la API para /latest/dex/tokens/{addrs}
+# GeckoTerminal (API pública, sin key) expone el ranking de pools trending por
+# chain, algo que DexScreener no publica. El tier gratuito sirve hasta la
+# página 10 (20 pools por página) y limita a ~30 requests/minuto.
+GECKO_API_BASE = "https://api.geckoterminal.com/api/v2"
+GECKO_MAX_PAGES = 10
+GECKO_PAGE_DELAY_SECONDS = 1.0
+# chainId de DexScreener -> network id de GeckoTerminal, solo donde difieren.
+GECKO_NETWORKS = {"ethereum": "eth", "polygon": "polygon_pos", "avalanche": "avax"}
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 2.0
 REQUEST_TIMEOUT_SECONDS = 15
@@ -23,18 +31,28 @@ REQUEST_TIMEOUT_SECONDS = 15
 RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 
+def _gecko_token_address(relationship: Any) -> str:
+    """Dirección de un token a partir de una relación de GeckoTerminal, cuyo
+    id tiene la forma "{network}_{address}". "" si la forma no es la esperada."""
+    data = relationship.get("data") if isinstance(relationship, dict) else None
+    token_id = data.get("id") if isinstance(data, dict) else None
+    if not isinstance(token_id, str) or "_" not in token_id:
+        return ""
+    return token_id.split("_", 1)[1]
+
+
 class DexScreenerClient:
     """Thin async client for the public DexScreener REST API."""
 
     def __init__(self, session: aiohttp.ClientSession):
         self._session = session
 
-    async def _get(self, path: str) -> Any:
+    async def _get(self, path: str, base: str = API_BASE) -> Any:
         """GET genérico con reintentos y backoff exponencial ante rate limit,
         errores 5xx y fallos de red/timeout. Devuelve None si se agotan los
         reintentos, para que el llamador pueda tratarlo como "sin datos esta
         vez" sin romper el scan."""
-        url = f"{API_BASE}{path}"
+        url = f"{base}{path}"
         for attempt in range(MAX_RETRIES + 1):
             try:
                 timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
@@ -80,6 +98,49 @@ class DexScreenerClient:
     async def get_latest_profiles(self) -> list[dict]:
         """Perfiles de token nuevos o actualizados recientemente, cualquier chain."""
         return await self._get_list("/token-profiles/latest/v1")
+
+    async def get_latest_takeovers(self) -> list[dict]:
+        """Community takeovers recientes (la comunidad retomó un token abandonado)."""
+        return await self._get_list("/community-takeovers/latest/v1")
+
+    async def get_latest_ads(self) -> list[dict]:
+        """Tokens con anuncios pagos recientes en DexScreener."""
+        return await self._get_list("/ads/latest/v1")
+
+    async def get_trending_tokens(self, chain_id: str, pages: int) -> list[str]:
+        """
+        Direcciones de los base tokens de los pools trending de GeckoTerminal,
+        en orden de ranking y sin repetidos. A diferencia de boosts/perfiles
+        (que dependen de que alguien pague o edite), refleja actividad real
+        de mercado, así que rota mucho más entre pasadas.
+        """
+        network = GECKO_NETWORKS.get(chain_id, chain_id)
+        bases: list[str] = []
+        quotes: set[str] = set()
+        for page in range(1, min(pages, GECKO_MAX_PAGES) + 1):
+            if page > 1:
+                # Páginas en serie y espaciadas: en ráfaga el tier gratuito
+                # responde 429 enseguida.
+                await asyncio.sleep(GECKO_PAGE_DELAY_SECONDS)
+            data = await self._get(
+                f"/networks/{network}/trending_pools?page={page}", base=GECKO_API_BASE
+            )
+            pools = data.get("data") if isinstance(data, dict) else None
+            if not isinstance(pools, list) or not pools:
+                break
+            for pool in pools:
+                relationships = pool.get("relationships") if isinstance(pool, dict) else None
+                if not isinstance(relationships, dict):
+                    continue
+                base_address = _gecko_token_address(relationships.get("base_token"))
+                quote_address = _gecko_token_address(relationships.get("quote_token"))
+                if base_address:
+                    bases.append(base_address)
+                if quote_address:
+                    quotes.add(quote_address)
+        # Un token que aparece como quote (SOL, USDC...) no es un memecoin
+        # trending aunque en algún pool figure como base.
+        return [a for a in dict.fromkeys(bases) if a not in quotes]
 
     async def get_pairs_for_tokens(self, chain_id: str, addresses: list[str]) -> list[dict]:
         """Fetch full pair/market data for up to 30 token addresses at once."""

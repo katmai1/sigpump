@@ -29,12 +29,19 @@ def _hace_horas(horas: float) -> int:
 
 
 class _FakeClient:
-    def __init__(self, latest=None, top=None, profiles=None, pairs=None):
+    def __init__(
+        self, latest=None, top=None, profiles=None, pairs=None,
+        takeovers=None, ads=None, trending=None,
+    ):
         self._latest = latest if latest is not None else []
         self._top = top if top is not None else []
         self._profiles = profiles if profiles is not None else []
+        self._takeovers = takeovers if takeovers is not None else []
+        self._ads = ads if ads is not None else []
+        self._trending = trending if trending is not None else []
         self._pairs = pairs if pairs is not None else []
         self.requested: list[str] = []
+        self.trending_args: tuple | None = None
 
     async def _maybe_raise(self, value):
         if isinstance(value, BaseException):
@@ -49,6 +56,16 @@ class _FakeClient:
 
     async def get_latest_profiles(self):
         return await self._maybe_raise(self._profiles)
+
+    async def get_latest_takeovers(self):
+        return await self._maybe_raise(self._takeovers)
+
+    async def get_latest_ads(self):
+        return await self._maybe_raise(self._ads)
+
+    async def get_trending_tokens(self, chain_id, pages):
+        self.trending_args = (chain_id, pages)
+        return await self._maybe_raise(self._trending)
 
     async def get_pairs_for_tokens(self, chain_id, addresses):
         self.requested = list(addresses)
@@ -122,6 +139,28 @@ class TestDiscoverCandidates(unittest.IsolatedAsyncioTestCase):
             addresses, boosted = await radar._discover_candidates(client)
             self.assertEqual(addresses, ["B1", "B2", "B3", "P1", "P2"])
             self.assertEqual(boosted, {"B1", "B2", "B3"})
+
+    async def test_suma_trending_takeovers_y_ads_en_orden(self):
+        """Con solo boosts y perfiles quedaban ~36 direcciones por pasada y
+        casi siempre las mismas."""
+        client = _FakeClient(
+            latest=self._items("B1"),
+            profiles=self._items("P1"),
+            takeovers=self._items("C1", "B1"),
+            ads=self._items("AD1"),
+            trending=["T1", "P1", "T2"],
+        )
+        radar = MemecoinRadar(_config(geckoterminal_pages=3))
+        addresses, boosted = await radar._discover_candidates(client)
+        self.assertEqual(addresses, ["B1", "T1", "P1", "T2", "C1", "AD1"])
+        self.assertEqual(boosted, {"B1"})
+        self.assertEqual(client.trending_args, ("solana", 3))
+
+    async def test_trending_caido_no_pierde_las_otras(self):
+        client = _FakeClient(latest=self._items("B1"), trending=RuntimeError("429"))
+        with self.assertLogs(level=logging.WARNING):
+            addresses, _ = await MemecoinRadar(_config())._discover_candidates(client)
+        self.assertEqual(addresses, ["B1"])
 
     async def test_recorta_a_top_n_conservando_los_boosted(self):
         client = _FakeClient(latest=self._items("B1", "B2"), profiles=self._items("P1"))

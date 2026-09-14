@@ -93,7 +93,14 @@ class TestEscaping(unittest.TestCase):
         )
         self.assertNotIn("<script>", texto)
         self.assertIn("&quot;", texto)
-        self.assertEqual(texto.count('<a href="'), 1)
+        self.assertEqual(texto.count('<a href="'), 2)  # DexScreener + Photon
+
+    def test_escapa_la_direccion_en_photon(self):
+        texto = _alerter().format_message(
+            _pair(baseToken={"symbol": "S", "name": "N", "address": 'P"><script>'}), 70.0
+        )
+        self.assertNotIn("<script>", texto)
+        self.assertEqual(texto.count('<a href="'), 2)
 
     def test_escapa_la_direccion(self):
         texto = _alerter().format_message(
@@ -122,6 +129,25 @@ class TestUrlFallback(unittest.TestCase):
     def test_url_null_cae_en_el_fallback(self):
         texto = _alerter(chain_id="bsc").format_message(_pair(url=None), 70.0)
         self.assertIn("https://dexscreener.com/bsc/AbC123", texto)
+
+
+class TestPhotonLink(unittest.TestCase):
+    def test_link_de_photon_usa_la_direccion_del_token(self):
+        texto = _alerter().format_message(_pair(pairAddress="Pool999"), 70.0)
+        self.assertIn('href="https://photon-sol.tinyastro.io/en/lp/AbC123"', texto)
+        self.assertNotIn("Pool999", texto)
+
+    def test_sin_direccion_no_hay_link_de_photon(self):
+        texto = _alerter().format_message(_pair(baseToken={"symbol": "S"}), 70.0)
+        self.assertNotIn("photon", texto)
+
+    def test_sin_photon_fuera_de_solana(self):
+        texto = _alerter(chain_id="base").format_message(_pair(), 70.0)
+        self.assertNotIn("photon", texto)
+
+    def test_chain_del_par_tiene_prioridad(self):
+        texto = _alerter().format_message(_pair(chainId="ethereum"), 70.0)
+        self.assertNotIn("photon", texto)
 
 
 class TestLifecycle(unittest.IsolatedAsyncioTestCase):

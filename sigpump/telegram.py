@@ -61,6 +61,15 @@ class TelegramAlerter:
             f"https://dexscreener.com/{self._chain_id}/{base.get('address', '')}"
         )
         url = html.escape(str(raw_url), quote=True)
+        links = f"<a href=\"{url}\">Ver en DexScreener</a>"
+        # photon-sol solo cubre Solana.
+        chain_id = pair.get("chainId") or self._chain_id
+        token_address = base.get("address")
+        if chain_id == "solana" and token_address:
+            photon_url = html.escape(
+                f"https://photon-sol.tinyastro.io/en/lp/{token_address}", quote=True
+            )
+            links += f" | <a href=\"{photon_url}\">Ver en Photon</a>"
 
         return (
             f"🎯 <b>{name} ({symbol})</b>\n"
@@ -70,9 +79,9 @@ class TelegramAlerter:
             f"Volumen 1h: ${volume_h1:,.0f}\n"
             f"Liquidez: ${liquidity_usd:,.0f}\n"
             f"Cap. mercado: ${market_cap_usd:,.0f}\n"
-            f"Pool: {pool}\n"
-            f"<a href=\"{url}\">Ver en DexScreener</a>\n"
-            f"<code>{address}</code>"
+            f"Pool: {pool}\n\n"
+            f"<code>{address}</code>\n\n"
+            f"{links}"
         )
 
     async def send(self, pair: dict, score: float) -> None:

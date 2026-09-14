@@ -192,8 +192,11 @@ def score_pair(pair: dict, weights: ScoringWeights, boosted_addresses: set[str])
     # de ponderarla. Los techos (50_000, 100_000, etc.) son heurísticos y
     # conviene ajustarlos según lo que observes en la práctica.
     volume_score = _clamp((volume_h1 / 50_000.0) * 100)
-    price_h1_score = _clamp(50 + price_change_h1)  # +50% h1 -> tope
-    price_h6_score = _clamp(50 + price_change_h6 / 2)
+    # El momentum solo premia subidas: 0% o caídas puntúan 0. Antes la curva
+    # centraba el 0% en 50/100 y un token plano (o cayendo) sumaba puntos
+    # gratis, suficientes para disparar alertas con volumen y liquidez altos.
+    price_h1_score = _clamp(price_change_h1 * 2)  # +50% h1 -> tope
+    price_h6_score = _clamp(price_change_h6)  # +100% h6 -> tope
     liquidity_score = _clamp((liquidity_usd / 100_000.0) * 100)
     boost_score = 100.0 if is_boosted else 0.0
 

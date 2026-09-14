@@ -30,7 +30,7 @@ class TestScorePair(unittest.TestCase):
 
     def test_campos_null_se_tratan_como_cero(self):
         pair = {"volume": {"h1": None}, "liquidity": None, "priceChange": None}
-        self.assertEqual(score_pair(pair, self.weights, set()), 20.0)
+        self.assertEqual(score_pair(pair, self.weights, set()), 0.0)
 
     def test_campos_numericos_como_string(self):
         # DexScreener devuelve varios de estos campos como string.
@@ -46,20 +46,21 @@ class TestScorePair(unittest.TestCase):
             10.0,
         )
 
-    def test_momentum_neutro_aporta_20_puntos_de_base(self):
-        """BUG CONOCIDO (sin corregir): 0% de cambio puntúa 50/100 en ambos
-        sub-scores de momentum, o sea 20 puntos regalados sobre 100.
-
-        Consecuencia: un token *cayendo* 20% en 1h y 6h, con buen volumen,
-        liquidez y boost, llega a 73.5 y dispara alerta con el umbral por
-        defecto de 70. Si se cambia la curva de momentum, este test falla:
-        es intencional, hay que actualizarlo con la nueva semántica."""
-        self.assertEqual(score_pair(_pair(), self.weights, set()), 20.0)
+    def test_momentum_neutro_no_aporta_puntos(self):
+        """Regresión: 0% de cambio puntuaba 50/100 en ambos sub-scores de
+        momentum (20 puntos regalados), y un token cayendo 20% con buen
+        volumen, liquidez y boost llegaba a 73.5 y disparaba alerta."""
+        self.assertEqual(score_pair(_pair(), self.weights, set()), 0.0)
 
         cayendo = _pair(volume_h1=50_000, change_h1=-20, change_h6=-20, liquidity=100_000)
         score = score_pair(cayendo, self.weights, {"TOK"})
-        self.assertEqual(score, 73.5)
-        self.assertGreaterEqual(score, Config().score_alert_threshold)
+        self.assertEqual(score, 60.0)
+        self.assertLess(score, Config().score_alert_threshold)
+
+    def test_momentum_es_lineal_hasta_el_tope(self):
+        # +25% h1 -> 50/100 * 0.25 = 12.5; +50% h6 -> 50/100 * 0.15 = 7.5
+        self.assertEqual(score_pair(_pair(change_h1=25), self.weights, set()), 12.5)
+        self.assertEqual(score_pair(_pair(change_h6=50), self.weights, set()), 7.5)
 
 
 class TestScoringWeights(unittest.TestCase):

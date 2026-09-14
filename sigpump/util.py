@@ -17,3 +17,14 @@ def to_float(value: object, default: float = 0.0) -> float:
         return float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return default
+
+
+def normalize_address(address: object) -> object:
+    """Clave comparable de una dirección de token.
+
+    En chains EVM la misma dirección llega en minúsculas desde GeckoTerminal y
+    con checksum (mayúsculas mezcladas) desde DexScreener, así que se pasa a
+    minúsculas. Las de Solana (base58) distinguen mayúsculas y no se tocan."""
+    if isinstance(address, str) and address[:2].lower() == "0x":
+        return address.lower()
+    return address

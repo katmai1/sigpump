@@ -9,6 +9,10 @@ import aiohttp
 
 from sigpump.screener import (
     GECKO_MAX_PAGES,
+    GECKO_MAX_POOLS_PER_CALL,
+    GECKO_MAX_RETRIES,
+    GECKO_RATE_LIMIT_WAIT_SECONDS,
+    GECKO_REQUEST_INTERVAL_SECONDS,
     MAX_ADDRESSES_PER_CALL,
     MAX_RETRIES,
     DexScreenerClient,
@@ -29,6 +33,9 @@ class _FakeResponse:
             )
 
     async def json(self, content_type=None):
+        # Un payload excepción imita un cuerpo que no es JSON (JSONDecodeError).
+        if isinstance(self._payload, BaseException):
+            raise self._payload
         return self._payload
 
     async def __aenter__(self):
@@ -215,6 +222,31 @@ class TestGetPairsForTokens(ScreenerTestCase):
         pairs = await DexScreenerClient(session).get_pairs_for_tokens("solana", ["A"])
         self.assertEqual(len(pairs), 1)
 
+    async def test_usa_el_endpoint_tokens_v1_con_la_chain(self):
+        """/latest/dex/tokens corta en 30 pares por respuesta en total: los
+        tokens con muchos pools dejaban sin datos a otros del lote."""
+        session = _FakeSession(_FakeResponse(200, []))
+        await DexScreenerClient(session).get_pairs_for_tokens("solana", ["A", "B"])
+        self.assertTrue(session.urls[0].endswith("/tokens/v1/solana/A,B"))
+
+    async def test_4xx_en_un_lote_no_corta_los_siguientes(self):
+        """Un 403 de Cloudflare subía hasta el loop y la pasada no alertaba nada."""
+        addresses = [f"A{i}" for i in range(MAX_ADDRESSES_PER_CALL + 1)]
+        session = _FakeSession(
+            _FakeResponse(403), _FakeResponse(200, [{"chainId": "solana", "id": 9}])
+        )
+        pairs = await DexScreenerClient(session).get_pairs_for_tokens("solana", addresses)
+        self.assertEqual(pairs, [{"chainId": "solana", "id": 9}])
+
+    async def test_cuerpo_no_json_en_un_lote_no_corta_los_siguientes(self):
+        addresses = [f"A{i}" for i in range(MAX_ADDRESSES_PER_CALL + 1)]
+        session = _FakeSession(
+            _FakeResponse(200, ValueError("<html>")),
+            _FakeResponse(200, [{"chainId": "solana", "id": 9}]),
+        )
+        pairs = await DexScreenerClient(session).get_pairs_for_tokens("solana", addresses)
+        self.assertEqual(pairs, [{"chainId": "solana", "id": 9}])
+
     async def test_lote_sin_datos_no_corta_los_siguientes(self):
         addresses = [f"A{i}" for i in range(MAX_ADDRESSES_PER_CALL + 1)]
         session = _FakeSession(
@@ -223,6 +255,119 @@ class TestGetPairsForTokens(ScreenerTestCase):
         )
         pairs = await DexScreenerClient(session).get_pairs_for_tokens("solana", addresses)
         self.assertEqual(pairs, [{"chainId": "solana", "id": 9}])
+
+
+class TestGeckoSpacing(ScreenerTestCase):
+    async def test_requests_seguidos_a_gecko_se_espacian(self):
+        session = _FakeSession(_FakeResponse(200, {}), _FakeResponse(200, {}))
+        client = DexScreenerClient(session)
+        await client._gecko_get("/a")
+        self.sleep.assert_not_awaited()
+        await client._gecko_get("/b")
+        self.sleep.assert_awaited_once()
+        self.assertGreater(self.sleep.await_args.args[0], 0)
+        self.assertLessEqual(self.sleep.await_args.args[0], GECKO_REQUEST_INTERVAL_SECONDS)
+
+    async def test_429_de_gecko_espera_la_ventana_del_minuto(self):
+        """Con backoff de 2s/4s/8s los reintentos caían en la misma ventana,
+        daban 429 igual y la verificación se quedaba sin velas."""
+        session = _FakeSession(_FakeResponse(429), _FakeResponse(200, {"ok": 1}))
+        self.assertEqual(await DexScreenerClient(session)._gecko_get("/a"), {"ok": 1})
+        self.assertEqual(
+            [call.args[0] for call in self.sleep.await_args_list], [GECKO_RATE_LIMIT_WAIT_SECONDS]
+        )
+
+    async def test_5xx_de_gecko_mantiene_el_backoff_corto(self):
+        session = _FakeSession(_FakeResponse(502), _FakeResponse(200, {}))
+        await DexScreenerClient(session)._gecko_get("/a")
+        self.assertEqual([call.args[0] for call in self.sleep.await_args_list], [2.0])
+
+    async def test_429_de_gecko_agota_sus_propios_reintentos(self):
+        session = _FakeSession(*[_FakeResponse(429)] * (GECKO_MAX_RETRIES + 1))
+        self.assertIsNone(await DexScreenerClient(session)._gecko_get("/a"))
+        self.assertEqual(len(session.urls), GECKO_MAX_RETRIES + 1)
+
+
+def _gecko_pool(address, base, quote, base_price, quote_price, reserve):
+    return {
+        "id": f"solana_{address}",
+        "attributes": {
+            "address": address,
+            "base_token_price_usd": base_price,
+            "quote_token_price_usd": quote_price,
+            "reserve_in_usd": reserve,
+        },
+        "relationships": {
+            "base_token": {"data": {"id": f"solana_{base}"}},
+            "quote_token": {"data": {"id": f"solana_{quote}"}},
+        },
+    }
+
+
+class TestGetGeckoPools(ScreenerTestCase):
+    async def test_indexa_por_pool_y_precios_por_token(self):
+        payload = {"data": [_gecko_pool("P1", "MEME", "SOL", "0.000296", "150.5", "53158.68")]}
+        session = _FakeSession(_FakeResponse(200, payload))
+        pools = await DexScreenerClient(session).get_gecko_pools("solana", ["P1", "P2"])
+        self.assertTrue(session.urls[0].endswith("/networks/solana/pools/multi/P1,P2"))
+        self.assertEqual(
+            pools,
+            {"P1": {"reserve_usd": 53158.68, "token_prices": {"MEME": 0.000296, "SOL": 150.5}}},
+        )
+
+    async def test_direcciones_evm_normalizadas(self):
+        payload = {"data": [_gecko_pool("0xABc", "0xDeF", "0x111", "1", "2", "3")]}
+        session = _FakeSession(_FakeResponse(200, payload))
+        pools = await DexScreenerClient(session).get_gecko_pools("ethereum", ["0xABc"])
+        self.assertIn("/networks/eth/", session.urls[0])
+        self.assertEqual(set(pools), {"0xabc"})
+        self.assertIn("0xdef", pools["0xabc"]["token_prices"])
+
+    async def test_4xx_devuelve_vacio(self):
+        session = _FakeSession(_FakeResponse(404))
+        self.assertEqual(await DexScreenerClient(session).get_gecko_pools("solana", ["P"]), {})
+
+    async def test_forma_inesperada_no_rompe(self):
+        payload = {"data": ["basura", {"attributes": None}, {"attributes": {}, "relationships": {}}]}
+        session = _FakeSession(_FakeResponse(200, payload))
+        self.assertEqual(await DexScreenerClient(session).get_gecko_pools("solana", ["P"]), {})
+
+    async def test_lotes_de_30(self):
+        addresses = [f"P{i}" for i in range(GECKO_MAX_POOLS_PER_CALL + 1)]
+        session = _FakeSession(_FakeResponse(200, {"data": []}), _FakeResponse(200, {"data": []}))
+        await DexScreenerClient(session).get_gecko_pools("solana", addresses)
+        self.assertEqual(len(session.urls), 2)
+
+
+class TestGetPoolCandles(ScreenerTestCase):
+    async def test_ordena_de_la_mas_vieja_a_la_mas_nueva(self):
+        payload = {
+            "data": {
+                "attributes": {
+                    "ohlcv_list": [
+                        [120, 3, 3, 3, 3, 10],
+                        [60, "2", 2, 2, 2, 10],
+                        "basura",
+                        [0, 1, 1, 1],
+                    ]
+                }
+            }
+        }
+        session = _FakeSession(_FakeResponse(200, payload))
+        candles = await DexScreenerClient(session).get_pool_candles("solana", "P", "MEME", 60)
+        self.assertEqual(candles, [(60.0, 2.0, 2.0, 2.0, 2.0), (120.0, 3.0, 3.0, 3.0, 3.0)])
+        self.assertIn("/networks/solana/pools/P/ohlcv/minute?", session.urls[0])
+        self.assertIn("limit=60", session.urls[0])
+        # Precio del token pedido aunque GeckoTerminal oriente el par al revés.
+        self.assertIn("token=MEME", session.urls[0])
+
+    async def test_error_devuelve_vacio(self):
+        for response in (_FakeResponse(404), _FakeResponse(200, {"data": None})):
+            with self.subTest(status=response.status):
+                session = _FakeSession(response)
+                self.assertEqual(
+                    await DexScreenerClient(session).get_pool_candles("solana", "P", "M", 60), []
+                )
 
 
 if __name__ == "__main__":

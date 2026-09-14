@@ -128,6 +128,37 @@ class TestConfigValidation(unittest.TestCase):
         with self.assertRaises(ValueError):
             Config(chain_id="")
 
+    def test_tipo_invalido_da_error_de_config(self):
+        """`poll_interval_seconds = "90"` tiraba un TypeError crudo que run.py
+        no captura, en vez de un error de configuración."""
+        casos = {
+            "poll_interval_seconds": "90",
+            "top_n_candidates": 1.5,
+            "geckoterminal_pages": True,
+            "verbose": "si",
+            "telegram_message_thread_id": "123",
+        }
+        for campo, valor in casos.items():
+            with self.subTest(campo=campo), self.assertRaises(ValueError):
+                Config(**{campo: valor})
+
+    def test_float_en_campos_numericos_es_valido(self):
+        Config(poll_interval_seconds=30.5, alert_cooldown_minutes=0.5)
+
+    def test_filtros_anti_manipulacion_fuera_de_rango_dan_error(self):
+        casos = {
+            "min_sell_ratio_h1": 1.5,
+            "max_candle_drop_pct": 150.0,
+            "max_avg_trade_usd": -1.0,
+            "max_price_change_h1_pct": -1.0,
+            "max_price_deviation_pct": -1.0,
+            "min_txns_h1": -1,
+            "verify_before_alert": "si",
+        }
+        for campo, valor in casos.items():
+            with self.subTest(campo=campo), self.assertRaises(ValueError):
+                Config(**{campo: valor})
+
 
 class TestFromToml(unittest.TestCase):
     def _write(self, contenido: str) -> Path:
@@ -153,6 +184,39 @@ class TestFromToml(unittest.TestCase):
         self.assertTrue(config.verbose)
         self.assertIsNone(config.telegram_message_thread_id)
         self.assertEqual(config.poll_interval_seconds, 90)
+
+    def test_clave_desconocida_avisa(self):
+        # Un typo se ignoraba en silencio y se usaba el default.
+        with self.assertLogs(level=logging.WARNING) as logs:
+            config = Config.from_toml(self._write("[dexscreener]\nmin_liquidty_usd = 1\n"))
+        self.assertIn("min_liquidty_usd", "".join(logs.output))
+        self.assertEqual(config.min_liquidity_usd, Config().min_liquidity_usd)
+
+    def test_seccion_desconocida_avisa(self):
+        with self.assertLogs(level=logging.WARNING) as logs:
+            Config.from_toml(self._write("[telegrm]\nbot_token = 't'\n"))
+        self.assertIn("telegrm", "".join(logs.output))
+
+    def test_seccion_que_no_es_tabla_da_error(self):
+        with self.assertRaises(ValueError):
+            Config.from_toml(self._write("radar = 5\n"))
+
+    def test_lee_los_filtros_anti_manipulacion(self):
+        config = Config.from_toml(
+            self._write(
+                "[dexscreener]\nmin_txns_h1 = 100\nmax_avg_trade_usd = 0\n"
+                "[geckoterminal]\nverify_before_alert = false\nmax_candle_drop_pct = 20.0\n"
+            )
+        )
+        self.assertEqual(config.min_txns_h1, 100)
+        self.assertEqual(config.max_avg_trade_usd, 0)
+        self.assertFalse(config.verify_before_alert)
+        self.assertEqual(config.max_candle_drop_pct, 20.0)
+        self.assertEqual(config.max_price_deviation_pct, Config().max_price_deviation_pct)
+
+    def test_chat_id_numerico_se_acepta_como_str(self):
+        config = Config.from_toml(self._write("[telegram]\nchat_id = -100123\n"))
+        self.assertEqual(config.telegram_chat_id, "-100123")
 
     def test_ejemplo_del_repo_es_valido(self):
         # config.example.toml es lo que copia el usuario: tiene que parsear.

@@ -5,6 +5,8 @@ pura y el Bot nunca se inicializa."""
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from telegram.error import RetryAfter
+
 from sigpump.telegram import TelegramAlerter
 
 TOKEN_FALSO = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
@@ -183,6 +185,22 @@ class TestLifecycle(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["chat_id"], "-100123")
         self.assertIn("Score: <b>91.0</b>/100", kwargs["text"])
         self.assertTrue(kwargs["disable_web_page_preview"])
+
+    async def test_flood_control_espera_y_reintenta_una_vez(self):
+        alerter = self._con_bot_falso()
+        alerter._bot.send_message.side_effect = [RetryAfter(3), None]
+        with patch("sigpump.telegram.asyncio.sleep", new=AsyncMock()) as sleep:
+            await alerter.send(_pair(), 91.0)
+        sleep.assert_awaited_once_with(3.0)
+        self.assertEqual(alerter._bot.send_message.await_count, 2)
+
+    async def test_flood_control_demasiado_largo_no_bloquea_el_radar(self):
+        alerter = self._con_bot_falso()
+        alerter._bot.send_message.side_effect = RetryAfter(3600)
+        with patch("sigpump.telegram.asyncio.sleep", new=AsyncMock()) as sleep:
+            with self.assertRaises(RetryAfter):
+                await alerter.send(_pair(), 91.0)
+        sleep.assert_not_awaited()
 
 
 if __name__ == "__main__":

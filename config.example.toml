@@ -7,11 +7,29 @@ min_volume_h1_usd = 2000.0
 min_market_cap_usd = 0.0
 # Descarta pares recién creados (mayor riesgo de rug pull). 0 = sin filtro de edad.
 min_pair_age_minutes = 60.0
+# Mínimo de transacciones (compras + ventas) en la última hora.
+min_txns_h1 = 50
+# Fracción mínima de ventas sobre el total de txns en 1h (0-1). Casi sin
+# ventas suele ser un honeypot o un pump coordinado. 0 = sin filtro.
+min_sell_ratio_h1 = 0.1
+# Tamaño medio máximo por trade (volumen 1h / txns 1h). Mucho volumen en
+# pocas operaciones delata wash trading o un precio mal calculado. 0 = sin filtro.
+max_avg_trade_usd = 5000.0
+# Subida máxima de precio en 1h, en %. Miles de % suele ser precio roto o
+# manipulado. 0 = sin filtro.
+max_price_change_h1_pct = 1000.0
 
 [geckoterminal]
 # Páginas del ranking de pools trending de GeckoTerminal a sumar como
 # candidatos (20 pools por página, máximo 10). 0 = no usar esta fuente.
 trending_pages = 5
+# Antes de alertar, contrasta el par con GeckoTerminal (precio, liquidez y
+# velas de 1 min). Si no se puede verificar, no se alerta en esa pasada.
+verify_before_alert = true
+# Diferencia máxima de precio entre DexScreener y GeckoTerminal, en %. 0 = sin filtro.
+max_price_deviation_pct = 50.0
+# Caída máxima dentro de una vela de 1 minuto en la última hora, en %. 0 = sin filtro.
+max_candle_drop_pct = 30.0
 
 [radar]
 poll_interval_seconds = 90

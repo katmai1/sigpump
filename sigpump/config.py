@@ -11,9 +11,83 @@ import tomllib
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 
-from sigpump.util import to_float
+from sigpump.util import normalize_address, to_float
 
 log = logging.getLogger()
+
+# Claves válidas por sección del TOML. scoring_weights no figura porque la
+# valida ScoringWeights.from_raw (con error, no aviso).
+_KNOWN_KEYS: dict[str, set[str]] = {
+    "dexscreener": {
+        "chain_id",
+        "min_liquidity_usd",
+        "min_volume_h1_usd",
+        "min_market_cap_usd",
+        "min_pair_age_minutes",
+        "min_txns_h1",
+        "min_sell_ratio_h1",
+        "max_avg_trade_usd",
+        "max_price_change_h1_pct",
+    },
+    "geckoterminal": {
+        "trending_pages",
+        "verify_before_alert",
+        "max_price_deviation_pct",
+        "max_candle_drop_pct",
+    },
+    "radar": {
+        "poll_interval_seconds",
+        "alert_cooldown_minutes",
+        "score_alert_threshold",
+        "top_n_candidates",
+        "verbose",
+    },
+    "telegram": {"bot_token", "chat_id", "message_thread_id"},
+}
+
+_NUMBER = (int, float)
+# Campo de Config -> (nombre en el TOML, tipos aceptados).
+_FIELD_TYPES: dict[str, tuple[str, tuple[type, ...]]] = {
+    "chain_id": ("[dexscreener].chain_id", (str,)),
+    "poll_interval_seconds": ("[radar].poll_interval_seconds", _NUMBER),
+    "alert_cooldown_minutes": ("[radar].alert_cooldown_minutes", _NUMBER),
+    "min_liquidity_usd": ("[dexscreener].min_liquidity_usd", _NUMBER),
+    "min_volume_h1_usd": ("[dexscreener].min_volume_h1_usd", _NUMBER),
+    "min_market_cap_usd": ("[dexscreener].min_market_cap_usd", _NUMBER),
+    "min_pair_age_minutes": ("[dexscreener].min_pair_age_minutes", _NUMBER),
+    "min_txns_h1": ("[dexscreener].min_txns_h1", _NUMBER),
+    "min_sell_ratio_h1": ("[dexscreener].min_sell_ratio_h1", _NUMBER),
+    "max_avg_trade_usd": ("[dexscreener].max_avg_trade_usd", _NUMBER),
+    "max_price_change_h1_pct": ("[dexscreener].max_price_change_h1_pct", _NUMBER),
+    "score_alert_threshold": ("[radar].score_alert_threshold", _NUMBER),
+    # Se usan como índice de slice y en range(): tienen que ser enteros.
+    "top_n_candidates": ("[radar].top_n_candidates", (int,)),
+    "geckoterminal_pages": ("[geckoterminal].trending_pages", (int,)),
+    "verify_before_alert": ("[geckoterminal].verify_before_alert", (bool,)),
+    "max_price_deviation_pct": ("[geckoterminal].max_price_deviation_pct", _NUMBER),
+    "max_candle_drop_pct": ("[geckoterminal].max_candle_drop_pct", _NUMBER),
+    "verbose": ("[radar].verbose", (bool,)),
+    "telegram_bot_token": ("[telegram].bot_token", (str,)),
+    "telegram_chat_id": ("[telegram].chat_id", (str,)),
+    "telegram_message_thread_id": ("[telegram].message_thread_id", (int, type(None))),
+}
+
+
+def _section(raw: dict, name: str) -> dict:
+    """Sección `name` del TOML, avisando de claves desconocidas: un typo como
+    `min_liquidty_usd` se ignoraba en silencio y se usaba el default."""
+    section = raw.get(name, {})
+    if not isinstance(section, dict):
+        raise ValueError(f"[{name}] debe ser una sección (tabla), no {section!r}")
+    unknown = sorted(set(section) - _KNOWN_KEYS[name])
+    if unknown:
+        log.warning(
+            "Claves desconocidas en [%s], se ignoran: %s. Válidas: %s",
+            name,
+            ", ".join(unknown),
+            ", ".join(sorted(_KNOWN_KEYS[name])),
+        )
+    return section
 
 
 @dataclass
@@ -82,9 +156,16 @@ class Config:
     min_volume_h1_usd: float = 2_000.0
     min_market_cap_usd: float = 0.0
     min_pair_age_minutes: float = 60.0
+    min_txns_h1: float = 50
+    min_sell_ratio_h1: float = 0.1
+    max_avg_trade_usd: float = 5_000.0
+    max_price_change_h1_pct: float = 1_000.0
     score_alert_threshold: float = 70.0
     top_n_candidates: int = 200
     geckoterminal_pages: int = 5
+    verify_before_alert: bool = True
+    max_price_deviation_pct: float = 50.0
+    max_candle_drop_pct: float = 30.0
     verbose: bool = False
     weights: ScoringWeights = field(default_factory=ScoringWeights)
     telegram_bot_token: str = ""
@@ -94,6 +175,13 @@ class Config:
     def __post_init__(self) -> None:
         """Valida los rangos apenas se construye el Config, para que un TOML
         inconsistente falle al arrancar y no a mitad de una pasada."""
+        # Tipos primero: con `poll_interval_seconds = "90"` la comparación de
+        # abajo tiraba un TypeError crudo en vez de un error de configuración.
+        for name, (toml_name, types) in _FIELD_TYPES.items():
+            value = getattr(self, name)
+            # bool es subclase de int: `top_n_candidates = true` no es un número.
+            if not isinstance(value, types) or (isinstance(value, bool) and bool not in types):
+                raise ValueError(f"{toml_name} tiene un tipo inválido: {value!r}")
         if not self.chain_id:
             raise ValueError("[dexscreener].chain_id no puede estar vacío")
         if self.poll_interval_seconds <= 0:
@@ -114,12 +202,26 @@ class Config:
                 f"[radar].score_alert_threshold debe estar entre 0 y 100 "
                 f"({self.score_alert_threshold})"
             )
+        if not 0 <= self.min_sell_ratio_h1 <= 1:
+            raise ValueError(
+                f"[dexscreener].min_sell_ratio_h1 debe estar entre 0 y 1 "
+                f"({self.min_sell_ratio_h1})"
+            )
+        if not 0 <= self.max_candle_drop_pct <= 100:
+            raise ValueError(
+                f"[geckoterminal].max_candle_drop_pct debe estar entre 0 y 100 "
+                f"({self.max_candle_drop_pct})"
+            )
         for name in (
             "alert_cooldown_minutes",
             "min_liquidity_usd",
             "min_volume_h1_usd",
             "min_market_cap_usd",
             "min_pair_age_minutes",
+            "min_txns_h1",
+            "max_avg_trade_usd",
+            "max_price_change_h1_pct",
+            "max_price_deviation_pct",
         ):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} no puede ser negativo ({getattr(self, name)})")
@@ -136,11 +238,22 @@ class Config:
             raw = tomllib.load(f)
 
         # Cada sección del TOML se mapea a un grupo de campos de Config.
-        radar = raw.get("radar", {})
-        dexscreener = raw.get("dexscreener", {})
-        geckoterminal = raw.get("geckoterminal", {})
-        telegram = raw.get("telegram", {})
+        unknown_sections = sorted(set(raw) - set(_KNOWN_KEYS) - {"scoring_weights"})
+        if unknown_sections:
+            log.warning("Secciones desconocidas en el TOML, se ignoran: %s", ", ".join(unknown_sections))
+        radar = _section(raw, "radar")
+        dexscreener = _section(raw, "dexscreener")
+        geckoterminal = _section(raw, "geckoterminal")
+        telegram = _section(raw, "telegram")
         weights_raw = raw.get("scoring_weights", {})
+        if not isinstance(weights_raw, dict):
+            raise ValueError(f"[scoring_weights] debe ser una sección (tabla), no {weights_raw!r}")
+
+        chat_id = telegram.get("chat_id", "")
+        # Los chat_id son números (-100123...) y es natural escribirlos sin
+        # comillas; Telegram acepta ambos, así que se normaliza a str.
+        if isinstance(chat_id, int) and not isinstance(chat_id, bool):
+            chat_id = str(chat_id)
 
         return cls(
             chain_id=dexscreener.get("chain_id", "solana"),
@@ -150,15 +263,22 @@ class Config:
             min_volume_h1_usd=dexscreener.get("min_volume_h1_usd", 2_000.0),
             min_market_cap_usd=dexscreener.get("min_market_cap_usd", 0.0),
             min_pair_age_minutes=dexscreener.get("min_pair_age_minutes", 60.0),
+            min_txns_h1=dexscreener.get("min_txns_h1", 50),
+            min_sell_ratio_h1=dexscreener.get("min_sell_ratio_h1", 0.1),
+            max_avg_trade_usd=dexscreener.get("max_avg_trade_usd", 5_000.0),
+            max_price_change_h1_pct=dexscreener.get("max_price_change_h1_pct", 1_000.0),
             score_alert_threshold=radar.get("score_alert_threshold", 70.0),
             top_n_candidates=radar.get("top_n_candidates", 200),
             geckoterminal_pages=geckoterminal.get("trending_pages", 5),
+            verify_before_alert=geckoterminal.get("verify_before_alert", True),
+            max_price_deviation_pct=geckoterminal.get("max_price_deviation_pct", 50.0),
+            max_candle_drop_pct=geckoterminal.get("max_candle_drop_pct", 30.0),
             verbose=radar.get("verbose", False),
             # from_raw solo cubre las claves presentes en el TOML; el resto
             # toma los defaults de ScoringWeights.
             weights=ScoringWeights.from_raw(weights_raw),
             telegram_bot_token=telegram.get("bot_token", ""),
-            telegram_chat_id=telegram.get("chat_id", ""),
+            telegram_chat_id=chat_id,
             telegram_message_thread_id=telegram.get("message_thread_id"),
         )
 
@@ -185,7 +305,7 @@ def score_pair(pair: dict, weights: ScoringWeights, boosted_addresses: set[str])
     price_change_h1 = to_float((pair.get("priceChange") or {}).get("h1"))
     price_change_h6 = to_float((pair.get("priceChange") or {}).get("h6"))
     liquidity_usd = to_float((pair.get("liquidity") or {}).get("usd"))
-    token_address = (pair.get("baseToken") or {}).get("address", "")
+    token_address = normalize_address((pair.get("baseToken") or {}).get("address", ""))
     is_boosted = token_address in boosted_addresses
 
     # Normalizaciones simples: cada métrica se lleva a una escala 0-100 antes

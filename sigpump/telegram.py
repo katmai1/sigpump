@@ -5,12 +5,21 @@ Formatea y envía la alerta de un par de mercado como mensaje de Telegram
 (HTML) usando python-telegram-bot.
 """
 
+import asyncio
 import html
+import warnings
+from datetime import timedelta
 
 from telegram import Bot  # type: ignore[import-not-found]
 from telegram.constants import ParseMode  # type: ignore[import-not-found]
+from telegram.error import RetryAfter  # type: ignore[import-not-found]
+from telegram.warnings import PTBDeprecationWarning  # type: ignore[import-not-found]
 
 from sigpump.util import to_float
+
+# Espera máxima aceptable ante flood control. Más que esto bloquearía el
+# loop del radar demasiado tiempo: se deja fallar y se reintenta la próxima pasada.
+MAX_RETRY_AFTER_SECONDS = 60.0
 
 
 class TelegramAlerter:
@@ -86,10 +95,31 @@ class TelegramAlerter:
 
     async def send(self, pair: dict, score: float) -> None:
         """Arma y envía el mensaje de alerta para `pair` con su `score` ya calculado."""
-        await self._bot.send_message(
+        kwargs = dict(
             chat_id=self._chat_id,
             text=self.format_message(pair, score),
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
             message_thread_id=self._message_thread_id,
         )
+        try:
+            await self._bot.send_message(**kwargs)
+        except RetryAfter as exc:
+            # Flood control (~20 mensajes/min en grupos), típico cuando salen
+            # varias alertas juntas al arrancar. Se espera lo que pide Telegram
+            # y se reintenta una vez; antes la alerta se perdía hasta la
+            # próxima pasada.
+            # PTB avisa que retry_after pasará de int a timedelta; se soportan
+            # ambos, así que el aviso solo ensuciaría el log.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", PTBDeprecationWarning)
+                retry_after = exc.retry_after
+            seconds = (
+                retry_after.total_seconds()
+                if isinstance(retry_after, timedelta)
+                else float(retry_after)
+            )
+            if seconds > MAX_RETRY_AFTER_SECONDS:
+                raise
+            await asyncio.sleep(seconds)
+            await self._bot.send_message(**kwargs)

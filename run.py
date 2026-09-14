@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
+import signal
 import tomllib
 from pathlib import Path
 
@@ -23,12 +25,41 @@ def _setup_logging(verbose: bool) -> None:
     """Logging a stdout; nivel DEBUG si radar.verbose=true en el TOML, si no INFO."""
     logging.basicConfig(
         format="[%(asctime)s][%(levelname)s] %(message)s",
-        datefmt="%H:%M:%S",
+        # Con fecha: el proceso corre días y con solo la hora los logs son ambiguos.
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
     # basicConfig ignora `level` si ya hay handlers configurados, así que el
     # nivel se aplica siempre acá: _setup_logging se llama dos veces (antes y
     # después de leer el TOML, para que un error de config ya salga formateado).
     log.setLevel(logging.DEBUG if verbose else logging.INFO)
+    # httpx (lo usa python-telegram-bot) loguea en INFO cada request con la
+    # URL completa, que incluye el token del bot: api.telegram.org/bot<token>/...
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+async def _run_until_sigterm(radar: MemecoinRadar) -> None:
+    """Corre el radar y, ante SIGTERM (systemd/Docker stop), cancela la tarea
+    para que los `async with` de radar.run() cierren la sesión HTTP y el bot.
+    Sin esto el proceso moría sin llamar a bot.shutdown()."""
+    task = asyncio.current_task()
+    assert task is not None
+    stopped_by_sigterm = False
+
+    def _on_sigterm() -> None:
+        nonlocal stopped_by_sigterm
+        stopped_by_sigterm = True
+        log.info("SIGTERM recibido, deteniendo el radar...")
+        task.cancel()
+
+    # add_signal_handler no existe en Windows: ahí se mantiene el comportamiento anterior.
+    with contextlib.suppress(NotImplementedError):
+        asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, _on_sigterm)
+    try:
+        await radar.run()
+    except asyncio.CancelledError:
+        # Una cancelación que no vino de SIGTERM (p. ej. Ctrl+C) sigue su curso.
+        if not stopped_by_sigterm:
+            raise
 
 
 def main() -> None:
@@ -55,7 +86,7 @@ def main() -> None:
     radar = MemecoinRadar(config)
 
     try:
-        asyncio.run(radar.run())
+        asyncio.run(_run_until_sigterm(radar))
     except KeyboardInterrupt:
         log.info("Interrupción recibida, deteniendo el radar...")
     except Exception:

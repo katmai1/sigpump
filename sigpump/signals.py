@@ -63,32 +63,75 @@ class EarlySignal:
 
 @dataclass(frozen=True)
 class CandleStats:
-    """Posición del último precio dentro de la ventana de velas, en %."""
-    # Cuánto está por encima del mínimo de toda la ventana.
+    """Qué había pasado en las velas hasta la señal: dónde está el último
+    precio y cómo venía la subida."""
+    # Cuánto está el último precio por encima del mínimo de toda la ventana, en %.
     rise_from_low_pct: float
-    # Cuánto está por debajo del máximo de los últimos RECENT_HIGH_MINUTES.
+    # Cuánto está por debajo del máximo de los últimos RECENT_HIGH_MINUTES, en %.
     drop_from_recent_high_pct: float
+    # Cuánto está por encima del mínimo de los últimos RISE_WINDOW_MINUTES, en %.
+    rise_15m_pct: float = 0.0
+    # Velas alcistas seguidas al final (cierre > apertura).
+    green_streak: int = 0
+    # Volumen de las TREND_CANDLES últimas velas sobre el de las anteriores.
+    # Alto: el volumen acaba de explotar (típico de un mini pump); cerca de 1:
+    # venía sostenido. None si las velas no traen volumen.
+    volume_trend: float | None = None
+    # Mecha superior media de las TREND_CANDLES últimas velas, como fracción
+    # de su rango (0-1).
+    upper_wick: float = 0.0
 
 
-def candle_stats(candles: list[tuple[float, float, float, float, float]]) -> CandleStats | None:
+# Ventana de la subida reciente, en minutos.
+RISE_WINDOW_MINUTES = 15
+# Velas que se comparan para la tendencia del volumen y la mecha.
+TREND_CANDLES = 3
+
+
+def candle_stats(candles: list[tuple[float, ...]], until: float | None = None) -> CandleStats | None:
     """
-    CandleStats de velas (timestamp, open, high, low, close) ordenadas de la
-    más vieja a la más nueva, tomando como precio actual el cierre de la
-    última. La ventana reciente se mide por timestamp y no por cantidad de
-    velas porque GeckoTerminal omite los minutos sin trades. None sin velas
-    o sin precios válidos.
+    CandleStats de velas (timestamp, open, high, low, close[, volume])
+    ordenadas de la más vieja a la más nueva, tomando como precio actual el
+    cierre de la última. Con `until`, solo cuentan las velas ya cerradas en
+    ese momento: lo que se sabía al dar la señal. Las ventanas se miden por
+    timestamp y no por cantidad de velas porque GeckoTerminal omite los
+    minutos sin trades. None sin velas o sin precios válidos.
     """
+    if until is not None:
+        candles = [c for c in candles if c[0] + 60 <= until]
     if not candles:
         return None
     last_ts, close = candles[-1][0], candles[-1][4]
-    lows = [low for _, _, _, low, _ in candles if low > 0]
+    lows = [c[3] for c in candles if c[3] > 0]
     recent_highs = [
-        high for ts, _, high, _, _ in candles
-        if ts >= last_ts - RECENT_HIGH_MINUTES * 60 and high > 0
+        c[2] for c in candles if c[0] >= last_ts - RECENT_HIGH_MINUTES * 60 and c[2] > 0
+    ]
+    recent_lows = [
+        c[3] for c in candles if c[0] >= last_ts - RISE_WINDOW_MINUTES * 60 and c[3] > 0
     ]
     if close <= 0 or not lows or not recent_highs:
         return None
+
+    green_streak = 0
+    for candle in reversed(candles):
+        if candle[4] <= candle[1]:
+            break
+        green_streak += 1
+
+    last = candles[-TREND_CANDLES:]
+    previous = candles[-2 * TREND_CANDLES:-TREND_CANDLES]
+    volume_trend = None
+    if len(previous) == TREND_CANDLES and all(len(c) > 5 for c in last + previous):
+        previous_volume = sum(c[5] for c in previous)
+        if previous_volume > 0:
+            volume_trend = sum(c[5] for c in last) / previous_volume
+    wicks = [(c[2] - max(c[1], c[4])) / (c[2] - c[3]) for c in last if c[2] > c[3]]
+
     return CandleStats(
         rise_from_low_pct=max(0.0, (close / min(lows) - 1) * 100),
         drop_from_recent_high_pct=max(0.0, (1 - close / max(recent_highs)) * 100),
+        rise_15m_pct=max(0.0, (close / min(recent_lows) - 1) * 100) if recent_lows else 0.0,
+        green_streak=green_streak,
+        volume_trend=volume_trend,
+        upper_wick=sum(wicks) / len(wicks) if wicks else 0.0,
     )

@@ -17,6 +17,7 @@ from sigpump.radar import (
     MemecoinRadar,
     _max_candle_drop_pct,
 )
+from sigpump.tracker import AlertTracker
 
 
 def _pair(address, liquidity=100_000, volume=50_000, change=50, created_at=None, symbol="X"):
@@ -458,6 +459,9 @@ class TestMaxCandleDrop(unittest.TestCase):
     def test_usa_el_cierre_anterior_si_abrio_mas_arriba(self):
         velas = [_vela(0, 90, 200, 90, 200), _vela(60, 120, 120, 100, 110)]
         self.assertEqual(_max_candle_drop_pct(velas), 50.0)
+
+    def test_acepta_velas_con_volumen(self):
+        self.assertEqual(_max_candle_drop_pct([(0.0, 100.0, 100.0, 50.0, 98.0, 1234.0)]), 50.0)
 
     def test_sin_velas_da_cero(self):
         self.assertEqual(_max_candle_drop_pct([]), 0.0)
@@ -952,7 +956,7 @@ class TestPrealertas(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(rows[0]["arranque_pct"], 10.0)
 
     def test_prune_limpia_el_cooldown_de_prealertas(self):
-        radar = MemecoinRadar(_config(early_cooldown_minutes=30))
+        radar = MemecoinRadar(_config(early_cooldown_minutes=30, early_suppress_alert_minutes=30))
         radar._early_alerted = {"VIEJO": time.time() - 3600, "NUEVO": time.time()}
         radar._prune_alerted()
         self.assertEqual(list(radar._early_alerted), ["NUEVO"])
@@ -965,6 +969,153 @@ class TestPrealertas(unittest.IsolatedAsyncioTestCase):
                 await MemecoinRadar._loop(paso, "client", "alerter", 30, "Error")
         self.assertEqual(paso.await_count, 2)
         self.assertEqual(sleep.await_args_list[0].args, (30,))
+
+
+class TestSilenciarYMedir(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        logging.disable(logging.CRITICAL)
+        self.addCleanup(logging.disable, logging.NOTSET)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = Path(tmp.name) / "alertas.db"
+
+    def _rows(self):
+        conn = sqlite3.connect(self.path)
+        conn.row_factory = sqlite3.Row
+        try:
+            return [dict(r) for r in conn.execute("SELECT * FROM alertas ORDER BY id")]
+        finally:
+            conn.close()
+
+    def _radar(self, **kwargs):
+        radar = MemecoinRadar(_config(alert_log_path=str(self.path), **kwargs))
+        self.addCleanup(radar._tracker.close)
+        return radar
+
+    def _con_base_tranquila(self, radar):
+        now = time.time()
+        for minutos in (10, 7):
+            radar._history.observe(_tranquilo(), now - minutos * 60)
+        radar._watchlist = ["TOK"]
+
+    async def _scan(self, radar, pair, alerter=None):
+        client = _FakeClient(latest=[{"chainId": "solana", "tokenAddress": "TOK"}], pairs=[pair])
+        alerter = alerter or _FakeAlerter()
+        await radar._scan_once(client, alerter)
+        return alerter, client
+
+    async def test_alerta_omitida_si_hubo_prealerta(self):
+        """Las 8 alertas completas que llegaron después de una prealerta del
+        mismo token cayeron a 15 min: la subida ya la había cazado la prealerta."""
+        radar = self._radar()
+        radar._early_alerted["TOK"] = time.time() - 10 * 60
+        alerter = _FakeAlerter()
+        for _ in range(2):
+            await self._scan(radar, _pair_verificable(), alerter)
+        self.assertEqual(alerter.sent, [])
+        rows = self._rows()
+        self.assertEqual([(r["enviada"], r["tipo"]) for r in rows], [(0, "alerta")])
+        self.assertEqual(rows[0]["motivo_descarte"], "prealerta hace 10 min")
+
+    async def test_prealerta_vieja_o_silencio_apagado_no_omiten(self):
+        casos = (
+            (dict(), time.time() - 400 * 60),
+            (dict(early_suppress_alert_minutes=0.0), time.time() - 60),
+        )
+        for kwargs, ts in casos:
+            with self.subTest(kwargs=kwargs):
+                radar = MemecoinRadar(_config(**kwargs))
+                radar._early_alerted["TOK"] = ts
+                alerter, _ = await self._scan(radar, _pair_verificable())
+                self.assertEqual(len(alerter.sent), 1)
+
+    def test_prune_conserva_prealertas_mientras_silencian_alertas(self):
+        radar = MemecoinRadar(_config(early_cooldown_minutes=30, early_suppress_alert_minutes=120))
+        radar._early_alerted = {"TOK": time.time() - 3600}
+        radar._prune_alerted()
+        self.assertFalse(radar._early_cooldown_active("TOK"))
+        self.assertTrue(radar._prealert_suppresses("TOK"))
+
+    def test_reinicio_recupera_los_cooldowns(self):
+        tracker = AlertTracker(self.path)
+        tracker.record(_pair_verificable("PRE"), 50.0, None, sent=True, kind="prealerta")
+        tracker.record(_pair_verificable("ALE"), 80.0, None, sent=True)
+        tracker.record(_pair_verificable("VIEJA"), 50.0, None, sent=True, kind="prealerta")
+        tracker.record(_pair_verificable("DESC"), 80.0, None, sent=False, reason="tarde")
+        conn = sqlite3.connect(self.path)
+        with conn:
+            conn.execute("UPDATE alertas SET timestamp = timestamp - 7 * 3600 WHERE token = 'VIEJA'")
+        conn.close()
+        tracker.close()
+        radar = self._radar()
+        radar._restore_cooldowns()
+        self.assertEqual(set(radar._early_alerted), {"PRE"})
+        self.assertEqual(set(radar._alerted), {"ALE"})
+        self.assertTrue(radar._early_cooldown_active("PRE"))
+
+    async def test_con_vigilancia_el_precio_se_muestrea_en_la_vigilancia(self):
+        radar = self._radar(watch_enabled=True)
+        radar._tracker.record(_pair_verificable(price="0.01"), 70.0, None, sent=True)
+        conn = sqlite3.connect(self.path)
+        with conn:
+            conn.execute("UPDATE alertas SET timestamp = timestamp - 300")
+        conn.close()
+        client = _FakeClient(pairs=[_pair_verificable(price="0.012")])
+        # La pasada completa ya no lo muestrea...
+        await radar._scan_once(client, _FakeAlerter())
+        self.assertEqual(client.requested, [])
+        # ...la vigilancia sí.
+        await radar._watch_once(client, _FakeAlerter())
+        self.assertEqual(self._rows()[0]["ret_5m_pct"], 20.0)
+
+    async def test_registra_si_el_arranque_se_sostiene(self):
+        radar = self._radar(watch_enabled=True)
+        self._con_base_tranquila(radar)
+        alerter = _FakeAlerter()
+        await radar._watch_once(_FakeClient(pairs=[_arrancando()]), alerter)
+        self.assertEqual(len(alerter.early), 1)
+
+        # ~30 s después, con datos nuevos, el arranque sigue.
+        radar._followups["TOK"]["ts"] -= 30
+        sigue = _arrancando()
+        sigue["volume"]["m5"] = 2_600
+        await radar._watch_once(_FakeClient(pairs=[sigue]), alerter)
+        # ~60 s después ya se apagó.
+        radar._followups["TOK"]["ts"] -= 30
+        await radar._watch_once(_FakeClient(pairs=[_tranquilo()]), alerter)
+
+        row = self._rows()[0]
+        self.assertEqual((row["sostenido_30s"], row["sostenido_60s"]), (1, 0))
+        self.assertNotIn("TOK", radar._followups)
+        # Solo mide: no manda ni quita nada.
+        self.assertEqual(len(alerter.early), 1)
+
+    async def test_mismo_refresco_de_dexscreener_no_cuenta_como_dato_nuevo(self):
+        radar = self._radar(watch_enabled=True)
+        self._con_base_tranquila(radar)
+        await radar._watch_once(_FakeClient(pairs=[_arrancando()]), _FakeAlerter())
+        radar._followups["TOK"]["ts"] -= 40
+        await radar._watch_once(_FakeClient(pairs=[_arrancando()]), _FakeAlerter())
+        self.assertIsNone(self._rows()[0]["sostenido_30s"])
+
+    async def test_completa_las_velas_de_una_prealerta(self):
+        radar = self._radar(watch_enabled=True)
+        self._con_base_tranquila(radar)
+        inicio = time.time() - 30 * 60
+        velas = [(inicio + i * 60, 1.0, 1.01, 0.99, 1.0, 100.0) for i in range(22)]
+        velas += [
+            (inicio + (22 + i) * 60, 1.0 + i * 0.02, 1.03 + i * 0.02, 1.0 + i * 0.02, 1.02 + i * 0.02, 300.0)
+            for i in range(3)
+        ]
+        client = _FakeClient(pairs=[_arrancando()], candles={"POOL_TOK": velas})
+        await radar._watch_once(client, _FakeAlerter())
+        row = self._rows()[0]
+        self.assertEqual(row["tipo"], "prealerta")
+        self.assertEqual(row["velas_verdes_seguidas"], 3)
+        self.assertEqual(row["tendencia_volumen"], 3.0)
+        self.assertEqual(row["mecha_superior"], 0.33)
+        self.assertEqual(row["velas_intentos"], 1)
+        self.assertEqual(len(client.candles_requested), 1)
 
 
 if __name__ == "__main__":

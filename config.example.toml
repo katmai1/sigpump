@@ -71,8 +71,12 @@ min_volume_ratio = 2.5
 min_txns_ratio = 2.0
 # Fracción mínima de compras en las txns de 5 min (0-1).
 min_buy_ratio = 0.55
-# Minutos sin repetir prealerta del mismo token.
-cooldown_minutes = 60
+# Minutos sin repetir prealerta del mismo token. Las repetidas del mismo día
+# rendían mucho peor que la primera (tokens que suben y bajan sin tendencia).
+cooldown_minutes = 360
+# No mandar la alerta completa de un token con prealerta en estos últimos
+# minutos: llegaba con la subida ya hecha. 0 = mandarla igual.
+suppress_alert_minutes = 360
 
 [scoring]
 # Penalización por subida ya hecha: si el cambio de 1h supera start, el score

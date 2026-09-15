@@ -84,6 +84,13 @@ class TestEarlySignal(unittest.TestCase):
             with self.subTest(nombre):
                 self.assertIsNone(self._signal(_historia(12, 9, 6), _arranque(**overrides)))
 
+    def test_sin_tope_de_subida_para_ver_si_se_sostiene(self):
+        history = _historia(12, 9, 6)
+        pair = _arranque(price=1.5)
+        history.observe(pair, AHORA)
+        self.assertIsNone(history.early_signal(pair, AHORA, UMBRALES))
+        self.assertIsNotNone(history.early_signal(pair, AHORA, UMBRALES, check_max_move=False))
+
     def test_precio_de_5m_bajando_no_es_arranque(self):
         # Subió respecto de la base pero ya está cayendo: el arranque fue antes.
         self.assertIsNone(self._signal(_historia(12, 9, 6), _arranque(change_m5=-1)))

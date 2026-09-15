@@ -36,6 +36,20 @@ MAX_EARLY_PER_PASS = 3
 # (p. ej. esperando la ventana de un 429) la prealerta ya no llegaría a
 # tiempo: se reintenta en la próxima vuelta si el arranque sigue.
 EARLY_VERIFY_TIMEOUT_SECONDS = 20.0
+# Medición (no filtra): si el arranque de una prealerta sigue cumpliéndose con
+# los datos de ~30 y ~60 s después. Mide si exigirlo quitaría los mini pumps
+# de 2-3 minutos que llegaban al final. (segundos, columna del registro).
+SUSTAIN_CHECKS = ((30, "sostenido_30s"), (60, "sostenido_60s"))
+# DexScreener refresca cada ~30 s: la foto "de los 30 s" puede llegar unos segundos antes.
+SUSTAIN_CHECK_SLACK_SECONDS = 5
+# Sin datos nuevos en este tiempo se abandona la medición (queda en NULL).
+FOLLOWUP_MAX_SECONDS = 180
+# Rasgos de velas de las señales que no las pidieron al avisar (prealertas y
+# alertas omitidas): se completan después, mientras las velas de antes de la
+# señal sigan dentro de lo que devuelve GeckoTerminal.
+CANDLE_FEATURES_MAX_AGE_MINUTES = 45
+# Tope de espera por esas velas: es solo medición y no debe frenar la vigilancia.
+CANDLE_FEATURES_TIMEOUT_SECONDS = 10.0
 
 
 def _liquidity_usd(pair: dict) -> float:
@@ -47,7 +61,17 @@ def _symbol(pair: dict) -> object:
     return (pair.get("baseToken") or {}).get("symbol")
 
 
-def _max_candle_drop_pct(candles: list[tuple[float, float, float, float, float]]) -> float:
+def _data_key(pair: dict) -> tuple:
+    """Identifica un refresco de DexScreener: dos consultas dentro del mismo
+    refresco (~30 s) devuelven exactamente estos valores."""
+    return (
+        pair.get("priceUsd"),
+        (pair.get("volume") or {}).get("m5"),
+        str((pair.get("txns") or {}).get("m5")),
+    )
+
+
+def _max_candle_drop_pct(candles: list[tuple[float, ...]]) -> float:
     """
     Mayor caída dentro de una vela de 1 minuto, en %. Por vela mide:
       - de la apertura (o el cierre anterior, si abrió más arriba) al mínimo:
@@ -58,7 +82,9 @@ def _max_candle_drop_pct(candles: list[tuple[float, float, float, float, float]]
     """
     worst = 0.0
     prev_close = 0.0
-    for _, open_, high, low, close in candles:
+    for candle in candles:
+        # Las velas pueden traer el volumen como sexto campo.
+        open_, high, low, close = candle[1:5]
         ref = max(open_, prev_close)
         if ref > 0:
             worst = max(worst, (ref - low) / ref * 100)
@@ -83,6 +109,9 @@ class MemecoinRadar:
         self._watchlist: list[str] = []
         # Boosteados de la última pasada, para puntuar las prealertas.
         self._boosted: set[str] = set()
+        # Prealertas cuyo arranque se está midiendo si se sostiene:
+        # address -> {"row_id", "ts", "key" (último refresco visto), "done"}.
+        self._followups: dict[str, dict] = {}
         self._early_thresholds = EarlyThresholds(
             min_price_move_pct=config.early_min_price_move_pct,
             max_price_move_pct=config.early_max_price_move_pct,
@@ -104,13 +133,39 @@ class MemecoinRadar:
         """True si `address` tuvo prealerta hace menos de [watch].cooldown_minutes."""
         return self._recent(self._early_alerted, address, self._config.early_cooldown_minutes)
 
+    def _prealert_suppresses(self, address: str) -> bool:
+        """True si `address` tuvo prealerta hace menos de
+        [watch].suppress_alert_minutes: la alerta completa llegaría con la
+        subida ya hecha (las que llegaron así cayeron todas a 15 min)."""
+        minutes = self._config.early_suppress_alert_minutes
+        return bool(minutes) and self._recent(self._early_alerted, address, minutes)
+
+    def _early_memory_minutes(self) -> float:
+        """Cuánto hay que recordar una prealerta: lo que dure su cooldown o
+        el silencio de la alerta completa, lo que sea más largo."""
+        return max(self._config.early_cooldown_minutes, self._config.early_suppress_alert_minutes)
+
+    def _restore_cooldowns(self) -> None:
+        """Recupera del registro las alertas y prealertas recientes. Sin esto
+        un reinicio olvidaba los cooldowns y volvía a avisar de tokens ya
+        avisados."""
+        if not self._tracker:
+            return
+        now = time.time()
+        self._alerted.update(
+            self._tracker.last_sent("alerta", now - self._config.alert_cooldown_minutes * 60)
+        )
+        self._early_alerted.update(
+            self._tracker.last_sent("prealerta", now - self._early_memory_minutes() * 60)
+        )
+
     def _prune_alerted(self) -> None:
         """Elimina los cooldowns expirados y las fotos viejas, para que la
         memoria no crezca indefinidamente en ejecuciones largas."""
         now = time.time()
         for registry, minutes in (
             (self._alerted, self._config.alert_cooldown_minutes),
-            (self._early_alerted, self._config.early_cooldown_minutes),
+            (self._early_alerted, self._early_memory_minutes()),
         ):
             expired = [addr for addr, ts in registry.items() if ts < now - minutes * 60]
             for addr in expired:
@@ -428,15 +483,30 @@ class MemecoinRadar:
     async def _watch_once(self, client: DexScreenerClient, alerter: TelegramAlerter) -> None:
         """Vuelta del bucle de vigilancia: trae los datos de los tokens
         vigilados (un request a DexScreener cada 30) y busca arranques, sin
-        esperar a la pasada completa."""
+        esperar a la pasada completa. También muestrea el precio de las
+        señales registradas y completa sus rasgos de velas."""
+        if self._tracker:
+            # Con la vigilancia activa el precio de las señales se muestrea
+            # aquí (~30 s) y no en la pasada completa (2-3 min), que recortaba
+            # mucho el mejor y el peor precio de los 30 minutos.
+            try:
+                await self._tracker.update(client, self._config.chain_id)
+            except Exception:
+                log.exception("Error actualizando el registro de alertas")
         addresses = [
             a for a in self._watchlist
             if not self._cooldown_active(a) and not self._early_cooldown_active(a)
         ]
-        if not addresses:
-            return
-        all_pairs = await client.get_pairs_for_tokens(self._config.chain_id, addresses)
-        await self._check_early(client, alerter, self._best_pair_per_token(all_pairs, addresses))
+        # Las prealertas recientes se siguen consultando aunque estén en
+        # cooldown, para medir si su arranque se sostiene.
+        addresses += [a for a in self._followups if a not in addresses]
+        if addresses:
+            all_pairs = await client.get_pairs_for_tokens(self._config.chain_id, addresses)
+            await self._check_early(client, alerter, self._best_pair_per_token(all_pairs, addresses))
+        try:
+            await self._record_candle_features(client)
+        except Exception:
+            log.exception("Error registrando las velas de una señal")
 
     async def _check_early(
         self, client: DexScreenerClient, alerter: TelegramAlerter, pairs: list[dict]
@@ -453,6 +523,8 @@ class MemecoinRadar:
         for pair in pairs:
             self._history.observe(pair, now)
             address = normalize_address((pair.get("baseToken") or {}).get("address", ""))
+            if address in self._followups:
+                self._check_followup(address, pair, now)
             if self._cooldown_active(address) or self._early_cooldown_active(address):
                 continue
             if self._rejection_reason(pair):
@@ -506,13 +578,79 @@ class MemecoinRadar:
                 self._early_alerted.pop(address, None)
                 continue
             if self._tracker:
-                self._tracker.record(pair, score, None, sent=True, kind="prealerta", early=signal)
+                row_id = self._tracker.record(
+                    pair, score, None, sent=True, kind="prealerta", early=signal
+                )
+                if row_id is not None:
+                    self._followups[address] = {
+                        "row_id": row_id, "ts": now, "key": _data_key(pair), "done": set(),
+                    }
+
+    def _check_followup(self, address: str, pair: dict, now: float) -> None:
+        """
+        Anota si el arranque de una prealerta sigue cumpliéndose ~30 y ~60 s
+        después, con datos nuevos de DexScreener. Solo mide: sirve para decidir
+        con datos si conviene exigir que el arranque se sostenga antes de avisar.
+        """
+        followup = self._followups[address]
+        elapsed = now - followup["ts"]
+        if elapsed > FOLLOWUP_MAX_SECONDS:
+            del self._followups[address]
+            return
+        key = _data_key(pair)
+        if key == followup["key"]:
+            return  # mismo refresco de DexScreener: no hay nada nuevo que medir
+        followup["key"] = key
+        for seconds, column in SUSTAIN_CHECKS:
+            if column in followup["done"]:
+                continue
+            if elapsed < seconds - SUSTAIN_CHECK_SLACK_SECONDS:
+                break
+            # Sin tope de subida: seguir subiendo es justo lo que se espera.
+            sustained = self._history.early_signal(
+                pair, now, self._early_thresholds, check_max_move=False
+            ) is not None
+            followup["done"].add(column)
+            if self._tracker:
+                self._tracker.update_row(followup["row_id"], {column: int(sustained)})
+            break  # una comprobación por refresco nuevo
+        if len(followup["done"]) == len(SUSTAIN_CHECKS):
+            del self._followups[address]
+
+    async def _record_candle_features(self, client: DexScreenerClient) -> None:
+        """
+        Completa en el registro los rasgos de velas (subida en 15 min, velas
+        verdes seguidas, tendencia del volumen, mecha) de una señal que no los
+        tiene. Una por vuelta y con tiempo máximo, para no acaparar
+        GeckoTerminal. Solo mide: no filtra nada.
+        """
+        if not self._tracker:
+            return
+        row = self._tracker.next_without_candles(CANDLE_FEATURES_MAX_AGE_MINUTES * 60)
+        if row is None:
+            return
+        # Suficientes velas para cubrir la hora anterior a la señal.
+        elapsed_minutes = (time.time() - row["timestamp"]) / 60
+        limit = CANDLE_LOOKBACK_MINUTES + int(elapsed_minutes) + 2
+        try:
+            candles = await asyncio.wait_for(
+                client.get_pool_candles(self._config.chain_id, row["pool"], row["token"], limit),
+                CANDLE_FEATURES_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            return
+        # Solo las velas ya cerradas al dar la señal: lo que se sabía entonces.
+        stats = candle_stats(candles, until=row["timestamp"])
+        if stats is not None:
+            self._tracker.set_candle_stats(row["id"], stats)
 
     async def _scan_once(self, client: DexScreenerClient, alerter: TelegramAlerter) -> None:
         """Ejecuta una pasada completa: descubrir -> traer datos de mercado ->
         filtrar -> puntuar -> verificar -> alertar. Se invoca en loop desde run()."""
         self._prune_alerted()
-        if self._tracker:
+        # Con la vigilancia activa el precio de las señales lo muestrea ella,
+        # más seguido; hacerlo también aquí pisaría sus actualizaciones.
+        if self._tracker and not self._config.watch_enabled:
             try:
                 await self._tracker.update(client, self._config.chain_id)
             except Exception:
@@ -556,6 +694,17 @@ class MemecoinRadar:
                 continue
             if self._cooldown_active(address):
                 continue
+            if self._prealert_suppresses(address):
+                minutes = (time.time() - self._early_alerted[address]) / 60
+                reason = f"prealerta hace {minutes:.0f} min"
+                # Se registra (una vez mientras siga por encima del umbral) para
+                # comprobar con datos que omitirla fue acertado.
+                if self._tracker and not self._tracker.is_tracking(address, sent=False):
+                    log.info("Alerta de %s (score=%s) omitida: %s", _symbol(pair), score, reason)
+                    self._tracker.record(pair, score, None, sent=False, reason=reason)
+                else:
+                    log.debug("Alerta de %s (score=%s) omitida: %s", _symbol(pair), score, reason)
+                continue
             to_alert.append((pair, score))
 
         # Sin verificación no se piden velas, así que no hay CandleStats.
@@ -592,6 +741,7 @@ class MemecoinRadar:
             # Abre la base al arrancar (y no en la primera alerta) para que un
             # problema con el archivo se vea enseguida en el log.
             self._tracker.open()
+            self._restore_cooldowns()
         alerter = TelegramAlerter(
             self._config.telegram_bot_token,
             self._config.telegram_chat_id,

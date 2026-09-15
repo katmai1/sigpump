@@ -4,6 +4,7 @@ retorno, recuperación tras reinicio y tolerancia a fallos de la base."""
 import logging
 import sqlite3
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -152,6 +153,54 @@ class TestAlertTracker(unittest.IsolatedAsyncioTestCase):
         self._age(5)
         await tracker.update(client, "solana")
         self.assertEqual(client.requested, [])
+
+    def test_record_devuelve_el_id_y_guarda_los_rasgos_de_velas(self):
+        tracker = self._tracker()
+        stats = CandleStats(
+            40.0, 3.0, rise_15m_pct=12.5, green_streak=2, volume_trend=1.8, upper_wick=0.25
+        )
+        row_id = tracker.record(_pair(), 72.5, stats, sent=True)
+        row = self._rows()[0]
+        self.assertEqual(row_id, row["id"])
+        self.assertEqual(
+            (row["sube_15m_pct"], row["velas_verdes_seguidas"], row["tendencia_volumen"], row["mecha_superior"]),
+            (12.5, 2, 1.8, 0.25),
+        )
+
+    def test_update_row_solo_acepta_columnas_conocidas(self):
+        tracker = self._tracker()
+        row_id = tracker.record(_pair(), 70.0, None, sent=True, kind="prealerta")
+        tracker.update_row(row_id, {"sostenido_30s": 1})
+        self.assertEqual(self._rows()[0]["sostenido_30s"], 1)
+        with self.assertRaises(ValueError):
+            tracker.update_row(row_id, {"no_existe": 1})
+
+    def test_siguiente_sin_velas_por_antiguedad_e_intentos(self):
+        tracker = self._tracker()
+        vieja = tracker.record(_pair("VIEJA", pool="P1"), 70.0, None, sent=True)
+        nueva = tracker.record(_pair("NUEVA", pool="P2"), 70.0, None, sent=True)
+        tracker.record(_pair("VELAS", pool="P3"), 70.0, CandleStats(1.0, 1.0), sent=True)
+        conn = sqlite3.connect(self.path)
+        with conn:
+            conn.execute("UPDATE alertas SET timestamp = timestamp - 3600 WHERE id = ?", (vieja,))
+        conn.close()
+        for _ in range(3):
+            self.assertEqual(tracker.next_without_candles(45 * 60)["id"], nueva)
+        # Tras 3 intentos sin velas se abandona.
+        self.assertIsNone(tracker.next_without_candles(45 * 60))
+        tracker.set_candle_stats(nueva, CandleStats(5.0, 1.0, rise_15m_pct=4.0, green_streak=1))
+        fila = next(r for r in self._rows() if r["id"] == nueva)
+        self.assertEqual((fila["sube_15m_pct"], fila["velas_verdes_seguidas"], fila["velas_intentos"]), (4.0, 1, 3))
+
+    def test_last_sent_por_tipo_y_ventana(self):
+        tracker = self._tracker()
+        tracker.record(_pair("A"), 70.0, None, sent=True, kind="prealerta")
+        tracker.record(_pair("B"), 70.0, None, sent=True)
+        tracker.record(_pair("C"), 70.0, None, sent=False, reason="tarde")
+        desde = time.time() - 60
+        self.assertEqual(set(tracker.last_sent("prealerta", desde)), {"A"})
+        self.assertEqual(set(tracker.last_sent("alerta", desde)), {"B"})
+        self.assertEqual(tracker.last_sent("alerta", time.time() + 60), {})
 
     def test_prealerta_guarda_tipo_y_arranque(self):
         tracker = self._tracker()

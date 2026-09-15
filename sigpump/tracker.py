@@ -27,7 +27,8 @@ log = logging.getLogger()
 
 # Minutos después de la alerta en los que se anota el retorno.
 CHECKPOINTS_MINUTES = (5, 15, 30)
-# El precio solo se muestrea una vez por pasada del radar (~2-3 min), así que
+# El precio se muestrea en cada vuelta de la vigilancia (~30 s) o, si está
+# apagada, en cada pasada del radar (~2-3 min), así que
 # cada checkpoint se anota con la primera muestra que cae dentro de este
 # margen. Pasado el margen queda en NULL: tras un reinicio, anotar como "+5m"
 # un precio de +25m falsearía los datos.
@@ -65,6 +66,16 @@ COLUMNS: dict[str, str] = {
     "arranque_pct": "REAL",
     "ratio_volumen_5m": "REAL",
     "ratio_txns_5m": "REAL",
+    # Solo prealertas: si el arranque seguía cumpliéndose con los datos de
+    # ~30 y ~60 s después (1/0). Mide si exigirlo quitaría los mini pumps.
+    "sostenido_30s": "INTEGER",
+    "sostenido_60s": "INTEGER",
+    # Cómo venía la subida en las velas cerradas antes de la señal.
+    "sube_15m_pct": "REAL",
+    "velas_verdes_seguidas": "INTEGER",
+    "tendencia_volumen": "REAL",  # volumen de las 3 últimas velas / las 3 anteriores
+    "mecha_superior": "REAL",  # mecha superior media de las 3 últimas (0-1)
+    "velas_intentos": "INTEGER",  # veces que se pidieron velas para completar lo anterior
     **{column: "REAL" for column in _CHECKPOINT_COLUMNS},
     _BEST: "REAL",
     _WORST: "REAL",
@@ -79,6 +90,30 @@ _PENDING = f"precio_usd > 0 AND {_CHECKPOINT_COLUMNS[-1]} IS NULL AND timestamp 
 
 def _round(value: float | None) -> float | None:
     return None if value is None else round(value, 2)
+
+
+_CANDLE_COLUMNS = (
+    "sobre_minimo_1h_pct",
+    _RECENT_HIGH,
+    "sube_15m_pct",
+    "velas_verdes_seguidas",
+    "tendencia_volumen",
+    "mecha_superior",
+)
+
+
+def _candle_values(stats: CandleStats | None) -> dict[str, float | int | None]:
+    """Columnas del registro que salen de las velas (todas NULL sin velas)."""
+    if stats is None:
+        return dict.fromkeys(_CANDLE_COLUMNS)
+    return {
+        "sobre_minimo_1h_pct": _round(stats.rise_from_low_pct),
+        _RECENT_HIGH: _round(stats.drop_from_recent_high_pct),
+        "sube_15m_pct": _round(stats.rise_15m_pct),
+        "velas_verdes_seguidas": stats.green_streak,
+        "tendencia_volumen": _round(stats.volume_trend),
+        "mecha_superior": _round(stats.upper_wick),
+    }
 
 
 class AlertTracker:
@@ -172,13 +207,14 @@ class AlertTracker:
         reason: str = "",
         kind: str = "alerta",
         early: EarlySignal | None = None,
-    ) -> None:
+    ) -> int | None:
         """Agrega una fila con los datos de `pair` en el momento de la alerta
         (o del descarte, con sent=False y su motivo). Las prealertas van con
-        kind="prealerta" y su EarlySignal."""
+        kind="prealerta" y su EarlySignal. Devuelve el id de la fila, o None
+        si no se pudo registrar."""
         conn = self._db()
         if conn is None:
-            return
+            return None
         now = time.time()
         base = pair.get("baseToken") or {}
         volume = pair.get("volume") or {}
@@ -203,8 +239,7 @@ class AlertTracker:
             "market_cap_usd": _round(to_float(pair.get("marketCap")) or to_float(pair.get("fdv"))),
             "aceleracion_volumen": _round(volume_acceleration(pair)),
             "compras_m5_pct": _round(buy_ratio * 100) if buy_ratio is not None else None,
-            "sobre_minimo_1h_pct": _round(candles.rise_from_low_pct) if candles else None,
-            _RECENT_HIGH: _round(candles.drop_from_recent_high_pct) if candles else None,
+            **_candle_values(candles),
             "arranque_pct": _round(early.price_move_pct) if early else None,
             "ratio_volumen_5m": _round(early.volume_ratio) if early else None,
             "ratio_txns_5m": _round(early.txns_ratio) if early else None,
@@ -212,7 +247,7 @@ class AlertTracker:
             "timestamp": now,
         }
         try:
-            conn.execute(
+            cursor = conn.execute(
                 f"INSERT INTO alertas ({', '.join(values)}) "
                 f"VALUES ({', '.join(':' + name for name in values)})",
                 values,
@@ -220,6 +255,76 @@ class AlertTracker:
             conn.commit()
         except sqlite3.Error as exc:
             log.warning("No se pudo registrar la alerta de %s en %s: %s", values["simbolo"], self._path, exc)
+            return None
+        return cursor.lastrowid
+
+    def update_row(self, row_id: int, values: dict[str, object]) -> None:
+        """Actualiza columnas de una fila ya registrada."""
+        unknown = set(values) - set(COLUMNS)
+        if unknown:
+            raise ValueError(f"Columnas desconocidas en el registro: {sorted(unknown)}")
+        conn = self._db()
+        if conn is None or not values:
+            return
+        try:
+            conn.execute(
+                f"UPDATE alertas SET {', '.join(f'{c} = :{c}' for c in values)} WHERE id = :id",
+                {**values, "id": row_id},
+            )
+            conn.commit()
+        except sqlite3.Error as exc:
+            log.warning("No se pudo actualizar %s: %s", self._path, exc)
+
+    def set_candle_stats(self, row_id: int, stats: CandleStats) -> None:
+        """Completa los rasgos de velas de una fila registrada sin ellos."""
+        self.update_row(row_id, _candle_values(stats))
+
+    def next_without_candles(self, max_age_seconds: float, max_attempts: int = 3) -> dict | None:
+        """
+        La señal más reciente sin rasgos de velas, de menos de
+        `max_age_seconds`, a la que se le pidieron velas menos de
+        `max_attempts` veces (y cuenta este intento). None si no hay ninguna.
+        """
+        conn = self._db()
+        if conn is None:
+            return None
+        try:
+            row = conn.execute(
+                "SELECT id, pool, token, timestamp FROM alertas "
+                "WHERE sube_15m_pct IS NULL AND pool != '' AND timestamp > :since "
+                "AND COALESCE(velas_intentos, 0) < :max_attempts "
+                "ORDER BY timestamp DESC LIMIT 1",
+                {"since": time.time() - max_age_seconds, "max_attempts": max_attempts},
+            ).fetchone()
+            if row is None:
+                return None
+            conn.execute(
+                "UPDATE alertas SET velas_intentos = COALESCE(velas_intentos, 0) + 1 WHERE id = ?",
+                (row["id"],),
+            )
+            conn.commit()
+        except sqlite3.Error as exc:
+            log.warning("No se pudo leer %s: %s", self._path, exc)
+            return None
+        return dict(row)
+
+    def last_sent(self, kind: str, since: float) -> dict[str, float]:
+        """Token -> timestamp de su última señal enviada de tipo `kind`
+        ('alerta' o 'prealerta') posterior a `since`."""
+        conn = self._db()
+        if conn is None:
+            return {}
+        try:
+            rows = conn.execute(
+                "SELECT token, MAX(timestamp) AS ts FROM alertas "
+                "WHERE enviada = 1 AND COALESCE(tipo, 'alerta') = :kind AND timestamp > :since "
+                "GROUP BY token",
+                {"kind": kind, "since": since},
+            ).fetchall()
+        except sqlite3.Error as exc:
+            log.warning("No se pudo leer %s: %s", self._path, exc)
+            return {}
+        return {row["token"]: row["ts"] for row in rows}
 
     async def update(self, client, chain_id: str) -> None:
         """Muestrea el precio actual de las filas pendientes (un request a

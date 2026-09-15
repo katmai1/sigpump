@@ -98,7 +98,11 @@ class PoolHistory:
             snapshots.popleft()
 
     def early_signal(
-        self, pair: dict, now: float, thresholds: EarlyThresholds
+        self,
+        pair: dict,
+        now: float,
+        thresholds: EarlyThresholds,
+        check_max_move: bool = True,
     ) -> EarlySignal | None:
         """
         EarlySignal si `pair` arranca respecto de su base (las fotos de hace
@@ -106,6 +110,9 @@ class PoolHistory:
         5 min multiplicados, mayoría de compras y precio de 5 min subiendo.
         None si no arranca o no hay base suficiente para saberlo: sin base,
         el token podría llevar una hora subiendo.
+
+        check_max_move=False no aplica el tope de subida: sirve para ver si un
+        arranque ya avisado se sostiene, donde seguir subiendo es lo esperado.
         """
         snapshots = self._snapshots.get(_pool_key(pair))
         if not snapshots:
@@ -123,7 +130,9 @@ class PoolHistory:
         # Medianas: una foto rara en la base (un pico aislado) no la mueve.
         base_price = statistics.median(s.price for s in baseline)
         price_move_pct = (current.price / base_price - 1) * 100
-        if not thresholds.min_price_move_pct <= price_move_pct <= thresholds.max_price_move_pct:
+        if price_move_pct < thresholds.min_price_move_pct:
+            return None
+        if check_max_move and price_move_pct > thresholds.max_price_move_pct:
             return None
         base_volume = max(statistics.median(s.volume_m5 for s in baseline), MIN_BASELINE_VOLUME_M5_USD)
         volume_ratio = current.volume_m5 / base_volume

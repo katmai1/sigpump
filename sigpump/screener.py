@@ -258,12 +258,12 @@ class DexScreenerClient:
 
     async def get_pool_candles(
         self, chain_id: str, pool_address: str, token_address: str, limit: int
-    ) -> list[tuple[float, float, float, float, float]]:
+    ) -> list[tuple[float, float, float, float, float, float]]:
         """
         Últimas `limit` velas de 1 minuto del pool, con el precio en USD de
-        `token_address`, como (timestamp, open, high, low, close) de la más
-        vieja a la más nueva. GeckoTerminal omite los minutos sin trades.
-        [] si la API falla o no hay datos.
+        `token_address`, como (timestamp, open, high, low, close, volume) de
+        la más vieja a la más nueva. GeckoTerminal omite los minutos sin
+        trades. [] si la API falla o no hay datos.
         """
         network = GECKO_NETWORKS.get(chain_id, chain_id)
         # token=<dirección>: sin esto las velas son del base según GeckoTerminal,
@@ -281,7 +281,11 @@ class DexScreenerClient:
         attributes = body.get("attributes") if isinstance(body, dict) else None
         rows = attributes.get("ohlcv_list") if isinstance(attributes, dict) else None
         candles = [
-            (to_float(row[0]), to_float(row[1]), to_float(row[2]), to_float(row[3]), to_float(row[4]))
+            (
+                to_float(row[0]), to_float(row[1]), to_float(row[2]), to_float(row[3]), to_float(row[4]),
+                # El volumen se usa para medir si venía sostenido o explotó de golpe.
+                to_float(row[5]) if len(row) > 5 else 0.0,
+            )
             for row in (rows if isinstance(rows, list) else [])
             if isinstance(row, list) and len(row) >= 5
         ]

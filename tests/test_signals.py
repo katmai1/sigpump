@@ -75,5 +75,27 @@ class TestCandleStats(unittest.TestCase):
         velas = [_vela(0, 100, 200, 100, 200), _vela(30 * 60, 120, 130, 110, 120)]
         self.assertAlmostEqual(candle_stats(velas).drop_from_recent_high_pct, (1 - 120 / 130) * 100)
 
+    def test_rasgos_de_como_venia_la_subida(self):
+        planas = [(i * 60, 1.0, 1.01, 0.99, 1.0, 100.0) for i in range(20)]
+        verdes = [
+            ((20 + i) * 60, 1.0 + i * 0.02, 1.03 + i * 0.02, 1.0 + i * 0.02, 1.02 + i * 0.02, 300.0)
+            for i in range(3)
+        ]
+        stats = candle_stats(planas + verdes)
+        self.assertEqual(stats.green_streak, 3)
+        # 3 velas con 300 frente a 3 con 100: el volumen explotó.
+        self.assertAlmostEqual(stats.volume_trend, 3.0)
+        self.assertAlmostEqual(stats.upper_wick, 1 / 3)
+        self.assertAlmostEqual(stats.rise_15m_pct, (1.06 / 0.99 - 1) * 100)
+
+    def test_sin_volumen_no_hay_tendencia(self):
+        velas = [_vela(i * 60, 1, 1, 1, 1) for i in range(10)]
+        self.assertIsNone(candle_stats(velas).volume_trend)
+
+    def test_until_ignora_velas_sin_cerrar_al_dar_la_senal(self):
+        velas = [_vela(0, 1, 1, 1, 1), _vela(60, 1, 2, 1, 2), _vela(120, 2, 5, 2, 5)]
+        # Señal a los 120 s: la vela de los 60 ya cerró, la de los 120 no.
+        self.assertAlmostEqual(candle_stats(velas, until=120).rise_from_low_pct, 100.0)
+
     def test_precios_invalidos(self):
         self.assertIsNone(candle_stats([_vela(0, 0, 0, 0, 0)]))

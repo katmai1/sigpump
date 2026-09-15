@@ -57,6 +57,7 @@ _KNOWN_KEYS: dict[str, set[str]] = {
         "min_txns_ratio",
         "min_buy_ratio",
         "cooldown_minutes",
+        "suppress_alert_minutes",
     },
     "telegram": {"bot_token", "chat_id", "message_thread_id"},
 }
@@ -97,6 +98,7 @@ _FIELD_TYPES: dict[str, tuple[str, tuple[type, ...]]] = {
     "early_min_txns_ratio": ("[watch].min_txns_ratio", _NUMBER),
     "early_min_buy_ratio": ("[watch].min_buy_ratio", _NUMBER),
     "early_cooldown_minutes": ("[watch].cooldown_minutes", _NUMBER),
+    "early_suppress_alert_minutes": ("[watch].suppress_alert_minutes", _NUMBER),
     "verbose": ("[radar].verbose", (bool,)),
     "telegram_bot_token": ("[telegram].bot_token", (str,)),
     "telegram_chat_id": ("[telegram].chat_id", (str,)),
@@ -209,7 +211,12 @@ class Config:
     early_min_volume_ratio: float = 2.5
     early_min_txns_ratio: float = 2.0
     early_min_buy_ratio: float = 0.55
-    early_cooldown_minutes: float = 60.0
+    # Las prealertas repetidas del mismo token rendían mucho peor que la
+    # primera: una cada 6 horas.
+    early_cooldown_minutes: float = 360.0
+    # Alertas completas de tokens con prealerta reciente: llegaban con la
+    # subida ya hecha. 0 = mandarlas igual.
+    early_suppress_alert_minutes: float = 360.0
     verbose: bool = False
     weights: ScoringWeights = field(default_factory=ScoringWeights)
     telegram_bot_token: str = ""
@@ -287,6 +294,7 @@ class Config:
             "early_min_volume_ratio",
             "early_min_txns_ratio",
             "early_cooldown_minutes",
+            "early_suppress_alert_minutes",
             "max_rise_from_low_pct",
             "late_penalty_start_h1_pct",
             "late_penalty_end_h1_pct",
@@ -365,7 +373,8 @@ class Config:
             early_min_volume_ratio=watch.get("min_volume_ratio", 2.5),
             early_min_txns_ratio=watch.get("min_txns_ratio", 2.0),
             early_min_buy_ratio=watch.get("min_buy_ratio", 0.55),
-            early_cooldown_minutes=watch.get("cooldown_minutes", 60.0),
+            early_cooldown_minutes=watch.get("cooldown_minutes", 360.0),
+            early_suppress_alert_minutes=watch.get("suppress_alert_minutes", 360.0),
             verbose=radar.get("verbose", False),
             # from_raw solo cubre las claves presentes en el TOML; el resto
             # toma los defaults de ScoringWeights.

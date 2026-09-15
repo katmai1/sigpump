@@ -231,6 +231,11 @@ class TestConfigValidation(unittest.TestCase):
         with self.assertRaises(ValueError):
             Config(late_penalty_start_h1_pct=100.0, late_penalty_end_h1_pct=50.0)
 
+    def test_prealertas_por_defecto_una_cada_6_horas_y_silencian_la_alerta(self):
+        config = Config()
+        self.assertEqual(config.early_cooldown_minutes, 360)
+        self.assertEqual(config.early_suppress_alert_minutes, 360)
+
     def test_vigilancia_fuera_de_rango_da_error(self):
         casos = [
             dict(watch_interval_seconds=0),
@@ -243,6 +248,7 @@ class TestConfigValidation(unittest.TestCase):
             dict(early_min_volume_ratio=-1.0),
             dict(early_min_txns_ratio=-1.0),
             dict(early_cooldown_minutes=-1.0),
+            dict(early_suppress_alert_minutes=-1.0),
         ]
         for caso in casos:
             with self.subTest(caso=caso), self.assertRaises(ValueError):
@@ -326,6 +332,7 @@ class TestFromToml(unittest.TestCase):
                 "[watch]\nenabled = false\ninterval_seconds = 45\nmax_tokens = 30\n"
                 "min_price_move_pct = 3\nmax_price_move_pct = 20\nmin_volume_ratio = 3\n"
                 "min_txns_ratio = 1.5\nmin_buy_ratio = 0.6\ncooldown_minutes = 20\n"
+                "suppress_alert_minutes = 90\n"
             )
         )
         self.assertFalse(config.watch_enabled)
@@ -337,6 +344,7 @@ class TestFromToml(unittest.TestCase):
         self.assertEqual(config.early_min_txns_ratio, 1.5)
         self.assertEqual(config.early_min_buy_ratio, 0.6)
         self.assertEqual(config.early_cooldown_minutes, 20)
+        self.assertEqual(config.early_suppress_alert_minutes, 90)
 
     def test_clave_desconocida_en_scoring_avisa(self):
         with self.assertLogs(level=logging.WARNING) as logs:

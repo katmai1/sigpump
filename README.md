@@ -73,9 +73,19 @@ lleva unos minutos.
 
 La prealerta pasa los mismos filtros duros que una alerta y, con
 `verify_before_alert`, el contraste de precio y liquidez con GeckoTerminal,
-pero no la revisión de velas. Es menos fiable que la alerta completa, que se
-sigue mandando aparte si después el token la merece. Se registra con
-`tipo = 'prealerta'`.
+pero no la revisión de velas. Se registra con `tipo = 'prealerta'`.
+
+Con el primer día de datos, dos patrones dejaban las señales sin margen:
+
+- **Prealertas repetidas del mismo token**: la primera del día daba de media
+  +7,7% a 15 minutos; las siguientes, -0,8%. Por eso `[watch].cooldown_minutes`
+  es de 6 horas.
+- **Alertas completas después de una prealerta**: llegaban con la subida ya
+  hecha y todas cayeron a 15 minutos. Con `[watch].suppress_alert_minutes` no
+  se mandan si el token tuvo prealerta en ese plazo; quedan registradas con
+  `enviada = 0` y el motivo, para comprobar que el filtro acierta.
+
+Los cooldowns se recuperan del registro al reiniciar el radar.
 
 ## Registro de alertas
 
@@ -84,14 +94,22 @@ con una tabla `alertas`: una fila por alerta con el score, los datos de
 mercado del momento y cómo le fue después:
 
 - `ret_5m_pct`, `ret_15m_pct`, `ret_30m_pct`: cambio de precio respecto de la
-  alerta. El precio se consulta una vez por pasada, así que cada columna usa
+  alerta. El precio se consulta cada ~30 segundos (una vez por pasada si la
+  vigilancia está apagada), así que cada columna usa
   la primera muestra desde ese minuto (hasta 5 minutos más tarde; si no hay
   muestra en ese margen, por ejemplo tras un reinicio, queda en NULL).
 - `mejor_ret_30m_pct`, `peor_ret_30m_pct`: el mejor y el peor precio visto
   en esas muestras.
-- `enviada = 0` son candidatos descartados por llegar tarde, con
-  `motivo_descarte`: sirven para comprobar si esos filtros tiran señales
-  buenas.
+- `enviada = 0` son alertas descartadas por llegar tarde u omitidas por una
+  prealerta previa, con `motivo_descarte`: sirven para comprobar si esos
+  filtros tiran señales buenas.
+- `sube_15m_pct`, `velas_verdes_seguidas`, `tendencia_volumen` y
+  `mecha_superior`: cómo venía la subida en las velas cerradas antes de la
+  señal. En las prealertas se completan unos segundos después, porque al
+  avisar no se piden velas.
+- `sostenido_30s`, `sostenido_60s` (prealertas): 1 si el arranque seguía
+  cumpliéndose con los datos de ~30 y ~60 segundos después. Sirven para
+  decidir con datos si conviene exigir que el arranque se sostenga.
 
 Se puede abrir con `sqlite3 alertas.db` o con cualquier visor de SQLite
 (p. ej. DB Browser for SQLite) mientras el radar corre. Por ejemplo, el

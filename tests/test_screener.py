@@ -377,7 +377,9 @@ class TestGetPoolCandles(ScreenerTestCase):
         }
         session = _FakeSession(_FakeResponse(200, payload))
         candles = await DexScreenerClient(session).get_pool_candles("solana", "P", "MEME", 60)
-        self.assertEqual(candles, [(60.0, 2.0, 2.0, 2.0, 2.0), (120.0, 3.0, 3.0, 3.0, 3.0)])
+        self.assertEqual(
+            candles, [(60.0, 2.0, 2.0, 2.0, 2.0, 10.0), (120.0, 3.0, 3.0, 3.0, 3.0, 10.0)]
+        )
         self.assertIn("/networks/solana/pools/P/ohlcv/minute?", session.urls[0])
         self.assertIn("limit=60", session.urls[0])
         # Precio del token pedido aunque GeckoTerminal oriente el par al revés.

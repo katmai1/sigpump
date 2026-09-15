@@ -30,6 +30,13 @@ verify_before_alert = true
 max_price_deviation_pct = 50.0
 # Caída máxima dentro de una vela de 1 minuto en la última hora, en %. 0 = sin filtro.
 max_candle_drop_pct = 30.0
+# Filtros de "llega tarde" sobre las mismas velas (requieren verify_before_alert).
+# Descarta si el precio ya está más de este % por encima del mínimo de la
+# última hora: la subida ya se hizo. 0 = sin filtro.
+max_rise_from_low_pct = 150.0
+# Descarta si el precio ya cae más de este % desde el máximo de los últimos
+# 15 minutos: el pico ya pasó. 0 = sin filtro.
+max_drop_from_recent_high_pct = 20.0
 
 [radar]
 poll_interval_seconds = 90
@@ -37,13 +44,30 @@ alert_cooldown_minutes = 60
 score_alert_threshold = 70.0
 # Tope de direcciones a evaluar por pasada (boosted primero, luego trending).
 top_n_candidates = 200
+# Base SQLite donde se registra cada alerta (y cada descarte por llegar tarde)
+# con el precio a +5, +15 y +30 minutos, para medir si las señales dan margen.
+# Se crea sola. "" = no registrar.
+alert_log_path = "alertas.db"
 verbose = false
 
+[scoring]
+# Penalización por subida ya hecha: si el cambio de 1h supera start, el score
+# se multiplica por un factor que baja linealmente de 1 (en start) a 0 (en end).
+# Con 60/250, un +100% en 1h conserva el 79% del score y un +150%, el 53%.
+# start = 0 desactiva la penalización.
+late_penalty_start_h1_pct = 60.0
+late_penalty_end_h1_pct = 250.0
+
 [scoring_weights]
-volume_h1 = 0.35
-price_change_h1 = 0.25
-price_change_h6 = 0.15
-liquidity = 0.15
+volume_h1 = 0.20
+# Volumen de 5 min × 12 frente al de 1h: x1 = 0 puntos, x3 o más = tope.
+# Solo puntúa si el precio de 5 min sube (en un dump el volumen también se acelera).
+volume_acceleration = 0.25
+# % de compras en las txns de 5 min: 50% = 0 puntos, 75% o más = tope.
+buy_pressure = 0.10
+price_change_h1 = 0.20
+price_change_h6 = 0.05
+liquidity = 0.10
 boosted = 0.10
 
 [telegram]

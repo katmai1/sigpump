@@ -1,0 +1,80 @@
+"""
+sigpump/signals.py
+
+Métricas derivadas de los datos de mercado que sirven para distinguir un
+token que empieza a moverse de uno que ya hizo la subida: aceleración del
+volumen y presión compradora de los últimos 5 minutos (DexScreener) y la
+posición del precio respecto del mínimo y del máximo reciente (velas de
+GeckoTerminal). Las usan el scoring, la verificación, la alerta y el registro.
+"""
+
+from dataclasses import dataclass
+
+from sigpump.util import to_float
+
+# Por debajo de esto las compras/ventas de 5 min son ruido: 3 compras y
+# 1 venta dan 75% sin decir nada del mercado.
+MIN_TXNS_M5 = 5
+# Ventana del "máximo reciente": si el precio ya cae bastante desde el pico
+# de estos últimos minutos, la subida probablemente terminó.
+RECENT_HIGH_MINUTES = 15
+
+
+def volume_acceleration(pair: dict) -> float:
+    """
+    Ritmo del volumen de los últimos 5 min comparado con el de la última
+    hora: volumen 5m × 12 / volumen 1h. x1 es el mismo ritmo que la media de
+    la hora; x3 es que en estos 5 min se opera el triple. Como la hora
+    incluye los últimos 5 min, el máximo posible es x12. 0.0 sin volumen 1h.
+    """
+    volume = pair.get("volume") or {}
+    volume_h1 = to_float(volume.get("h1"))
+    if volume_h1 <= 0:
+        return 0.0
+    return to_float(volume.get("m5")) * 12 / volume_h1
+
+
+def buy_ratio_m5(pair: dict) -> float | None:
+    """Fracción de compras sobre el total de txns de los últimos 5 min (0-1).
+    None si hubo menos de MIN_TXNS_M5 txns, porque con tan pocas no dice nada."""
+    txns_m5 = (pair.get("txns") or {}).get("m5")
+    if not isinstance(txns_m5, dict):
+        return None
+    buys = to_float(txns_m5.get("buys"))
+    total = buys + to_float(txns_m5.get("sells"))
+    if total < MIN_TXNS_M5:
+        return None
+    return buys / total
+
+
+@dataclass(frozen=True)
+class CandleStats:
+    """Posición del último precio dentro de la ventana de velas, en %."""
+    # Cuánto está por encima del mínimo de toda la ventana.
+    rise_from_low_pct: float
+    # Cuánto está por debajo del máximo de los últimos RECENT_HIGH_MINUTES.
+    drop_from_recent_high_pct: float
+
+
+def candle_stats(candles: list[tuple[float, float, float, float, float]]) -> CandleStats | None:
+    """
+    CandleStats de velas (timestamp, open, high, low, close) ordenadas de la
+    más vieja a la más nueva, tomando como precio actual el cierre de la
+    última. La ventana reciente se mide por timestamp y no por cantidad de
+    velas porque GeckoTerminal omite los minutos sin trades. None sin velas
+    o sin precios válidos.
+    """
+    if not candles:
+        return None
+    last_ts, close = candles[-1][0], candles[-1][4]
+    lows = [low for _, _, _, low, _ in candles if low > 0]
+    recent_highs = [
+        high for ts, _, high, _, _ in candles
+        if ts >= last_ts - RECENT_HIGH_MINUTES * 60 and high > 0
+    ]
+    if close <= 0 or not lows or not recent_highs:
+        return None
+    return CandleStats(
+        rise_from_low_pct=max(0.0, (close / min(lows) - 1) * 100),
+        drop_from_recent_high_pct=max(0.0, (1 - close / max(recent_highs)) * 100),
+    )

@@ -11,6 +11,7 @@ import tomllib
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 
+from sigpump.signals import buy_ratio_m5, volume_acceleration
 from sigpump.util import normalize_address, to_float
 
 log = logging.getLogger()
@@ -34,14 +35,18 @@ _KNOWN_KEYS: dict[str, set[str]] = {
         "verify_before_alert",
         "max_price_deviation_pct",
         "max_candle_drop_pct",
+        "max_rise_from_low_pct",
+        "max_drop_from_recent_high_pct",
     },
     "radar": {
         "poll_interval_seconds",
         "alert_cooldown_minutes",
         "score_alert_threshold",
         "top_n_candidates",
+        "alert_log_path",
         "verbose",
     },
+    "scoring": {"late_penalty_start_h1_pct", "late_penalty_end_h1_pct"},
     "telegram": {"bot_token", "chat_id", "message_thread_id"},
 }
 
@@ -66,6 +71,11 @@ _FIELD_TYPES: dict[str, tuple[str, tuple[type, ...]]] = {
     "verify_before_alert": ("[geckoterminal].verify_before_alert", (bool,)),
     "max_price_deviation_pct": ("[geckoterminal].max_price_deviation_pct", _NUMBER),
     "max_candle_drop_pct": ("[geckoterminal].max_candle_drop_pct", _NUMBER),
+    "max_rise_from_low_pct": ("[geckoterminal].max_rise_from_low_pct", _NUMBER),
+    "max_drop_from_recent_high_pct": ("[geckoterminal].max_drop_from_recent_high_pct", _NUMBER),
+    "late_penalty_start_h1_pct": ("[scoring].late_penalty_start_h1_pct", _NUMBER),
+    "late_penalty_end_h1_pct": ("[scoring].late_penalty_end_h1_pct", _NUMBER),
+    "alert_log_path": ("[radar].alert_log_path", (str,)),
     "verbose": ("[radar].verbose", (bool,)),
     "telegram_bot_token": ("[telegram].bot_token", (str,)),
     "telegram_chat_id": ("[telegram].chat_id", (str,)),
@@ -96,22 +106,20 @@ class ScoringWeights:
     Pesos relativos (deben sumar ~1.0) de cada componente del score final
     calculado en score_pair(). Configurables vía [scoring_weights] en el TOML.
     """
-    volume_h1: float = 0.35
-    price_change_h1: float = 0.25
-    price_change_h6: float = 0.15
-    liquidity: float = 0.15
+    volume_h1: float = 0.20
+    # Aceleración y presión compradora de los últimos 5 min: son las que
+    # detectan un movimiento que empieza, en vez de uno que ya ocurrió.
+    volume_acceleration: float = 0.25
+    buy_pressure: float = 0.10
+    price_change_h1: float = 0.20
+    price_change_h6: float = 0.05
+    liquidity: float = 0.10
     boosted: float = 0.10
 
     @property
     def total(self) -> float:
         """Suma de todos los pesos; define el score máximo alcanzable."""
-        return (
-            self.volume_h1
-            + self.price_change_h1
-            + self.price_change_h6
-            + self.liquidity
-            + self.boosted
-        )
+        return sum(getattr(self, f.name) for f in fields(self))
 
     @classmethod
     def from_raw(cls, raw: dict) -> "ScoringWeights":
@@ -166,6 +174,11 @@ class Config:
     verify_before_alert: bool = True
     max_price_deviation_pct: float = 50.0
     max_candle_drop_pct: float = 30.0
+    max_rise_from_low_pct: float = 150.0
+    max_drop_from_recent_high_pct: float = 20.0
+    late_penalty_start_h1_pct: float = 60.0
+    late_penalty_end_h1_pct: float = 250.0
+    alert_log_path: str = "alertas.db"
     verbose: bool = False
     weights: ScoringWeights = field(default_factory=ScoringWeights)
     telegram_bot_token: str = ""
@@ -212,7 +225,22 @@ class Config:
                 f"[geckoterminal].max_candle_drop_pct debe estar entre 0 y 100 "
                 f"({self.max_candle_drop_pct})"
             )
+        if not 0 <= self.max_drop_from_recent_high_pct <= 100:
+            raise ValueError(
+                f"[geckoterminal].max_drop_from_recent_high_pct debe estar entre 0 y 100 "
+                f"({self.max_drop_from_recent_high_pct})"
+            )
+        if 0 < self.late_penalty_start_h1_pct and (
+            self.late_penalty_end_h1_pct <= self.late_penalty_start_h1_pct
+        ):
+            raise ValueError(
+                f"[scoring].late_penalty_end_h1_pct ({self.late_penalty_end_h1_pct}) debe "
+                f"ser mayor que late_penalty_start_h1_pct ({self.late_penalty_start_h1_pct})"
+            )
         for name in (
+            "max_rise_from_low_pct",
+            "late_penalty_start_h1_pct",
+            "late_penalty_end_h1_pct",
             "alert_cooldown_minutes",
             "min_liquidity_usd",
             "min_volume_h1_usd",
@@ -244,6 +272,7 @@ class Config:
         radar = _section(raw, "radar")
         dexscreener = _section(raw, "dexscreener")
         geckoterminal = _section(raw, "geckoterminal")
+        scoring = _section(raw, "scoring")
         telegram = _section(raw, "telegram")
         weights_raw = raw.get("scoring_weights", {})
         if not isinstance(weights_raw, dict):
@@ -273,6 +302,11 @@ class Config:
             verify_before_alert=geckoterminal.get("verify_before_alert", True),
             max_price_deviation_pct=geckoterminal.get("max_price_deviation_pct", 50.0),
             max_candle_drop_pct=geckoterminal.get("max_candle_drop_pct", 30.0),
+            max_rise_from_low_pct=geckoterminal.get("max_rise_from_low_pct", 150.0),
+            max_drop_from_recent_high_pct=geckoterminal.get("max_drop_from_recent_high_pct", 20.0),
+            late_penalty_start_h1_pct=scoring.get("late_penalty_start_h1_pct", 60.0),
+            late_penalty_end_h1_pct=scoring.get("late_penalty_end_h1_pct", 250.0),
+            alert_log_path=radar.get("alert_log_path", "alertas.db"),
             verbose=radar.get("verbose", False),
             # from_raw solo cubre las claves presentes en el TOML; el resto
             # toma los defaults de ScoringWeights.
@@ -291,13 +325,24 @@ def _clamp(value: float, lo: float = 0.0, hi: float = 100.0) -> float:
     return max(lo, min(hi, value))
 
 
-def score_pair(pair: dict, weights: ScoringWeights, boosted_addresses: set[str]) -> float:
+def score_pair(
+    pair: dict,
+    weights: ScoringWeights,
+    boosted_addresses: set[str],
+    late_penalty_start_h1_pct: float = 0.0,
+    late_penalty_end_h1_pct: float = 0.0,
+) -> float:
     """
     Puntaje 0-100 combinando:
-      - volumen 1h (normalizado log-scale contra un techo razonable)
+      - volumen 1h (normalizado lineal contra un techo razonable)
+      - aceleración del volumen y presión compradora de los últimos 5 min
       - momentum de precio 1h y 6h
       - liquidez (más liquidez = menos riesgo de rug/slippage)
       - si el token tiene boost activo (señal de marketing/interés)
+    Con late_penalty_start_h1_pct > 0, un cambio de 1h por encima de ese
+    valor multiplica el total por un factor que baja linealmente de 1 a 0
+    al llegar a late_penalty_end_h1_pct: premiar la subida sin tope hacía
+    que las alertas salieran con el movimiento ya hecho.
     """
     # `pair` es el JSON crudo devuelto por DexScreener; los campos anidados
     # pueden venir ausentes, null o como string, de ahí to_float().
@@ -312,6 +357,16 @@ def score_pair(pair: dict, weights: ScoringWeights, boosted_addresses: set[str])
     # de ponderarla. Los techos (50_000, 100_000, etc.) son heurísticos y
     # conviene ajustarlos según lo que observes en la práctica.
     volume_score = _clamp((volume_h1 / 50_000.0) * 100)
+    # x1 (mismo ritmo que la media de la hora) -> 0; x3 -> tope. Un token que
+    # ya hizo su subida y está quieto queda por debajo de x1. Solo cuenta con
+    # el precio de 5 min subiendo: el volumen también se acelera en un dump.
+    price_change_m5 = to_float((pair.get("priceChange") or {}).get("m5"))
+    acceleration_score = (
+        _clamp((volume_acceleration(pair) - 1) * 50) if price_change_m5 > 0 else 0.0
+    )
+    # 50% de compras (mercado equilibrado) -> 0; 75% -> tope.
+    buy_ratio = buy_ratio_m5(pair)
+    buy_pressure_score = _clamp((buy_ratio - 0.5) * 400) if buy_ratio is not None else 0.0
     # El momentum solo premia subidas: 0% o caídas puntúan 0. Antes la curva
     # centraba el 0% en 50/100 y un token plano (o cayendo) sumaba puntos
     # gratis, suficientes para disparar alertas con volumen y liquidez altos.
@@ -324,9 +379,15 @@ def score_pair(pair: dict, weights: ScoringWeights, boosted_addresses: set[str])
     # en 0-100 porque cada sub-score lo está y los pesos suman 1.0.
     total = (
         volume_score * weights.volume_h1
+        + acceleration_score * weights.volume_acceleration
+        + buy_pressure_score * weights.buy_pressure
         + price_h1_score * weights.price_change_h1
         + price_h6_score * weights.price_change_h6
         + liquidity_score * weights.liquidity
         + boost_score * weights.boosted
     )
+    if late_penalty_end_h1_pct > late_penalty_start_h1_pct > 0:
+        excess = price_change_h1 - late_penalty_start_h1_pct
+        span = late_penalty_end_h1_pct - late_penalty_start_h1_pct
+        total *= _clamp(1 - excess / span, 0.0, 1.0)
     return round(_clamp(total), 1)

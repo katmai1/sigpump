@@ -9,11 +9,15 @@ umbral y dispara alertas de Telegram, respetando un cooldown por dirección.
 import time
 import asyncio
 import logging
+from pathlib import Path
+
 import aiohttp  # type: ignore[import-not-found]
 
 from sigpump.config import Config, score_pair
 from sigpump.screener import DexScreenerClient
+from sigpump.signals import RECENT_HIGH_MINUTES, CandleStats, candle_stats
 from sigpump.telegram import TelegramAlerter
+from sigpump.tracker import AlertTracker
 from sigpump.util import normalize_address, to_float
 
 log = logging.getLogger()
@@ -62,6 +66,7 @@ class MemecoinRadar:
         # Recuerda cuándo se alertó cada dirección por última vez, para no
         # spamear el mismo token en cada pasada mientras siga por encima del umbral.
         self._alerted: dict[str, float] = {}  # address -> last alert timestamp
+        self._tracker = AlertTracker(Path(config.alert_log_path)) if config.alert_log_path else None
 
     def _cooldown_active(self, address: str) -> bool:
         """True si `address` fue alertado hace menos de alert_cooldown_minutes."""
@@ -222,21 +227,43 @@ class MemecoinRadar:
             return f"solo {sells:.0f} ventas de {txns:.0f} txns en 1h"
         return None
 
+    def _late_reason(self, stats: CandleStats | None) -> str | None:
+        """
+        Motivo para descartar un par que pasó la verificación pero llega
+        tarde: la subida ya se hizo o el precio ya cae desde el pico. None si
+        no llega tarde o no hay velas con las que medirlo.
+        """
+        cfg = self._config
+        if stats is None:
+            return None
+        if cfg.max_rise_from_low_pct and stats.rise_from_low_pct > cfg.max_rise_from_low_pct:
+            return f"ya sube {stats.rise_from_low_pct:.0f}% sobre el mínimo de la última hora"
+        if (
+            cfg.max_drop_from_recent_high_pct
+            and stats.drop_from_recent_high_pct > cfg.max_drop_from_recent_high_pct
+        ):
+            return (
+                f"ya cae {stats.drop_from_recent_high_pct:.0f}% desde el máximo "
+                f"de los últimos {RECENT_HIGH_MINUTES} min"
+            )
+        return None
+
     async def _verification_reason(
         self, client: DexScreenerClient, pair: dict, pools: dict[str, dict]
-    ) -> str | None:
+    ) -> tuple[str | None, CandleStats | None]:
         """
-        Contrasta un par que está por alertar con GeckoTerminal. Devuelve el
-        motivo del descarte o None si pasa. Sin datos para verificar también
-        se descarta: es preferible perder una alerta a mandar un token
-        manipulado (se reintenta en la próxima pasada).
+        Contrasta un par que está por alertar con GeckoTerminal. Devuelve
+        (motivo del descarte o None si pasa, CandleStats si se pidieron
+        velas). Sin datos para verificar también se descarta: es preferible
+        perder una alerta a mandar un token manipulado (se reintenta en la
+        próxima pasada).
         """
         cfg = self._config
         pair_address = str(pair.get("pairAddress") or "")
         token_address = normalize_address((pair.get("baseToken") or {}).get("address") or "")
         pool = pools.get(normalize_address(pair_address))
         if pool is None:
-            return "GeckoTerminal no tiene datos del pool"
+            return "GeckoTerminal no tiene datos del pool", None
 
         # DexScreener calcula el precio en USD a partir del precio del quote;
         # cuando ese cálculo está roto (quote poco líquido o manipulado) publica
@@ -246,36 +273,42 @@ class MemecoinRadar:
             dex_price = to_float(pair.get("priceUsd"))
             gecko_price = pool["token_prices"].get(token_address, 0.0)
             if dex_price <= 0 or gecko_price <= 0:
-                return "sin precio para comparar con GeckoTerminal"
+                return "sin precio para comparar con GeckoTerminal", None
             deviation = (max(dex_price, gecko_price) / min(dex_price, gecko_price) - 1) * 100
             if deviation > cfg.max_price_deviation_pct:
                 return (
                     f"precio DexScreener ${dex_price:.6g} vs GeckoTerminal "
                     f"${gecko_price:.6g} (difieren {deviation:,.0f}%)"
-                )
+                ), None
 
         if pool["reserve_usd"] < cfg.min_liquidity_usd:
             return (
                 f"liquidez según GeckoTerminal ${pool['reserve_usd']:,.0f} "
                 f"< ${cfg.min_liquidity_usd:,.0f}"
-            )
+            ), None
 
-        if cfg.max_candle_drop_pct:
-            candles = await client.get_pool_candles(
-                cfg.chain_id, pair_address, str(token_address), CANDLE_LOOKBACK_MINUTES
-            )
-            if not candles:
-                return "sin velas de GeckoTerminal para revisar la volatilidad"
-            drop = _max_candle_drop_pct(candles)
-            if drop > cfg.max_candle_drop_pct:
-                return f"caída de {drop:.0f}% dentro de una vela de 1 min"
-        return None
+        if not (
+            cfg.max_candle_drop_pct
+            or cfg.max_rise_from_low_pct
+            or cfg.max_drop_from_recent_high_pct
+        ):
+            return None, None
+        candles = await client.get_pool_candles(
+            cfg.chain_id, pair_address, str(token_address), CANDLE_LOOKBACK_MINUTES
+        )
+        if not candles:
+            return "sin velas de GeckoTerminal para revisar la volatilidad", None
+        drop = _max_candle_drop_pct(candles)
+        if cfg.max_candle_drop_pct and drop > cfg.max_candle_drop_pct:
+            return f"caída de {drop:.0f}% dentro de una vela de 1 min", None
+        return None, candle_stats(candles)
 
     async def _verify(
         self, client: DexScreenerClient, candidates: list[tuple[dict, float]]
-    ) -> list[tuple[dict, float]]:
-        """Devuelve los (par, score) de `candidates` que pasan la verificación
-        contra GeckoTerminal, de mayor a menor score."""
+    ) -> list[tuple[dict, float, CandleStats | None]]:
+        """Devuelve los (par, score, CandleStats) de `candidates` que pasan la
+        verificación contra GeckoTerminal y no llegan tarde, de mayor a menor
+        score. Los que llegan tarde se registran en el tracker."""
         if not candidates:
             return []
         # Mayor score primero: si hay más de MAX_VERIFICATIONS_PER_PASS, los
@@ -292,17 +325,31 @@ class MemecoinRadar:
         pools = await client.get_gecko_pools(self._config.chain_id, pool_addresses)
         verified = []
         for pair, score in candidates:
-            reason = await self._verification_reason(client, pair, pools)
+            reason, stats = await self._verification_reason(client, pair, pools)
             if reason:
                 log.info("Descartado %s (score=%s) al verificar: %s", _symbol(pair), score, reason)
                 continue
-            verified.append((pair, score))
+            late = self._late_reason(stats)
+            if late:
+                log.info("Descartado %s (score=%s) por llegar tarde: %s", _symbol(pair), score, late)
+                # Se registra para medir si este filtro tira señales buenas.
+                address = normalize_address((pair.get("baseToken") or {}).get("address", ""))
+                if self._tracker and not self._tracker.is_tracking(address, sent=False):
+                    self._tracker.record(pair, score, stats, sent=False, reason=late)
+                continue
+            verified.append((pair, score, stats))
         return verified
 
     async def _scan_once(self, client: DexScreenerClient, alerter: TelegramAlerter) -> None:
         """Ejecuta una pasada completa: descubrir -> traer datos de mercado ->
         filtrar -> puntuar -> verificar -> alertar. Se invoca en loop desde run()."""
         self._prune_alerted()
+        if self._tracker:
+            try:
+                await self._tracker.update(client, self._config.chain_id)
+            except Exception:
+                # El registro es secundario: no debe costar las alertas de la pasada.
+                log.exception("Error actualizando el registro de alertas")
         addresses, boosted_addresses = await self._discover_candidates(client)
         if not addresses:
             log.info("Sin candidatos nuevos en esta pasada")
@@ -326,7 +373,13 @@ class MemecoinRadar:
                 log.debug("Descartado %s: %s", _symbol(pair), reason)
                 continue
 
-            score = score_pair(pair, self._config.weights, boosted_addresses)
+            score = score_pair(
+                pair,
+                self._config.weights,
+                boosted_addresses,
+                self._config.late_penalty_start_h1_pct,
+                self._config.late_penalty_end_h1_pct,
+            )
             # _best_pair_per_token ya garantizó que address es una de las
             # direcciones pedidas, así que nunca es "".
             address = normalize_address((pair.get("baseToken") or {}).get("address", ""))
@@ -337,10 +390,14 @@ class MemecoinRadar:
                 continue
             to_alert.append((pair, score))
 
-        if self._config.verify_before_alert:
-            to_alert = await self._verify(client, to_alert)
+        # Sin verificación no se piden velas, así que no hay CandleStats.
+        verified: list[tuple[dict, float, CandleStats | None]] = (
+            await self._verify(client, to_alert)
+            if self._config.verify_before_alert
+            else [(pair, score, None) for pair, score in to_alert]
+        )
 
-        for pair, score in to_alert:
+        for pair, score, stats in verified:
             address = normalize_address((pair.get("baseToken") or {}).get("address", ""))
             log.info(
                 "Alerta: %s score=%s liq=$%.0f vol1h=$%.0f",
@@ -350,17 +407,23 @@ class MemecoinRadar:
                 to_float((pair.get("volume") or {}).get("h1")),
             )
             try:
-                await alerter.send(pair, score)
+                await alerter.send(pair, score, stats)
             except Exception:
                 # Un fallo puntual de envío (p. ej. error de red o de Telegram)
                 # no debe cortar la evaluación del resto de los candidatos.
                 log.exception("Error enviando alerta para %s", address)
                 continue
             self._alerted[address] = time.time()
+            if self._tracker:
+                self._tracker.record(pair, score, stats, sent=True)
 
     async def run(self) -> None:
         """Loop principal: crea la sesión HTTP y el bot de Telegram una sola
         vez, y repite _scan_once cada poll_interval_seconds indefinidamente."""
+        if self._tracker:
+            # Abre la base al arrancar (y no en la primera alerta) para que un
+            # problema con el archivo se vea enseguida en el log.
+            self._tracker.open()
         alerter = TelegramAlerter(
             self._config.telegram_bot_token,
             self._config.telegram_chat_id,

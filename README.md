@@ -37,13 +37,53 @@ El bucle principal ([sigpump/radar.py](sigpump/radar.py)) repite cada
 2. Trae sus datos de mercado y aplica filtros duros: liquidez, volumen,
    market cap, edad, txns mínimas, ratio de ventas (honeypots), tamaño
    medio de trade (wash trading) y subida máxima en 1h.
-3. Calcula un score 0-100 ([sigpump/config.py](sigpump/config.py)).
+3. Calcula un score 0-100 ([sigpump/config.py](sigpump/config.py)). Premia
+   que el movimiento esté empezando: aceleración del volumen y presión
+   compradora de los últimos 5 minutos ([sigpump/signals.py](sigpump/signals.py)),
+   y penaliza los tokens que ya subieron mucho en la última hora.
 4. Los que superan `score_alert_threshold` y no están en cooldown se
    verifican contra GeckoTerminal: el precio tiene que coincidir con el de
    DexScreener, la liquidez real superar el mínimo y las velas de 1 minuto
-   de la última hora no pueden mostrar desplomes bruscos.
+   de la última hora no pueden mostrar desplomes bruscos. Con esas velas
+   también se descartan los que llegan tarde: precio ya muy por encima del
+   mínimo de la hora, o cayendo desde el máximo de los últimos 15 minutos.
 5. Los que pasan la verificación se alertan por Telegram
    ([sigpump/telegram.py](sigpump/telegram.py)).
+6. Cada alerta, y cada descarte por llegar tarde, se registra en
+   `alert_log_path` ([sigpump/tracker.py](sigpump/tracker.py)) con los datos
+   del momento y el retorno a +5, +15 y +30 minutos.
+
+## Registro de alertas
+
+`alertas.db` (configurable con `[radar].alert_log_path`) es una base SQLite
+con una tabla `alertas`: una fila por alerta con el score, los datos de
+mercado del momento y cómo le fue después:
+
+- `ret_5m_pct`, `ret_15m_pct`, `ret_30m_pct`: cambio de precio respecto de la
+  alerta. El precio se consulta una vez por pasada, así que cada columna usa
+  la primera muestra desde ese minuto (hasta 5 minutos más tarde; si no hay
+  muestra en ese margen, por ejemplo tras un reinicio, queda en NULL).
+- `mejor_ret_30m_pct`, `peor_ret_30m_pct`: el mejor y el peor precio visto
+  en esas muestras.
+- `enviada = 0` son candidatos descartados por llegar tarde, con
+  `motivo_descarte`: sirven para comprobar si esos filtros tiran señales
+  buenas.
+
+Se puede abrir con `sqlite3 alertas.db` o con cualquier visor de SQLite
+(p. ej. DB Browser for SQLite) mientras el radar corre. Por ejemplo, el
+retorno medio de las alertas enviadas frente a las descartadas:
+
+```sql
+SELECT enviada, COUNT(*) AS n,
+       ROUND(AVG(ret_5m_pct), 1) AS ret_5m,
+       ROUND(AVG(ret_30m_pct), 1) AS ret_30m,
+       ROUND(AVG(mejor_ret_30m_pct), 1) AS mejor
+FROM alertas GROUP BY enviada;
+```
+
+Con unos días de datos se puede ver qué valores de `aceleracion_volumen`,
+`cambio_h1_pct` o `sobre_minimo_1h_pct` tenían las alertas que funcionaron
+y ajustar pesos y umbrales en consecuencia.
 
 La verificación existe porque DexScreener calcula el precio en USD de cada
 par a partir del precio de su quote, y cuando ese cálculo está roto o
@@ -86,12 +126,18 @@ Secciones disponibles:
 - `[geckoterminal]` — `trending_pages`: cuántas páginas del ranking de
   pools trending sumar como candidatos (0 desactiva la fuente).
   `verify_before_alert`: contrastar con GeckoTerminal antes de alertar;
-  `max_price_deviation_pct` y `max_candle_drop_pct` son sus umbrales.
+  `max_price_deviation_pct` y `max_candle_drop_pct` son sus umbrales, y
+  `max_rise_from_low_pct` y `max_drop_from_recent_high_pct` los de "llega
+  tarde".
 - `[radar]` — intervalo de polling, cooldown entre alertas repetidas del
-  mismo token, umbral de score y cuántos candidatos evaluar por pasada.
+  mismo token, umbral de score, cuántos candidatos evaluar por pasada y
+  `alert_log_path` (la base SQLite de resultados).
+- `[scoring]` — `late_penalty_start_h1_pct` y `late_penalty_end_h1_pct`:
+  entre esos dos cambios de 1h el score se reduce linealmente hasta 0.
 - `[scoring_weights]` — pesos relativos (deben sumar ~1.0) de cada
-  componente del score: volumen 1h, cambio de precio 1h/6h, liquidez y
-  si el token tiene boost activo.
+  componente del score: volumen 1h, aceleración del volumen, presión
+  compradora de 5 min, cambio de precio 1h/6h, liquidez y si el token tiene
+  boost activo.
 - `[telegram]` — `bot_token`, `chat_id` y opcionalmente `message_thread_id`
   si querés mandar las alertas a un tema (topic) concreto dentro de un
   grupo con "Temas" activados.

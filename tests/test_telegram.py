@@ -2,11 +2,13 @@
 a campos numéricos ausentes/null/string. No envía nada: format_message() es
 pura y el Bot nunca se inicializa."""
 
+import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
 from telegram.error import RetryAfter
 
+from sigpump.signals import CandleStats
 from sigpump.telegram import TelegramAlerter
 
 TOKEN_FALSO = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
@@ -75,6 +77,34 @@ class TestFormatMessage(unittest.TestCase):
             "Cap. mercado: $999,000",
             _alerter().format_message(_pair(marketCap=None, fdv=999_000), 70.0),
         )
+
+
+class TestMomentum(unittest.TestCase):
+    def test_aceleracion_y_compras_de_5m(self):
+        pair = _pair(
+            volume={"h1": 12_000, "m5": 3_000},
+            txns={"m5": {"buys": 30, "sells": 10}},
+            priceChange={"m5": 4.5, "h1": 12.3},
+        )
+        texto = _alerter().format_message(pair, 80.0)
+        self.assertIn("Cambio 5m: +4.5%", texto)
+        self.assertIn("Aceleración vol. 5m: x3.0", texto)
+        self.assertIn("Compras 5m: 75%", texto)
+        self.assertNotIn("Sobre mínimo", texto)
+
+    def test_sin_txns_de_5m_no_muestra_compras(self):
+        self.assertNotIn("Compras 5m", _alerter().format_message(_pair(), 80.0))
+
+    def test_con_velas_muestra_subida_y_caida_desde_el_pico(self):
+        texto = _alerter().format_message(_pair(), 80.0, CandleStats(42.4, 6.6))
+        self.assertIn("Sobre mínimo 1h: +42%", texto)
+        self.assertIn("Bajo máximo 15m: -7%", texto)
+
+    def test_send_pasa_las_velas_al_mensaje(self):
+        alerter = _alerter()
+        alerter._bot = AsyncMock()
+        asyncio.run(alerter.send(_pair(), 80.0, CandleStats(10.0, 1.0)))
+        self.assertIn("Sobre mínimo 1h: +10%", alerter._bot.send_message.await_args.kwargs["text"])
 
 
 class TestEscaping(unittest.TestCase):

@@ -140,8 +140,9 @@ class TestScoringWeights(unittest.TestCase):
             ScoringWeights.from_raw({"volume_h1": -0.5})
 
     def test_claves_ausentes_toman_el_default(self):
-        w = ScoringWeights.from_raw({"volume_h1": 0.4, "liquidity": 0.1})
-        self.assertEqual(w.volume_h1, 0.4)
+        # Suman 1.0 con el resto de los defaults, para no disparar el aviso.
+        w = ScoringWeights.from_raw({"volume_h1": 0.25, "liquidity": 0.05})
+        self.assertEqual(w.volume_h1, 0.25)
         self.assertEqual(w.price_change_h1, ScoringWeights().price_change_h1)
 
     def test_suma_distinta_de_uno_avisa(self):
@@ -230,6 +231,23 @@ class TestConfigValidation(unittest.TestCase):
         with self.assertRaises(ValueError):
             Config(late_penalty_start_h1_pct=100.0, late_penalty_end_h1_pct=50.0)
 
+    def test_vigilancia_fuera_de_rango_da_error(self):
+        casos = [
+            dict(watch_interval_seconds=0),
+            dict(watch_max_tokens=0),
+            dict(watch_max_tokens=10.5),
+            dict(watch_enabled="si"),
+            dict(early_min_price_move_pct=-1.0),
+            dict(early_min_price_move_pct=40.0, early_max_price_move_pct=30.0),
+            dict(early_min_buy_ratio=1.5),
+            dict(early_min_volume_ratio=-1.0),
+            dict(early_min_txns_ratio=-1.0),
+            dict(early_cooldown_minutes=-1.0),
+        ]
+        for caso in casos:
+            with self.subTest(caso=caso), self.assertRaises(ValueError):
+                Config(**caso)
+
     def test_penalizacion_desactivada_no_valida_el_fin(self):
         Config(late_penalty_start_h1_pct=0.0, late_penalty_end_h1_pct=0.0)
 
@@ -301,6 +319,24 @@ class TestFromToml(unittest.TestCase):
         self.assertEqual(config.late_penalty_start_h1_pct, 40)
         self.assertEqual(config.late_penalty_end_h1_pct, 120)
         self.assertEqual(config.alert_log_path, "")
+
+    def test_lee_la_vigilancia(self):
+        config = Config.from_toml(
+            self._write(
+                "[watch]\nenabled = false\ninterval_seconds = 45\nmax_tokens = 30\n"
+                "min_price_move_pct = 3\nmax_price_move_pct = 20\nmin_volume_ratio = 3\n"
+                "min_txns_ratio = 1.5\nmin_buy_ratio = 0.6\ncooldown_minutes = 20\n"
+            )
+        )
+        self.assertFalse(config.watch_enabled)
+        self.assertEqual(config.watch_interval_seconds, 45)
+        self.assertEqual(config.watch_max_tokens, 30)
+        self.assertEqual(config.early_min_price_move_pct, 3)
+        self.assertEqual(config.early_max_price_move_pct, 20)
+        self.assertEqual(config.early_min_volume_ratio, 3)
+        self.assertEqual(config.early_min_txns_ratio, 1.5)
+        self.assertEqual(config.early_min_buy_ratio, 0.6)
+        self.assertEqual(config.early_cooldown_minutes, 20)
 
     def test_clave_desconocida_en_scoring_avisa(self):
         with self.assertLogs(level=logging.WARNING) as logs:

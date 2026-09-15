@@ -48,6 +48,20 @@ def buy_ratio_m5(pair: dict) -> float | None:
 
 
 @dataclass(frozen=True)
+class EarlySignal:
+    """Arranque de un pool detectado contra su propia historia reciente."""
+    # Precio actual frente a la mediana de la base, en %.
+    price_move_pct: float
+    # Volumen y txns de los últimos 5 min frente a la mediana de la base.
+    volume_ratio: float
+    txns_ratio: float
+    # Fracción de compras en las txns de los últimos 5 min (0-1).
+    buy_ratio: float
+    # Antigüedad de la foto más vieja de la base, en minutos.
+    baseline_minutes: float
+
+
+@dataclass(frozen=True)
 class CandleStats:
     """Posición del último precio dentro de la ventana de velas, en %."""
     # Cuánto está por encima del mínimo de toda la ventana.

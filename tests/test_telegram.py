@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 from telegram.error import RetryAfter
 
-from sigpump.signals import CandleStats
+from sigpump.signals import CandleStats, EarlySignal
 from sigpump.telegram import TelegramAlerter
 
 TOKEN_FALSO = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
@@ -105,6 +105,31 @@ class TestMomentum(unittest.TestCase):
         alerter._bot = AsyncMock()
         asyncio.run(alerter.send(_pair(), 80.0, CandleStats(10.0, 1.0)))
         self.assertIn("Sobre mínimo 1h: +10%", alerter._bot.send_message.await_args.kwargs["text"])
+
+
+class TestPrealerta(unittest.TestCase):
+    def test_destaca_el_arranque(self):
+        early = EarlySignal(
+            price_move_pct=9.6, volume_ratio=4.2, txns_ratio=3.1, buy_ratio=0.7, baseline_minutes=12.4
+        )
+        texto = _alerter().format_message(_pair(), 55.0, early=early)
+        self.assertTrue(texto.startswith("⚡ <b>PREALERTA Pepe Coin (PEPE)</b>\n"))
+        self.assertIn("Arranque: <b>+9.6%</b> sobre la base de 12 min", texto)
+        self.assertIn("Vol. 5m x4.2 y txns 5m x3.1 sobre la base", texto)
+        self.assertIn("Score: <b>55.0</b>/100", texto)
+        self.assertNotIn("🎯", texto)
+
+    def test_alerta_normal_mantiene_el_encabezado(self):
+        texto = _alerter().format_message(_pair(), 80.0)
+        self.assertTrue(texto.startswith("🎯 <b>Pepe Coin (PEPE)</b>\n"))
+        self.assertNotIn("PREALERTA", texto)
+
+    def test_send_pasa_la_prealerta_al_mensaje(self):
+        alerter = _alerter()
+        alerter._bot = AsyncMock()
+        early = EarlySignal(5.0, 3.0, 2.5, 0.6, 10.0)
+        asyncio.run(alerter.send(_pair(), 50.0, early=early))
+        self.assertIn("PREALERTA", alerter._bot.send_message.await_args.kwargs["text"])
 
 
 class TestEscaping(unittest.TestCase):

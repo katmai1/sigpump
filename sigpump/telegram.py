@@ -15,7 +15,13 @@ from telegram.constants import ParseMode  # type: ignore[import-not-found]
 from telegram.error import RetryAfter  # type: ignore[import-not-found]
 from telegram.warnings import PTBDeprecationWarning  # type: ignore[import-not-found]
 
-from sigpump.signals import RECENT_HIGH_MINUTES, CandleStats, buy_ratio_m5, volume_acceleration
+from sigpump.signals import (
+    RECENT_HIGH_MINUTES,
+    CandleStats,
+    EarlySignal,
+    buy_ratio_m5,
+    volume_acceleration,
+)
 from sigpump.util import to_float
 
 # Espera máxima aceptable ante flood control. Más que esto bloquearía el
@@ -48,7 +54,13 @@ class TelegramAlerter:
     async def __aexit__(self, *exc_info: object) -> None:
         await self._bot.shutdown()
 
-    def format_message(self, pair: dict, score: float, candles: CandleStats | None = None) -> str:
+    def format_message(
+        self,
+        pair: dict,
+        score: float,
+        candles: CandleStats | None = None,
+        early: EarlySignal | None = None,
+    ) -> str:
         """Arma el HTML del mensaje de alerta para `pair` con su `score` y,
         si la verificación pidió velas, su posición respecto del mínimo y
         del máximo reciente.
@@ -95,8 +107,19 @@ class TelegramAlerter:
             )
             links += f" | <a href=\"{photon_url}\">Ver en Photon</a>"
 
+        if early is None:
+            header = f"🎯 <b>{name} ({symbol})</b>\n"
+        else:
+            # Prealerta: lo primero que se lee es el arranque, que es lo que
+            # decide si todavía hay margen para entrar.
+            header = (
+                f"⚡ <b>PREALERTA {name} ({symbol})</b>\n"
+                f"Arranque: <b>{early.price_move_pct:+.1f}%</b> sobre la base de "
+                f"{early.baseline_minutes:.0f} min\n"
+                f"Vol. 5m x{early.volume_ratio:.1f} y txns 5m x{early.txns_ratio:.1f} sobre la base\n"
+            )
         return (
-            f"🎯 <b>{name} ({symbol})</b>\n"
+            f"{header}"
             f"Score: <b>{score}</b>/100\n"
             f"Precio: ${price_usd}\n"
             f"Cambio 5m: {change_m5:+.1f}%\n"
@@ -110,11 +133,18 @@ class TelegramAlerter:
             f"{links}"
         )
 
-    async def send(self, pair: dict, score: float, candles: CandleStats | None = None) -> None:
-        """Arma y envía el mensaje de alerta para `pair` con su `score` ya calculado."""
+    async def send(
+        self,
+        pair: dict,
+        score: float,
+        candles: CandleStats | None = None,
+        early: EarlySignal | None = None,
+    ) -> None:
+        """Arma y envía el mensaje de alerta (o de prealerta, con `early`) para
+        `pair` con su `score` ya calculado."""
         kwargs = dict(
             chat_id=self._chat_id,
-            text=self.format_message(pair, score, candles),
+            text=self.format_message(pair, score, candles, early),
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
             message_thread_id=self._message_thread_id,

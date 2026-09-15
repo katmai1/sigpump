@@ -1,6 +1,7 @@
 """Tests del cliente HTTP: reintentos, backoff, batching y tolerancia a
 respuestas con forma inesperada. No tocan la red: la sesión es un doble."""
 
+import asyncio
 import logging
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -43,6 +44,18 @@ class _FakeResponse:
 
     async def __aexit__(self, *exc_info):
         return False
+
+
+class _SlowResponse(_FakeResponse):
+    """Respuesta que cede el control al leer el cuerpo, como una real. Sin
+    esto dos requests "concurrentes" se ejecutan uno detrás del otro."""
+
+    async def json(self, content_type=None):
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        loop.call_soon(future.set_result, None)
+        await future
+        return await super().json(content_type)
 
 
 class _FakeRaisingContext:
@@ -267,6 +280,15 @@ class TestGeckoSpacing(ScreenerTestCase):
         self.sleep.assert_awaited_once()
         self.assertGreater(self.sleep.await_args.args[0], 0)
         self.assertLessEqual(self.sleep.await_args.args[0], GECKO_REQUEST_INTERVAL_SECONDS)
+
+    async def test_requests_concurrentes_a_gecko_tambien_se_espacian(self):
+        """El escaneo y la vigilancia piden a GeckoTerminal a la vez: sin lock
+        los dos veían la misma espera y disparaban juntos."""
+        session = _FakeSession(_SlowResponse(200, {}), _SlowResponse(200, {}))
+        client = DexScreenerClient(session)
+        await asyncio.gather(client._gecko_get("/a"), client._gecko_get("/b"))
+        self.sleep.assert_awaited_once()
+        self.assertGreater(self.sleep.await_args.args[0], 0)
 
     async def test_429_de_gecko_espera_la_ventana_del_minuto(self):
         """Con backoff de 2s/4s/8s los reintentos caían en la misma ventana,

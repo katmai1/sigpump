@@ -15,10 +15,11 @@ import aiohttp  # type: ignore[import-not-found]
 
 from sigpump.config import Config, score_pair
 from sigpump.screener import DexScreenerClient
-from sigpump.signals import RECENT_HIGH_MINUTES, CandleStats, candle_stats
+from sigpump.signals import RECENT_HIGH_MINUTES, CandleStats, EarlySignal, candle_stats
 from sigpump.telegram import TelegramAlerter
 from sigpump.tracker import AlertTracker
 from sigpump.util import normalize_address, to_float
+from sigpump.watch import EarlyThresholds, PoolHistory
 
 log = logging.getLogger()
 
@@ -28,6 +29,13 @@ CANDLE_LOOKBACK_MINUTES = 60
 # un request de velas y el tier gratuito corta en ~10 por minuto. Los que no
 # entran se reintentan en la próxima pasada (no se les marca cooldown).
 MAX_VERIFICATIONS_PER_PASS = 5
+# Tope de prealertas por vuelta: si arrancan muchos a la vez suele ser el
+# mercado entero moviéndose, no señales individuales.
+MAX_EARLY_PER_PASS = 3
+# Espera máxima a GeckoTerminal para verificar una prealerta. Si está ocupado
+# (p. ej. esperando la ventana de un 429) la prealerta ya no llegaría a
+# tiempo: se reintenta en la próxima vuelta si el arranque sigue.
+EARLY_VERIFY_TIMEOUT_SECONDS = 20.0
 
 
 def _liquidity_usd(pair: dict) -> float:
@@ -67,22 +75,47 @@ class MemecoinRadar:
         # spamear el mismo token en cada pasada mientras siga por encima del umbral.
         self._alerted: dict[str, float] = {}  # address -> last alert timestamp
         self._tracker = AlertTracker(Path(config.alert_log_path)) if config.alert_log_path else None
+        # Prealertas: cooldown propio, para que una prealerta no bloquee la
+        # alerta completa que confirma el movimiento después.
+        self._early_alerted: dict[str, float] = {}
+        self._history = PoolHistory()
+        # Tokens que consulta el bucle de vigilancia; los elige cada pasada completa.
+        self._watchlist: list[str] = []
+        # Boosteados de la última pasada, para puntuar las prealertas.
+        self._boosted: set[str] = set()
+        self._early_thresholds = EarlyThresholds(
+            min_price_move_pct=config.early_min_price_move_pct,
+            max_price_move_pct=config.early_max_price_move_pct,
+            min_volume_ratio=config.early_min_volume_ratio,
+            min_txns_ratio=config.early_min_txns_ratio,
+            min_buy_ratio=config.early_min_buy_ratio,
+        )
+
+    @staticmethod
+    def _recent(registry: dict[str, float], address: str, minutes: float) -> bool:
+        last = registry.get(address)
+        return last is not None and (time.time() - last) / 60 < minutes
 
     def _cooldown_active(self, address: str) -> bool:
         """True si `address` fue alertado hace menos de alert_cooldown_minutes."""
-        last = self._alerted.get(address)
-        if last is None:
-            return False
-        elapsed_minutes = (time.time() - last) / 60
-        return elapsed_minutes < self._config.alert_cooldown_minutes
+        return self._recent(self._alerted, address, self._config.alert_cooldown_minutes)
+
+    def _early_cooldown_active(self, address: str) -> bool:
+        """True si `address` tuvo prealerta hace menos de [watch].cooldown_minutes."""
+        return self._recent(self._early_alerted, address, self._config.early_cooldown_minutes)
 
     def _prune_alerted(self) -> None:
-        """Elimina de _alerted las direcciones cuyo cooldown ya expiró, para
-        que el diccionario no crezca indefinidamente en ejecuciones largas."""
-        cutoff = time.time() - self._config.alert_cooldown_minutes * 60
-        expired = [addr for addr, ts in self._alerted.items() if ts < cutoff]
-        for addr in expired:
-            del self._alerted[addr]
+        """Elimina los cooldowns expirados y las fotos viejas, para que la
+        memoria no crezca indefinidamente en ejecuciones largas."""
+        now = time.time()
+        for registry, minutes in (
+            (self._alerted, self._config.alert_cooldown_minutes),
+            (self._early_alerted, self._config.early_cooldown_minutes),
+        ):
+            expired = [addr for addr, ts in registry.items() if ts < now - minutes * 60]
+            for addr in expired:
+                del registry[addr]
+        self._history.prune(now)
 
     async def _discover_candidates(self, client: DexScreenerClient) -> tuple[list[str], set[str]]:
         """
@@ -172,16 +205,15 @@ class MemecoinRadar:
                 best[address] = pair
         return list(best.values())
 
-    def _rejection_reason(self, pair: dict) -> str | None:
+    def _structural_rejection_reason(self, pair: dict) -> str | None:
         """
-        Filtros duros antes de puntuar, con los datos de DexScreener. Devuelve
-        el motivo del descarte o None si el par pasa. Descartan pares
-        ilíquidos, sin actividad real, de capitalización muy baja o con
-        señales de manipulación, sin gastar cómputo de scoring en ellos.
+        Filtros duros que no dependen de la actividad del momento: liquidez,
+        capitalización, edad y subida absurda. Deciden también qué tokens se
+        vigilan, porque el que interesa vigilar es justo el que todavía está
+        tranquilo y no pasaría los de actividad.
         """
         cfg = self._config
         liquidity_usd = _liquidity_usd(pair)
-        volume_h1 = to_float((pair.get("volume") or {}).get("h1"))
         # marketCap suele venir ausente en tokens nuevos (sin supply circulante
         # conocido); fdv (fully diluted valuation) es el fallback de DexScreener.
         market_cap_usd = to_float(pair.get("marketCap")) or to_float(pair.get("fdv"))
@@ -190,17 +222,9 @@ class MemecoinRadar:
         # pasada entera, no solo este par.
         pair_created_at = to_float(pair.get("pairCreatedAt"))
         change_h1 = to_float((pair.get("priceChange") or {}).get("h1"))
-        txns_h1 = (pair.get("txns") or {}).get("h1")
-        if not isinstance(txns_h1, dict):
-            txns_h1 = {}
-        buys = to_float(txns_h1.get("buys"))
-        sells = to_float(txns_h1.get("sells"))
-        txns = buys + sells
 
         if liquidity_usd < cfg.min_liquidity_usd:
             return f"liquidez ${liquidity_usd:,.0f} < ${cfg.min_liquidity_usd:,.0f}"
-        if volume_h1 < cfg.min_volume_h1_usd:
-            return f"volumen 1h ${volume_h1:,.0f} < ${cfg.min_volume_h1_usd:,.0f}"
         if market_cap_usd < cfg.min_market_cap_usd:
             return f"market cap ${market_cap_usd:,.0f} < ${cfg.min_market_cap_usd:,.0f}"
         # Pares recién creados son los más propensos a rug pulls; se
@@ -211,6 +235,26 @@ class MemecoinRadar:
             age_minutes = (time.time() - pair_created_at / 1000) / 60
             if age_minutes < cfg.min_pair_age_minutes:
                 return f"par creado hace {age_minutes:.0f} min"
+        # Subidas de miles de % en una hora en un par que ya tiene cierta edad
+        # son casi siempre precio roto o manipulado, no momentum real.
+        if cfg.max_price_change_h1_pct and change_h1 > cfg.max_price_change_h1_pct:
+            return f"cambio 1h {change_h1:+,.0f}% > {cfg.max_price_change_h1_pct:,.0f}%"
+        return None
+
+    def _activity_rejection_reason(self, pair: dict) -> str | None:
+        """Filtros duros sobre la actividad de la última hora: volumen y txns
+        mínimos, wash trading y honeypots."""
+        cfg = self._config
+        volume_h1 = to_float((pair.get("volume") or {}).get("h1"))
+        txns_h1 = (pair.get("txns") or {}).get("h1")
+        if not isinstance(txns_h1, dict):
+            txns_h1 = {}
+        buys = to_float(txns_h1.get("buys"))
+        sells = to_float(txns_h1.get("sells"))
+        txns = buys + sells
+
+        if volume_h1 < cfg.min_volume_h1_usd:
+            return f"volumen 1h ${volume_h1:,.0f} < ${cfg.min_volume_h1_usd:,.0f}"
         if txns < cfg.min_txns_h1:
             return f"{txns:.0f} txns en 1h < {cfg.min_txns_h1}"
         # Mucho volumen en pocas operaciones: wash trading, o un precio en USD
@@ -218,14 +262,19 @@ class MemecoinRadar:
         # En memecoins reales el trade medio ronda los cientos de dólares.
         if cfg.max_avg_trade_usd and txns > 0 and volume_h1 / txns > cfg.max_avg_trade_usd:
             return f"trade medio ${volume_h1 / txns:,.0f} > ${cfg.max_avg_trade_usd:,.0f}"
-        # Subidas de miles de % en una hora en un par que ya tiene cierta edad
-        # son casi siempre precio roto o manipulado, no momentum real.
-        if cfg.max_price_change_h1_pct and change_h1 > cfg.max_price_change_h1_pct:
-            return f"cambio 1h {change_h1:+,.0f}% > {cfg.max_price_change_h1_pct:,.0f}%"
         # Casi nadie vende: honeypot (no se puede vender) o pump coordinado.
         if txns > 0 and sells / txns < cfg.min_sell_ratio_h1:
             return f"solo {sells:.0f} ventas de {txns:.0f} txns en 1h"
         return None
+
+    def _rejection_reason(self, pair: dict) -> str | None:
+        """
+        Filtros duros antes de puntuar, con los datos de DexScreener. Devuelve
+        el motivo del descarte o None si el par pasa. Descartan pares
+        ilíquidos, sin actividad real, de capitalización muy baja o con
+        señales de manipulación, sin gastar cómputo de scoring en ellos.
+        """
+        return self._structural_rejection_reason(pair) or self._activity_rejection_reason(pair)
 
     def _late_reason(self, stats: CandleStats | None) -> str | None:
         """
@@ -248,6 +297,41 @@ class MemecoinRadar:
             )
         return None
 
+    def _pool_reason(self, pair: dict, pools: dict[str, dict]) -> str | None:
+        """
+        Contrasta precio y liquidez del par con los datos de GeckoTerminal de
+        su pool (de get_gecko_pools). Devuelve el motivo del descarte o None
+        si pasa. Lo usan la verificación de alertas y la de prealertas.
+        """
+        cfg = self._config
+        token_address = normalize_address((pair.get("baseToken") or {}).get("address") or "")
+        pool = pools.get(normalize_address(str(pair.get("pairAddress") or "")))
+        if pool is None:
+            return "GeckoTerminal no tiene datos del pool"
+
+        # DexScreener calcula el precio en USD a partir del precio del quote;
+        # cuando ese cálculo está roto (quote poco líquido o manipulado) publica
+        # precios miles de veces más altos, y con ellos volumen, liquidez y
+        # cambios de precio absurdos que inflan el score.
+        if cfg.max_price_deviation_pct:
+            dex_price = to_float(pair.get("priceUsd"))
+            gecko_price = pool["token_prices"].get(token_address, 0.0)
+            if dex_price <= 0 or gecko_price <= 0:
+                return "sin precio para comparar con GeckoTerminal"
+            deviation = (max(dex_price, gecko_price) / min(dex_price, gecko_price) - 1) * 100
+            if deviation > cfg.max_price_deviation_pct:
+                return (
+                    f"precio DexScreener ${dex_price:.6g} vs GeckoTerminal "
+                    f"${gecko_price:.6g} (difieren {deviation:,.0f}%)"
+                )
+
+        if pool["reserve_usd"] < cfg.min_liquidity_usd:
+            return (
+                f"liquidez según GeckoTerminal ${pool['reserve_usd']:,.0f} "
+                f"< ${cfg.min_liquidity_usd:,.0f}"
+            )
+        return None
+
     async def _verification_reason(
         self, client: DexScreenerClient, pair: dict, pools: dict[str, dict]
     ) -> tuple[str | None, CandleStats | None]:
@@ -261,31 +345,9 @@ class MemecoinRadar:
         cfg = self._config
         pair_address = str(pair.get("pairAddress") or "")
         token_address = normalize_address((pair.get("baseToken") or {}).get("address") or "")
-        pool = pools.get(normalize_address(pair_address))
-        if pool is None:
-            return "GeckoTerminal no tiene datos del pool", None
-
-        # DexScreener calcula el precio en USD a partir del precio del quote;
-        # cuando ese cálculo está roto (quote poco líquido o manipulado) publica
-        # precios miles de veces más altos, y con ellos volumen, liquidez y
-        # cambios de precio absurdos que inflan el score.
-        if cfg.max_price_deviation_pct:
-            dex_price = to_float(pair.get("priceUsd"))
-            gecko_price = pool["token_prices"].get(token_address, 0.0)
-            if dex_price <= 0 or gecko_price <= 0:
-                return "sin precio para comparar con GeckoTerminal", None
-            deviation = (max(dex_price, gecko_price) / min(dex_price, gecko_price) - 1) * 100
-            if deviation > cfg.max_price_deviation_pct:
-                return (
-                    f"precio DexScreener ${dex_price:.6g} vs GeckoTerminal "
-                    f"${gecko_price:.6g} (difieren {deviation:,.0f}%)"
-                ), None
-
-        if pool["reserve_usd"] < cfg.min_liquidity_usd:
-            return (
-                f"liquidez según GeckoTerminal ${pool['reserve_usd']:,.0f} "
-                f"< ${cfg.min_liquidity_usd:,.0f}"
-            ), None
+        reason = self._pool_reason(pair, pools)
+        if reason:
+            return reason, None
 
         if not (
             cfg.max_candle_drop_pct
@@ -340,6 +402,112 @@ class MemecoinRadar:
             verified.append((pair, score, stats))
         return verified
 
+    def _score(self, pair: dict, boosted_addresses: set[str]) -> float:
+        return score_pair(
+            pair,
+            self._config.weights,
+            boosted_addresses,
+            self._config.late_penalty_start_h1_pct,
+            self._config.late_penalty_end_h1_pct,
+        )
+
+    def _update_watchlist(self, pairs: list[dict]) -> None:
+        """
+        Elige los tokens que consulta el bucle de vigilancia: los que pasan
+        los filtros estructurales, de mayor a menor volumen 1h, hasta
+        [watch].max_tokens. No se les exigen los de actividad: el token que
+        interesa es el que todavía está tranquilo.
+        """
+        eligible = [p for p in pairs if self._structural_rejection_reason(p) is None]
+        eligible.sort(key=lambda p: to_float((p.get("volume") or {}).get("h1")), reverse=True)
+        self._watchlist = [
+            normalize_address((p.get("baseToken") or {}).get("address", ""))
+            for p in eligible[: self._config.watch_max_tokens]
+        ]
+
+    async def _watch_once(self, client: DexScreenerClient, alerter: TelegramAlerter) -> None:
+        """Vuelta del bucle de vigilancia: trae los datos de los tokens
+        vigilados (un request a DexScreener cada 30) y busca arranques, sin
+        esperar a la pasada completa."""
+        addresses = [
+            a for a in self._watchlist
+            if not self._cooldown_active(a) and not self._early_cooldown_active(a)
+        ]
+        if not addresses:
+            return
+        all_pairs = await client.get_pairs_for_tokens(self._config.chain_id, addresses)
+        await self._check_early(client, alerter, self._best_pair_per_token(all_pairs, addresses))
+
+    async def _check_early(
+        self, client: DexScreenerClient, alerter: TelegramAlerter, pairs: list[dict]
+    ) -> None:
+        """
+        Guarda la foto de cada par y manda prealerta a los que arrancan contra
+        su propia historia. Pasan los mismos filtros duros que una alerta y,
+        con verify_before_alert, el contraste de precio y liquidez con
+        GeckoTerminal; no la revisión de velas, que cuesta un request por token
+        y le quitaría a la prealerta el margen que la justifica.
+        """
+        now = time.time()
+        signals: list[tuple[dict, EarlySignal]] = []
+        for pair in pairs:
+            self._history.observe(pair, now)
+            address = normalize_address((pair.get("baseToken") or {}).get("address", ""))
+            if self._cooldown_active(address) or self._early_cooldown_active(address):
+                continue
+            if self._rejection_reason(pair):
+                continue
+            signal = self._history.early_signal(pair, now, self._early_thresholds)
+            if signal:
+                signals.append((pair, signal))
+        if not signals:
+            return
+        signals.sort(key=lambda s: s[1].volume_ratio, reverse=True)
+        signals = signals[:MAX_EARLY_PER_PASS]
+
+        pools: dict[str, dict] = {}
+        if self._config.verify_before_alert:
+            pool_addresses = [str(p["pairAddress"]) for p, _ in signals if p.get("pairAddress")]
+            try:
+                pools = await asyncio.wait_for(
+                    client.get_gecko_pools(self._config.chain_id, pool_addresses),
+                    EARLY_VERIFY_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                log.info("GeckoTerminal no respondió a tiempo para verificar prealertas")
+                return
+
+        for pair, signal in signals:
+            address = normalize_address((pair.get("baseToken") or {}).get("address", ""))
+            if self._config.verify_before_alert:
+                reason = self._pool_reason(pair, pools)
+                if reason:
+                    log.info("Prealerta de %s descartada al verificar: %s", _symbol(pair), reason)
+                    continue
+            # El escaneo y la vigilancia corren a la vez: durante la espera a
+            # GeckoTerminal el otro bucle pudo haber avisado ya de este token.
+            if self._cooldown_active(address) or self._early_cooldown_active(address):
+                continue
+            score = self._score(pair, self._boosted)
+            log.info(
+                "Prealerta: %s arranque %+.1f%% vol5m x%.1f txns5m x%.1f compras %.0f%%",
+                _symbol(pair),
+                signal.price_move_pct,
+                signal.volume_ratio,
+                signal.txns_ratio,
+                signal.buy_ratio * 100,
+            )
+            # Se marca antes de enviar por lo mismo: el envío también cede el control.
+            self._early_alerted[address] = time.time()
+            try:
+                await alerter.send(pair, score, early=signal)
+            except Exception:
+                log.exception("Error enviando prealerta para %s", address)
+                self._early_alerted.pop(address, None)
+                continue
+            if self._tracker:
+                self._tracker.record(pair, score, None, sent=True, kind="prealerta", early=signal)
+
     async def _scan_once(self, client: DexScreenerClient, alerter: TelegramAlerter) -> None:
         """Ejecuta una pasada completa: descubrir -> traer datos de mercado ->
         filtrar -> puntuar -> verificar -> alertar. Se invoca en loop desde run()."""
@@ -351,6 +519,7 @@ class MemecoinRadar:
                 # El registro es secundario: no debe costar las alertas de la pasada.
                 log.exception("Error actualizando el registro de alertas")
         addresses, boosted_addresses = await self._discover_candidates(client)
+        self._boosted = boosted_addresses
         if not addresses:
             log.info("Sin candidatos nuevos en esta pasada")
             return
@@ -365,6 +534,11 @@ class MemecoinRadar:
             len(all_pairs),
             len(addresses),
         )
+        if self._config.watch_enabled:
+            self._update_watchlist(pairs)
+            # Antes de verificar las alertas completas, que tarda: la
+            # prealerta vale por llegar pronto.
+            await self._check_early(client, alerter, pairs)
 
         to_alert: list[tuple[dict, float]] = []
         for pair in pairs:
@@ -373,13 +547,7 @@ class MemecoinRadar:
                 log.debug("Descartado %s: %s", _symbol(pair), reason)
                 continue
 
-            score = score_pair(
-                pair,
-                self._config.weights,
-                boosted_addresses,
-                self._config.late_penalty_start_h1_pct,
-                self._config.late_penalty_end_h1_pct,
-            )
+            score = self._score(pair, boosted_addresses)
             # _best_pair_per_token ya garantizó que address es una de las
             # direcciones pedidas, así que nunca es "".
             address = normalize_address((pair.get("baseToken") or {}).get("address", ""))
@@ -434,11 +602,32 @@ class MemecoinRadar:
         # HTTP de Telegram al salir.
         async with aiohttp.ClientSession() as session, alerter:
             client = DexScreenerClient(session)
-            while True:
-                try:
-                    await self._scan_once(client, alerter)
-                except Exception:
-                    # Errores inesperados (red, parsing, etc.) no deben matar
-                    # el proceso: se loguean y se reintenta en la próxima pasada.
-                    log.exception("Error durante el escaneo")
-                await asyncio.sleep(self._config.poll_interval_seconds)
+            loops = [
+                self._loop(
+                    self._scan_once, client, alerter,
+                    self._config.poll_interval_seconds, "Error durante el escaneo",
+                )
+            ]
+            # La vigilancia corre en paralelo con su propio intervalo: esperar
+            # a que termine la pasada completa (2-3 min) es justo lo que hace
+            # llegar tarde.
+            if self._config.watch_enabled:
+                loops.append(
+                    self._loop(
+                        self._watch_once, client, alerter,
+                        self._config.watch_interval_seconds, "Error durante la vigilancia",
+                    )
+                )
+            await asyncio.gather(*loops)
+
+    @staticmethod
+    async def _loop(step, client, alerter, interval: float, error_message: str) -> None:
+        """Repite `step(client, alerter)` cada `interval` segundos. Errores
+        inesperados (red, parsing, etc.) no deben matar el proceso: se loguean
+        y se reintenta en la próxima vuelta."""
+        while True:
+            try:
+                await step(client, alerter)
+            except Exception:
+                log.exception(error_message)
+            await asyncio.sleep(interval)

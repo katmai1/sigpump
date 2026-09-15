@@ -53,6 +53,30 @@ El bucle principal ([sigpump/radar.py](sigpump/radar.py)) repite cada
    `alert_log_path` ([sigpump/tracker.py](sigpump/tracker.py)) con los datos
    del momento y el retorno a +5, +15 y +30 minutos.
 
+## Prealertas
+
+Una pasada completa tarda 2-3 minutos (sobre todo por el espaciado que exige
+GeckoTerminal) y el score usa ventanas de 5 minutos y 1 hora, así que cuando
+sale una alerta el movimiento ya está en marcha. Para ganar margen, el radar
+guarda una foto de cada pool en cada consulta: precio, volumen y txns de
+5 minutos ([sigpump/watch.py](sigpump/watch.py)). Un segundo bucle consulta
+cada `[watch].interval_seconds` solo los tokens vigilados, sin esperar a la
+pasada completa. DexScreener refresca sus datos cada ~30 segundos, así que
+ese es el mínimo útil.
+
+Se manda una ⚡ PREALERTA cuando un pool que estaba tranquilo arranca frente a
+su propia historia de hace 5-20 minutos: precio +4-30% sobre la mediana de
+esa base, volumen y txns de 5 minutos multiplicados, mayoría de compras y
+precio de 5 minutos subiendo. Se compara con la historia propia y no con la
+media de la última hora porque esa media ya incluye la subida cuando esta
+lleva unos minutos.
+
+La prealerta pasa los mismos filtros duros que una alerta y, con
+`verify_before_alert`, el contraste de precio y liquidez con GeckoTerminal,
+pero no la revisión de velas. Es menos fiable que la alerta completa, que se
+sigue mandando aparte si después el token la merece. Se registra con
+`tipo = 'prealerta'`.
+
 ## Registro de alertas
 
 `alertas.db` (configurable con `[radar].alert_log_path`) es una base SQLite
@@ -74,11 +98,11 @@ Se puede abrir con `sqlite3 alertas.db` o con cualquier visor de SQLite
 retorno medio de las alertas enviadas frente a las descartadas:
 
 ```sql
-SELECT enviada, COUNT(*) AS n,
+SELECT COALESCE(tipo, 'alerta') AS tipo, enviada, COUNT(*) AS n,
        ROUND(AVG(ret_5m_pct), 1) AS ret_5m,
        ROUND(AVG(ret_30m_pct), 1) AS ret_30m,
        ROUND(AVG(mejor_ret_30m_pct), 1) AS mejor
-FROM alertas GROUP BY enviada;
+FROM alertas GROUP BY 1, 2;
 ```
 
 Con unos días de datos se puede ver qué valores de `aceleracion_volumen`,
@@ -132,6 +156,8 @@ Secciones disponibles:
 - `[radar]` — intervalo de polling, cooldown entre alertas repetidas del
   mismo token, umbral de score, cuántos candidatos evaluar por pasada y
   `alert_log_path` (la base SQLite de resultados).
+- `[watch]` — vigilancia rápida y prealertas: intervalo, cuántos tokens
+  vigilar, umbrales de arranque y cooldown propio.
 - `[scoring]` — `late_penalty_start_h1_pct` y `late_penalty_end_h1_pct`:
   entre esos dos cambios de 1h el score se reduce linealmente hasta 0.
 - `[scoring_weights]` — pesos relativos (deben sumar ~1.0) de cada

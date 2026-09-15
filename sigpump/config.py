@@ -47,6 +47,17 @@ _KNOWN_KEYS: dict[str, set[str]] = {
         "verbose",
     },
     "scoring": {"late_penalty_start_h1_pct", "late_penalty_end_h1_pct"},
+    "watch": {
+        "enabled",
+        "interval_seconds",
+        "max_tokens",
+        "min_price_move_pct",
+        "max_price_move_pct",
+        "min_volume_ratio",
+        "min_txns_ratio",
+        "min_buy_ratio",
+        "cooldown_minutes",
+    },
     "telegram": {"bot_token", "chat_id", "message_thread_id"},
 }
 
@@ -76,6 +87,16 @@ _FIELD_TYPES: dict[str, tuple[str, tuple[type, ...]]] = {
     "late_penalty_start_h1_pct": ("[scoring].late_penalty_start_h1_pct", _NUMBER),
     "late_penalty_end_h1_pct": ("[scoring].late_penalty_end_h1_pct", _NUMBER),
     "alert_log_path": ("[radar].alert_log_path", (str,)),
+    "watch_enabled": ("[watch].enabled", (bool,)),
+    "watch_interval_seconds": ("[watch].interval_seconds", _NUMBER),
+    # Se usa como índice de slice: tiene que ser entero.
+    "watch_max_tokens": ("[watch].max_tokens", (int,)),
+    "early_min_price_move_pct": ("[watch].min_price_move_pct", _NUMBER),
+    "early_max_price_move_pct": ("[watch].max_price_move_pct", _NUMBER),
+    "early_min_volume_ratio": ("[watch].min_volume_ratio", _NUMBER),
+    "early_min_txns_ratio": ("[watch].min_txns_ratio", _NUMBER),
+    "early_min_buy_ratio": ("[watch].min_buy_ratio", _NUMBER),
+    "early_cooldown_minutes": ("[watch].cooldown_minutes", _NUMBER),
     "verbose": ("[radar].verbose", (bool,)),
     "telegram_bot_token": ("[telegram].bot_token", (str,)),
     "telegram_chat_id": ("[telegram].chat_id", (str,)),
@@ -179,6 +200,16 @@ class Config:
     late_penalty_start_h1_pct: float = 60.0
     late_penalty_end_h1_pct: float = 250.0
     alert_log_path: str = "alertas.db"
+    watch_enabled: bool = True
+    # DexScreener refresca sus datos cada ~30 s: consultar más seguido no aporta.
+    watch_interval_seconds: float = 30.0
+    watch_max_tokens: int = 90
+    early_min_price_move_pct: float = 4.0
+    early_max_price_move_pct: float = 30.0
+    early_min_volume_ratio: float = 2.5
+    early_min_txns_ratio: float = 2.0
+    early_min_buy_ratio: float = 0.55
+    early_cooldown_minutes: float = 60.0
     verbose: bool = False
     weights: ScoringWeights = field(default_factory=ScoringWeights)
     telegram_bot_token: str = ""
@@ -237,7 +268,25 @@ class Config:
                 f"[scoring].late_penalty_end_h1_pct ({self.late_penalty_end_h1_pct}) debe "
                 f"ser mayor que late_penalty_start_h1_pct ({self.late_penalty_start_h1_pct})"
             )
+        if self.watch_interval_seconds <= 0:
+            raise ValueError(
+                f"[watch].interval_seconds debe ser > 0 ({self.watch_interval_seconds})"
+            )
+        if self.watch_max_tokens <= 0:
+            raise ValueError(f"[watch].max_tokens debe ser > 0 ({self.watch_max_tokens})")
+        if not 0 <= self.early_min_price_move_pct < self.early_max_price_move_pct:
+            raise ValueError(
+                f"[watch].min_price_move_pct ({self.early_min_price_move_pct}) debe ser >= 0 "
+                f"y menor que max_price_move_pct ({self.early_max_price_move_pct})"
+            )
+        if not 0 <= self.early_min_buy_ratio <= 1:
+            raise ValueError(
+                f"[watch].min_buy_ratio debe estar entre 0 y 1 ({self.early_min_buy_ratio})"
+            )
         for name in (
+            "early_min_volume_ratio",
+            "early_min_txns_ratio",
+            "early_cooldown_minutes",
             "max_rise_from_low_pct",
             "late_penalty_start_h1_pct",
             "late_penalty_end_h1_pct",
@@ -273,6 +322,7 @@ class Config:
         dexscreener = _section(raw, "dexscreener")
         geckoterminal = _section(raw, "geckoterminal")
         scoring = _section(raw, "scoring")
+        watch = _section(raw, "watch")
         telegram = _section(raw, "telegram")
         weights_raw = raw.get("scoring_weights", {})
         if not isinstance(weights_raw, dict):
@@ -307,6 +357,15 @@ class Config:
             late_penalty_start_h1_pct=scoring.get("late_penalty_start_h1_pct", 60.0),
             late_penalty_end_h1_pct=scoring.get("late_penalty_end_h1_pct", 250.0),
             alert_log_path=radar.get("alert_log_path", "alertas.db"),
+            watch_enabled=watch.get("enabled", True),
+            watch_interval_seconds=watch.get("interval_seconds", 30.0),
+            watch_max_tokens=watch.get("max_tokens", 90),
+            early_min_price_move_pct=watch.get("min_price_move_pct", 4.0),
+            early_max_price_move_pct=watch.get("max_price_move_pct", 30.0),
+            early_min_volume_ratio=watch.get("min_volume_ratio", 2.5),
+            early_min_txns_ratio=watch.get("min_txns_ratio", 2.0),
+            early_min_buy_ratio=watch.get("min_buy_ratio", 0.55),
+            early_cooldown_minutes=watch.get("cooldown_minutes", 60.0),
             verbose=radar.get("verbose", False),
             # from_raw solo cubre las claves presentes en el TOML; el resto
             # toma los defaults de ScoringWeights.

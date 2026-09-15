@@ -14,7 +14,13 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from sigpump.signals import RECENT_HIGH_MINUTES, CandleStats, buy_ratio_m5, volume_acceleration
+from sigpump.signals import (
+    RECENT_HIGH_MINUTES,
+    CandleStats,
+    EarlySignal,
+    buy_ratio_m5,
+    volume_acceleration,
+)
 from sigpump.util import normalize_address, to_float
 
 log = logging.getLogger()
@@ -37,6 +43,7 @@ _RECENT_HIGH = f"bajo_maximo_{RECENT_HIGH_MINUTES}m_pct"
 COLUMNS: dict[str, str] = {
     "fecha": "TEXT",
     "enviada": "INTEGER",  # 1 = alerta enviada, 0 = descartada por llegar tarde
+    "tipo": "TEXT",  # 'alerta' o 'prealerta'; NULL en filas anteriores = 'alerta'
     "motivo_descarte": "TEXT",
     "simbolo": "TEXT",
     "token": "TEXT",
@@ -54,6 +61,10 @@ COLUMNS: dict[str, str] = {
     "compras_m5_pct": "REAL",
     "sobre_minimo_1h_pct": "REAL",
     _RECENT_HIGH: "REAL",
+    # Solo prealertas: el arranque detectado contra la historia del pool.
+    "arranque_pct": "REAL",
+    "ratio_volumen_5m": "REAL",
+    "ratio_txns_5m": "REAL",
     **{column: "REAL" for column in _CHECKPOINT_COLUMNS},
     _BEST: "REAL",
     _WORST: "REAL",
@@ -133,17 +144,19 @@ class AlertTracker:
         now = time.time() if now is None else now
         return now - (TRACKING_MINUTES + CHECKPOINT_TOLERANCE_MINUTES) * 60
 
-    def is_tracking(self, address: object, sent: bool) -> bool:
+    def is_tracking(self, address: object, sent: bool, kind: str = "alerta") -> bool:
         """True si `address` ya tiene una fila del mismo tipo (enviada o
-        descartada) en seguimiento. Evita una fila por pasada para un token
-        que sigue descartándose mientras está por encima del umbral."""
+        descartada, alerta o prealerta) en seguimiento. Evita una fila por
+        pasada para un token que sigue descartándose mientras está por encima
+        del umbral."""
         conn = self._db()
         if conn is None:
             return False
         try:
             row = conn.execute(
-                f"SELECT 1 FROM alertas WHERE token = :token AND enviada = :sent AND {_PENDING} LIMIT 1",
-                {"token": str(address), "sent": int(sent), "cutoff": self._cutoff()},
+                "SELECT 1 FROM alertas WHERE token = :token AND enviada = :sent "
+                f"AND COALESCE(tipo, 'alerta') = :kind AND {_PENDING} LIMIT 1",
+                {"token": str(address), "sent": int(sent), "kind": kind, "cutoff": self._cutoff()},
             ).fetchone()
         except sqlite3.Error as exc:
             log.warning("No se pudo leer %s: %s", self._path, exc)
@@ -157,9 +170,12 @@ class AlertTracker:
         candles: CandleStats | None,
         sent: bool,
         reason: str = "",
+        kind: str = "alerta",
+        early: EarlySignal | None = None,
     ) -> None:
         """Agrega una fila con los datos de `pair` en el momento de la alerta
-        (o del descarte, con sent=False y su motivo)."""
+        (o del descarte, con sent=False y su motivo). Las prealertas van con
+        kind="prealerta" y su EarlySignal."""
         conn = self._db()
         if conn is None:
             return
@@ -171,6 +187,7 @@ class AlertTracker:
         values = {
             "fecha": datetime.fromtimestamp(now).astimezone().isoformat(timespec="seconds"),
             "enviada": int(sent),
+            "tipo": kind,
             "motivo_descarte": reason or None,
             "simbolo": str(base.get("symbol") or ""),
             "token": str(normalize_address(base.get("address") or "")),
@@ -188,6 +205,9 @@ class AlertTracker:
             "compras_m5_pct": _round(buy_ratio * 100) if buy_ratio is not None else None,
             "sobre_minimo_1h_pct": _round(candles.rise_from_low_pct) if candles else None,
             _RECENT_HIGH: _round(candles.drop_from_recent_high_pct) if candles else None,
+            "arranque_pct": _round(early.price_move_pct) if early else None,
+            "ratio_volumen_5m": _round(early.volume_ratio) if early else None,
+            "ratio_txns_5m": _round(early.txns_ratio) if early else None,
             "url": str(pair.get("url") or ""),
             "timestamp": now,
         }
@@ -249,7 +269,7 @@ class AlertTracker:
                     log.info(
                         "Seguimiento de %s (%s): %s | mejor %+.1f%%, peor %+.1f%%",
                         row["simbolo"],
-                        "alerta" if row["enviada"] else "descartado",
+                        (row["tipo"] or "alerta") if row["enviada"] else "descartado",
                         ", ".join(
                             f"+{m}m {final[c]:+.1f}%" if final[c] is not None else f"+{m}m s/d"
                             for m, c in zip(CHECKPOINTS_MINUTES, _CHECKPOINT_COLUMNS)

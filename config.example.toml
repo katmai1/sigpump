@@ -50,6 +50,30 @@ top_n_candidates = 200
 alert_log_path = "alertas.db"
 verbose = false
 
+[watch]
+# Vigilancia rápida y PREALERTAS. Cada pasada completa elige los tokens a
+# vigilar (los que pasan liquidez, market cap, edad y subida máxima; no se les
+# exige actividad) y un segundo bucle los consulta cada interval_seconds. Cada
+# pool se compara con sus propias fotos de hace 5-20 min: si estaba tranquilo
+# y arranca, manda una prealerta sin esperar a la pasada completa. Sin velas,
+# así que es menos fiable que la alerta completa, que se sigue mandando aparte.
+enabled = true
+# DexScreener refresca sus datos cada ~30 s: consultar más seguido no aporta.
+interval_seconds = 30
+# Tokens vigilados, de mayor a menor volumen 1h (un request cada 30).
+max_tokens = 90
+# Precio actual frente a la mediana de la base, en %. Por debajo del mínimo
+# todavía no arrancó; por encima del máximo ya subió y llega tarde.
+min_price_move_pct = 4.0
+max_price_move_pct = 30.0
+# Volumen y txns de los últimos 5 min frente a la mediana de la base.
+min_volume_ratio = 2.5
+min_txns_ratio = 2.0
+# Fracción mínima de compras en las txns de 5 min (0-1).
+min_buy_ratio = 0.55
+# Minutos sin repetir prealerta del mismo token.
+cooldown_minutes = 60
+
 [scoring]
 # Penalización por subida ya hecha: si el cambio de 1h supera start, el score
 # se multiplica por un factor que baja linealmente de 1 (en start) a 0 (en end).

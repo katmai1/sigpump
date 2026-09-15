@@ -62,23 +62,27 @@ class DexScreenerClient:
         self._session = session
         # time.monotonic() del último request a GeckoTerminal, para espaciarlos.
         self._gecko_last_request = float("-inf")
+        # El escaneo y la vigilancia piden a GeckoTerminal a la vez: sin el
+        # lock los dos calculaban la misma espera y disparaban juntos.
+        self._gecko_lock = asyncio.Lock()
 
     async def _gecko_get(self, path: str) -> Any:
         """GET a GeckoTerminal separado al menos GECKO_REQUEST_INTERVAL_SECONDS
         del anterior. Centralizado porque en una pasada se piden trending,
         pools y velas: espaciar solo las páginas del ranking no alcanzaba."""
-        wait = self._gecko_last_request + GECKO_REQUEST_INTERVAL_SECONDS - time.monotonic()
-        if wait > 0:
-            await asyncio.sleep(wait)
-        try:
-            return await self._get(
-                path,
-                base=GECKO_API_BASE,
-                max_retries=GECKO_MAX_RETRIES,
-                rate_limit_wait=GECKO_RATE_LIMIT_WAIT_SECONDS,
-            )
-        finally:
-            self._gecko_last_request = time.monotonic()
+        async with self._gecko_lock:
+            wait = self._gecko_last_request + GECKO_REQUEST_INTERVAL_SECONDS - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            try:
+                return await self._get(
+                    path,
+                    base=GECKO_API_BASE,
+                    max_retries=GECKO_MAX_RETRIES,
+                    rate_limit_wait=GECKO_RATE_LIMIT_WAIT_SECONDS,
+                )
+            finally:
+                self._gecko_last_request = time.monotonic()
 
     async def _get(
         self,

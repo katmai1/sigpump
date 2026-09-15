@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sigpump.signals import CandleStats
+from sigpump.signals import CandleStats, EarlySignal
 from sigpump.tracker import CHECKPOINT_TOLERANCE_MINUTES, COLUMNS, AlertTracker
 
 
@@ -152,6 +152,35 @@ class TestAlertTracker(unittest.IsolatedAsyncioTestCase):
         self._age(5)
         await tracker.update(client, "solana")
         self.assertEqual(client.requested, [])
+
+    def test_prealerta_guarda_tipo_y_arranque(self):
+        tracker = self._tracker()
+        early = EarlySignal(10.0, 5.0, 3.3, 0.76, 12.0)
+        tracker.record(_pair(), 55.0, None, sent=True, kind="prealerta", early=early)
+        row = self._rows()[0]
+        self.assertEqual(row["tipo"], "prealerta")
+        self.assertEqual(
+            (row["arranque_pct"], row["ratio_volumen_5m"], row["ratio_txns_5m"]), (10.0, 5.0, 3.3)
+        )
+        self.assertTrue(tracker.is_tracking("TOK", sent=True, kind="prealerta"))
+        self.assertFalse(tracker.is_tracking("TOK", sent=True))
+
+    def test_alerta_normal_sin_datos_de_arranque(self):
+        self._tracker().record(_pair(), 70.0, None, sent=True)
+        row = self._rows()[0]
+        self.assertEqual(row["tipo"], "alerta")
+        self.assertIsNone(row["arranque_pct"])
+
+    def test_filas_sin_tipo_cuentan_como_alerta(self):
+        # Bases creadas antes de las prealertas: la columna tipo se agrega vacía.
+        tracker = self._tracker()
+        tracker.record(_pair(), 70.0, None, sent=True)
+        conn = sqlite3.connect(self.path)
+        with conn:
+            conn.execute("UPDATE alertas SET tipo = NULL")
+        conn.close()
+        self.assertTrue(tracker.is_tracking("TOK", sent=True))
+        self.assertFalse(tracker.is_tracking("TOK", sent=True, kind="prealerta"))
 
     def test_is_tracking_distingue_enviadas_de_descartadas(self):
         tracker = self._tracker()

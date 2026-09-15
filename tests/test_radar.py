@@ -1,12 +1,14 @@
 """Tests del orquestador: descubrimiento, selección de pool, filtros duros,
 cooldown y tolerancia a fallos de las fuentes o del envío."""
 
+import asyncio
 import logging
 import sqlite3
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 from sigpump.config import Config
 from sigpump.radar import (
@@ -99,11 +101,19 @@ class _FakeAlerter:
     def __init__(self, fail=False):
         self.sent: list[tuple[dict, float]] = []
         self.candles: list = []
+        # Prealertas: (par, score, EarlySignal).
+        self.early: list[tuple] = []
         self.fail = fail
 
-    async def send(self, pair, score, candles=None):
+    async def send(self, pair, score, candles=None, early=None):
+        # Cede el control como un envío real: con escaneo y vigilancia en
+        # paralelo es justo ahí donde se pueden cruzar.
+        await asyncio.sleep(0)
         if self.fail:
             raise RuntimeError("Telegram caído")
+        if early is not None:
+            self.early.append((pair, score, early))
+            return
         self.sent.append((pair, score))
         self.candles.append(candles)
 
@@ -119,6 +129,7 @@ def _config(**kwargs):
         min_sell_ratio_h1=0.0,
         verify_before_alert=False,
         alert_log_path="",
+        watch_enabled=False,
     )
     base.update(kwargs)
     return Config(**base)
@@ -766,6 +777,194 @@ class TestRegistroDeAlertas(unittest.IsolatedAsyncioTestCase):
         velas = _VELAS_TRANQUILAS[:-1] + [_vela(3540, 101, 101, 40, 45)]  # desplome en una vela
         await self._scan(self._radar(), velas)
         self.assertEqual(self._rows(), [])
+
+
+def _tranquilo(address="TOK", price="1.0"):
+    """Pool tranquilo: precio plano, $500 y 10 txns en 5 min."""
+    pair = _pair(address, volume=20_000, change=2)
+    pair["pairAddress"] = f"POOL_{address}"
+    pair["priceUsd"] = price
+    pair["volume"]["m5"] = 500
+    pair["txns"] = {"m5": {"buys": 5, "sells": 5}}
+    pair["priceChange"]["m5"] = 0.5
+    return pair
+
+
+def _arrancando(address="TOK"):
+    """El mismo pool unos minutos después: +10%, volumen x5 y txns x3.3 en 5 min."""
+    pair = _tranquilo(address, price="1.1")
+    pair["volume"]["m5"] = 2_500
+    pair["txns"] = {"m5": {"buys": 25, "sells": 8}}
+    pair["priceChange"]["m5"] = 8
+    return pair
+
+
+class TestPrealertas(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        logging.disable(logging.CRITICAL)
+        self.addCleanup(logging.disable, logging.NOTSET)
+
+    def _radar(self, address="TOK", **kwargs):
+        radar = MemecoinRadar(_config(watch_enabled=True, **kwargs))
+        # Fotos tranquilas de hace 10 y 7 min: la base contra la que se mide.
+        now = time.time()
+        for minutos in (10, 7):
+            radar._history.observe(_tranquilo(address), now - minutos * 60)
+        radar._watchlist = [address]
+        return radar
+
+    async def _watch(self, radar, pairs, alerter=None, **client_kwargs):
+        client = _FakeClient(pairs=pairs, **client_kwargs)
+        alerter = alerter or _FakeAlerter()
+        await radar._watch_once(client, alerter)
+        return alerter, client
+
+    async def test_manda_prealerta_cuando_arranca(self):
+        radar = self._radar()
+        alerter, client = await self._watch(radar, [_arrancando()])
+        self.assertEqual(client.requested, ["TOK"])
+        self.assertEqual(len(alerter.early), 1)
+        self.assertAlmostEqual(alerter.early[0][2].price_move_pct, 10.0)
+        self.assertEqual(alerter.sent, [])
+        self.assertIn("TOK", radar._early_alerted)
+        # La prealerta no bloquea la alerta completa que puede venir después.
+        self.assertEqual(radar._alerted, {})
+
+    async def test_tranquilo_no_prealerta(self):
+        alerter, _ = await self._watch(self._radar(), [_tranquilo()])
+        self.assertEqual(alerter.early, [])
+
+    async def test_sin_historia_no_prealerta(self):
+        """Sin base no se sabe si el token estaba tranquilo: podría llevar una
+        hora subiendo."""
+        radar = MemecoinRadar(_config(watch_enabled=True))
+        radar._watchlist = ["TOK"]
+        alerter, _ = await self._watch(radar, [_arrancando()])
+        self.assertEqual(alerter.early, [])
+
+    async def test_no_se_repite_durante_el_cooldown(self):
+        radar = self._radar()
+        alerter = _FakeAlerter()
+        for _ in range(3):
+            await self._watch(radar, [_arrancando()], alerter=alerter)
+        self.assertEqual(len(alerter.early), 1)
+
+    async def test_fallo_de_envio_no_marca_cooldown(self):
+        radar = self._radar()
+        await self._watch(radar, [_arrancando()], alerter=_FakeAlerter(fail=True))
+        self.assertEqual(radar._early_alerted, {})
+
+    async def test_respeta_los_filtros_duros(self):
+        alerter, _ = await self._watch(self._radar(min_liquidity_usd=1_000_000), [_arrancando()])
+        self.assertEqual(alerter.early, [])
+
+    async def test_token_ya_alertado_no_se_consulta(self):
+        radar = self._radar()
+        radar._alerted["TOK"] = time.time()
+        alerter, client = await self._watch(radar, [_arrancando()])
+        self.assertEqual(client.requested, [])
+        self.assertEqual(alerter.early, [])
+
+    async def test_verifica_precio_con_gecko_sin_pedir_velas(self):
+        for gecko_price, esperadas in ((0.01, 0), (1.1, 1)):
+            with self.subTest(gecko_price=gecko_price):
+                radar = self._radar(verify_before_alert=True)
+                alerter, client = await self._watch(
+                    radar, [_arrancando()], gecko_pools=_gecko(price=gecko_price)
+                )
+                self.assertEqual(len(alerter.early), esperadas)
+                self.assertEqual(client.gecko_pools_requested, ["POOL_TOK"])
+                self.assertEqual(client.candles_requested, [])
+
+    async def test_gecko_ocupado_no_manda_ni_marca_cooldown(self):
+        radar = self._radar(verify_before_alert=True)
+        client = _FakeClient(pairs=[_arrancando()])
+
+        async def colgado(*args):
+            await asyncio.Event().wait()
+
+        client.get_gecko_pools = colgado
+        alerter = _FakeAlerter()
+        with patch("sigpump.radar.EARLY_VERIFY_TIMEOUT_SECONDS", 0.01):
+            await radar._watch_once(client, alerter)
+        self.assertEqual(alerter.early, [])
+        self.assertEqual(radar._early_alerted, {})
+
+    async def test_escaneo_y_vigilancia_a_la_vez_no_duplican(self):
+        radar = self._radar()
+        alerter = _FakeAlerter()
+        await asyncio.gather(
+            self._watch(radar, [_arrancando()], alerter=alerter),
+            self._watch(radar, [_arrancando()], alerter=alerter),
+        )
+        self.assertEqual(len(alerter.early), 1)
+
+    async def test_scan_once_elige_vigilados_y_busca_arranques(self):
+        radar = self._radar()
+        radar._watchlist = []
+        client = _FakeClient(
+            latest=[{"chainId": "solana", "tokenAddress": "TOK"}], pairs=[_arrancando()]
+        )
+        alerter = _FakeAlerter()
+        await radar._scan_once(client, alerter)
+        self.assertEqual(radar._watchlist, ["TOK"])
+        self.assertEqual(len(alerter.early), 1)
+
+    async def test_vigilancia_apagada_no_prealerta_en_el_escaneo(self):
+        radar = self._radar()
+        radar._config.watch_enabled = False
+        client = _FakeClient(
+            latest=[{"chainId": "solana", "tokenAddress": "TOK"}], pairs=[_arrancando()]
+        )
+        alerter = _FakeAlerter()
+        await radar._scan_once(client, alerter)
+        self.assertEqual(alerter.early, [])
+
+    def test_vigilados_por_volumen_sin_exigir_actividad(self):
+        """El token que interesa es el que todavía está tranquilo: no se le
+        exigen los filtros de actividad para vigilarlo."""
+        pares = [
+            _pair("POCO", volume=100),  # sin txns de 1h: no pasaría los de actividad
+            _pair("MUCHO", volume=40_000),
+            _pair("MEDIO", volume=5_000),
+            _pair("ILIQUIDO", volume=90_000, liquidity=10),
+        ]
+        for max_tokens, esperados in ((2, ["MUCHO", "MEDIO"]), (10, ["MUCHO", "MEDIO", "POCO"])):
+            with self.subTest(max_tokens=max_tokens):
+                radar = MemecoinRadar(
+                    _config(watch_enabled=True, min_txns_h1=50, watch_max_tokens=max_tokens)
+                )
+                radar._update_watchlist(pares)
+                self.assertEqual(radar._watchlist, esperados)
+
+    async def test_se_registra_como_prealerta(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / "alertas.db"
+        radar = self._radar(alert_log_path=str(path))
+        self.addCleanup(radar._tracker.close)
+        await self._watch(radar, [_arrancando()])
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        rows = [dict(r) for r in conn.execute("SELECT * FROM alertas")]
+        conn.close()
+        self.assertEqual([(r["tipo"], r["enviada"]) for r in rows], [("prealerta", 1)])
+        self.assertAlmostEqual(rows[0]["arranque_pct"], 10.0)
+
+    def test_prune_limpia_el_cooldown_de_prealertas(self):
+        radar = MemecoinRadar(_config(early_cooldown_minutes=30))
+        radar._early_alerted = {"VIEJO": time.time() - 3600, "NUEVO": time.time()}
+        radar._prune_alerted()
+        self.assertEqual(list(radar._early_alerted), ["NUEVO"])
+
+    async def test_un_error_no_corta_el_bucle(self):
+        paso = AsyncMock(side_effect=[RuntimeError("boom"), None])
+        sleep = AsyncMock(side_effect=[None, asyncio.CancelledError()])
+        with patch("sigpump.radar.asyncio.sleep", new=sleep):
+            with self.assertRaises(asyncio.CancelledError):
+                await MemecoinRadar._loop(paso, "client", "alerter", 30, "Error")
+        self.assertEqual(paso.await_count, 2)
+        self.assertEqual(sleep.await_args_list[0].args, (30,))
 
 
 if __name__ == "__main__":

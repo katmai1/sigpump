@@ -131,6 +131,7 @@ def _config(**kwargs):
         verify_before_alert=False,
         alert_log_path="",
         watch_enabled=False,
+        early_require_sustained_seconds=0.0,
     )
     base.update(kwargs)
     return Config(**base)
@@ -1116,6 +1117,174 @@ class TestSilenciarYMedir(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["mecha_superior"], 0.33)
         self.assertEqual(row["velas_intentos"], 1)
         self.assertEqual(len(client.candles_requested), 1)
+
+
+class _FakeAutoridades:
+    def __init__(self, unsafe=None):
+        self.unsafe = unsafe or {}
+        self.pedidos: list[list[str]] = []
+
+    async def unsafe_reasons(self, addresses):
+        self.pedidos.append(list(addresses))
+        return {a: r for a, r in self.unsafe.items() if a in addresses}
+
+
+def _con_quote(pair, symbol="SOL", address="So11111111111111111111111111111111111111112"):
+    pair["quoteToken"] = {"symbol": symbol, "address": address}
+    return pair
+
+
+class TestFiltrosDeParYActividad(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        logging.disable(logging.CRITICAL)
+        self.addCleanup(logging.disable, logging.NOTSET)
+
+    async def _scan(self, config, pairs):
+        client = _FakeClient(
+            latest=[{"chainId": "solana", "tokenAddress": p["baseToken"]["address"]} for p in pairs],
+            pairs=pairs,
+        )
+        alerter = _FakeAlerter()
+        await MemecoinRadar(config)._scan_once(client, alerter)
+        return alerter
+
+    async def test_solo_pares_contra_las_monedas_pedidas(self):
+        config = _config(quote_tokens=["SOL"])
+        alerter = await self._scan(config, [_con_quote(_pair("TOK"))])
+        self.assertEqual(len(alerter.sent), 1)
+        alerter = await self._scan(config, [_con_quote(_pair("TOK"), symbol="USDC", address="EPjF")])
+        self.assertEqual(alerter.sent, [])
+
+    async def test_la_moneda_del_par_tambien_vale_por_direccion(self):
+        config = _config(quote_tokens=["So11111111111111111111111111111111111111112"])
+        alerter = await self._scan(config, [_con_quote(_pair("TOK"), symbol="wSOL")])
+        self.assertEqual(len(alerter.sent), 1)
+
+    async def test_sin_lista_de_monedas_no_filtra(self):
+        alerter = await self._scan(_config(), [_con_quote(_pair("TOK"), symbol="USDC", address="EPjF")])
+        self.assertEqual(len(alerter.sent), 1)
+
+    async def test_actividad_minima_en_5_minutos(self):
+        """Los pares con muy poca actividad ahora mismo daban los peores
+        resultados: el arranque son dos operaciones sueltas."""
+        pocas = _pair("TOK")
+        pocas["txns"]["m5"] = {"buys": 4, "sells": 2}
+        self.assertEqual((await self._scan(_config(min_txns_m5=10), [pocas])).sent, [])
+        self.assertEqual(len((await self._scan(_config(min_txns_m5=6), [pocas])).sent), 1)
+
+        poco_volumen = _pair("TOK", volume=50_000)
+        poco_volumen["volume"]["m5"] = 300
+        self.assertEqual((await self._scan(_config(min_volume_m5_usd=500), [poco_volumen])).sent, [])
+        self.assertEqual(len((await self._scan(_config(min_volume_m5_usd=200), [poco_volumen])).sent), 1)
+
+
+class TestTokensPeligrosos(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        logging.disable(logging.CRITICAL)
+        self.addCleanup(logging.disable, logging.NOTSET)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = Path(tmp.name) / "alertas.db"
+
+    def _rows(self):
+        conn = sqlite3.connect(self.path)
+        conn.row_factory = sqlite3.Row
+        try:
+            return [dict(r) for r in conn.execute("SELECT * FROM alertas")]
+        finally:
+            conn.close()
+
+    def _radar(self, unsafe=None, **kwargs):
+        radar = MemecoinRadar(_config(alert_log_path=str(self.path), **kwargs))
+        self.addCleanup(radar._tracker.close)
+        radar._authorities = _FakeAutoridades(unsafe)
+        return radar
+
+    async def test_no_alerta_de_un_token_minteable_y_lo_registra(self):
+        radar = self._radar({"TOK": "el creador conserva autoridades: se pueden acuñar más"})
+        client = _FakeClient(
+            latest=[{"chainId": "solana", "tokenAddress": "TOK"}], pairs=[_pair_verificable()]
+        )
+        alerter = _FakeAlerter()
+        await radar._scan_once(client, alerter)
+        self.assertEqual(alerter.sent, [])
+        fila = self._rows()[0]
+        self.assertEqual(fila["enviada"], 0)
+        self.assertIn("acuñar", fila["motivo_descarte"])
+
+    async def test_un_token_limpio_sigue_alertando(self):
+        radar = self._radar({"OTRO": "se pueden congelar"})
+        client = _FakeClient(
+            latest=[{"chainId": "solana", "tokenAddress": "TOK"}], pairs=[_pair_verificable()]
+        )
+        alerter = _FakeAlerter()
+        await radar._scan_once(client, alerter)
+        self.assertEqual(len(alerter.sent), 1)
+
+    async def test_tampoco_prealerta_de_un_token_minteable(self):
+        radar = self._radar({"TOK": "se pueden acuñar más"}, watch_enabled=True)
+        now = time.time()
+        for minutos in (10, 7):
+            radar._history.observe(_tranquilo(), now - minutos * 60)
+        radar._watchlist = ["TOK"]
+        alerter = _FakeAlerter()
+        await radar._watch_once(_FakeClient(pairs=[_arrancando()]), alerter)
+        self.assertEqual(alerter.early, [])
+        self.assertEqual(radar._early_alerted, {})
+
+
+class TestArranqueSostenido(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        logging.disable(logging.CRITICAL)
+        self.addCleanup(logging.disable, logging.NOTSET)
+
+    def _radar(self, **kwargs):
+        radar = MemecoinRadar(_config(watch_enabled=True, **kwargs))
+        now = time.time()
+        for minutos in (10, 7):
+            radar._history.observe(_tranquilo(), now - minutos * 60)
+        radar._watchlist = ["TOK"]
+        return radar
+
+    async def test_no_avisa_hasta_que_el_arranque_se_sostiene(self):
+        """Los arranques que no seguían a los 30-60 s daban -2,1% a 15 min,
+        frente a +4,3% los que sí."""
+        radar = self._radar(early_require_sustained_seconds=30)
+        alerter = _FakeAlerter()
+        await radar._watch_once(_FakeClient(pairs=[_arrancando()]), alerter)
+        self.assertEqual(alerter.early, [])
+        self.assertIn("TOK", radar._pending_early)
+        # El mismo refresco de DexScreener no confirma nada.
+        radar._pending_early["TOK"]["ts"] -= 30
+        await radar._watch_once(_FakeClient(pairs=[_arrancando()]), alerter)
+        self.assertEqual(alerter.early, [])
+        # Datos nuevos y el arranque sigue: ahora sí.
+        sigue = _arrancando()
+        sigue["volume"]["m5"] = 2_600
+        await radar._watch_once(_FakeClient(pairs=[sigue]), alerter)
+        self.assertEqual(len(alerter.early), 1)
+        self.assertEqual(radar._pending_early, {})
+
+    async def test_si_el_arranque_se_apaga_no_se_avisa(self):
+        radar = self._radar(early_require_sustained_seconds=30)
+        alerter = _FakeAlerter()
+        await radar._watch_once(_FakeClient(pairs=[_arrancando()]), alerter)
+        radar._pending_early["TOK"]["ts"] -= 30
+        await radar._watch_once(_FakeClient(pairs=[_tranquilo()]), alerter)
+        self.assertEqual(alerter.early, [])
+        self.assertEqual(radar._pending_early, {})
+
+    async def test_en_cero_avisa_en_cuanto_lo_detecta(self):
+        radar = self._radar(early_require_sustained_seconds=0)
+        alerter = _FakeAlerter()
+        await radar._watch_once(_FakeClient(pairs=[_arrancando()]), alerter)
+        self.assertEqual(len(alerter.early), 1)
+
+    def test_prune_olvida_los_arranques_sin_confirmar(self):
+        radar = self._radar(early_require_sustained_seconds=30)
+        radar._pending_early = {"VIEJO": {"ts": time.time() - 600, "key": ()}}
+        radar._prune_alerted()
+        self.assertEqual(radar._pending_early, {})
 
 
 if __name__ == "__main__":

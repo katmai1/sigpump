@@ -231,6 +231,24 @@ class TestConfigValidation(unittest.TestCase):
         with self.assertRaises(ValueError):
             Config(late_penalty_start_h1_pct=100.0, late_penalty_end_h1_pct=50.0)
 
+    def test_filtros_de_par_y_seguridad_fuera_de_rango_dan_error(self):
+        casos = [
+            dict(quote_tokens="SOL"),          # tiene que ser una lista
+            dict(quote_tokens=["SOL", ""]),    # ni textos vacíos
+            dict(quote_tokens=["SOL", 3]),
+            dict(min_txns_m5=-1.0),
+            dict(min_volume_m5_usd=-1.0),
+            dict(early_require_sustained_seconds=-1.0),
+            dict(check_token_authorities="si"),
+            dict(solana_rpc_url=""),           # hace falta con la comprobación activa
+        ]
+        for caso in casos:
+            with self.subTest(caso=caso), self.assertRaises(ValueError):
+                Config(**caso)
+
+    def test_sin_comprobar_autoridades_no_hace_falta_rpc(self):
+        Config(check_token_authorities=False, solana_rpc_url="")
+
     def test_prealertas_por_defecto_una_cada_6_horas_y_silencian_la_alerta(self):
         config = Config()
         self.assertEqual(config.early_cooldown_minutes, 360)
@@ -325,6 +343,27 @@ class TestFromToml(unittest.TestCase):
         self.assertEqual(config.late_penalty_start_h1_pct, 40)
         self.assertEqual(config.late_penalty_end_h1_pct, 120)
         self.assertEqual(config.alert_log_path, "")
+
+    def test_lee_los_filtros_de_par_y_la_seccion_solana(self):
+        config = Config.from_toml(
+            self._write(
+                '[dexscreener]\nquote_tokens = ["SOL", "USDC"]\nmin_txns_m5 = 12\n'
+                "min_volume_m5_usd = 750\n"
+                '[solana]\ncheck_token_authorities = false\nrpc_url = "https://rpc.ejemplo"\n'
+                "[watch]\nrequire_sustained_seconds = 45\n"
+            )
+        )
+        self.assertEqual(config.quote_tokens, ["SOL", "USDC"])
+        self.assertEqual(config.min_txns_m5, 12)
+        self.assertEqual(config.min_volume_m5_usd, 750)
+        self.assertFalse(config.check_token_authorities)
+        self.assertEqual(config.solana_rpc_url, "https://rpc.ejemplo")
+        self.assertEqual(config.early_require_sustained_seconds, 45)
+
+    def test_clave_desconocida_en_solana_avisa(self):
+        with self.assertLogs(level=logging.WARNING) as logs:
+            Config.from_toml(self._write("[solana]\nrcp_url = 'x'\n"))
+        self.assertIn("rcp_url", "".join(logs.output))
 
     def test_lee_la_vigilancia(self):
         config = Config.from_toml(

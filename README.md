@@ -34,9 +34,10 @@ El bucle principal ([sigpump/radar.py](sigpump/radar.py)) repite cada
 `poll_interval_seconds`:
 
 1. Descubre candidatos (boosts + trending + perfiles/takeovers/ads).
-2. Trae sus datos de mercado y aplica filtros duros: liquidez, volumen,
-   market cap, edad, txns mínimas, ratio de ventas (honeypots), tamaño
-   medio de trade (wash trading) y subida máxima en 1h.
+2. Trae sus datos de mercado y aplica filtros duros: moneda contra la que
+   cotiza el par (`quote_tokens`), liquidez, market cap, edad, volumen y txns
+   de 1 hora y de 5 minutos, ratio de ventas (honeypots), tamaño medio de
+   trade (wash trading) y subida máxima en 1h.
 3. Calcula un score 0-100 ([sigpump/config.py](sigpump/config.py)). Premia
    que el movimiento esté empezando: aceleración del volumen y presión
    compradora de los últimos 5 minutos ([sigpump/signals.py](sigpump/signals.py)),
@@ -47,8 +48,9 @@ El bucle principal ([sigpump/radar.py](sigpump/radar.py)) repite cada
    de la última hora no pueden mostrar desplomes bruscos. Con esas velas
    también se descartan los que llegan tarde: precio ya muy por encima del
    mínimo de la hora, o cayendo desde el máximo de los últimos 15 minutos.
-5. Los que pasan la verificación se alertan por Telegram
-   ([sigpump/telegram.py](sigpump/telegram.py)).
+5. Antes de avisar se comprueba en la blockchain que el token no se pueda
+   acuñar ni congelar ([sigpump/solana.py](sigpump/solana.py)), y los que
+   pasan se alertan por Telegram ([sigpump/telegram.py](sigpump/telegram.py)).
 6. Cada alerta, y cada descarte por llegar tarde, se registra en
    `alert_log_path` ([sigpump/tracker.py](sigpump/tracker.py)) con los datos
    del momento y el retorno a +5, +15 y +30 minutos.
@@ -87,6 +89,17 @@ Con el primer día de datos, dos patrones dejaban las señales sin margen:
 
 Los cooldowns se recuperan del registro al reiniciar el radar.
 
+Con cuatro días de datos (692 señales) se afinó lo siguiente:
+
+- Los arranques que **no seguían** cumpliéndose a los 30-60 segundos daban
+  -2,1% a 15 minutos, frente a +4,3% los que sí. De ahí
+  `[watch].require_sustained_seconds`, que cuesta ~30 segundos de margen.
+- Los pares de **menos de 2 horas** daban -5,3% a 15 minutos y -23,6% en el
+  peor momento (`min_pair_age_minutes = 120`), aunque entre 2 y 6 horas eran
+  los mejores.
+- Los de **menos de $500 de volumen en 5 minutos** eran el peor tramo
+  (`min_volume_m5_usd`).
+
 ## Registro de alertas
 
 `alertas.db` (configurable con `[radar].alert_log_path`) es una base SQLite
@@ -108,8 +121,9 @@ mercado del momento y cómo le fue después:
   señal. En las prealertas se completan unos segundos después, porque al
   avisar no se piden velas.
 - `sostenido_30s`, `sostenido_60s` (prealertas): 1 si el arranque seguía
-  cumpliéndose con los datos de ~30 y ~60 segundos después. Sirven para
-  decidir con datos si conviene exigir que el arranque se sostenga.
+  cumpliéndose con los datos de ~30 y ~60 segundos después.
+- `txns_m5`, `moneda_par` y `edad_par_min`: actividad del momento, contra qué
+  cotiza el par y cuánto llevaba vivo al avisar.
 
 Se puede abrir con `sqlite3 alertas.db` o con cualquier visor de SQLite
 (p. ej. DB Browser for SQLite) mientras el radar corre. Por ejemplo, el
@@ -162,9 +176,15 @@ nunca lo subas al repositorio.
 Secciones disponibles:
 
 - `[dexscreener]` — chain a monitorear y filtros duros sobre los datos de
-  DexScreener: mínimos de liquidez/volumen/market cap/edad, `min_txns_h1`,
-  `min_sell_ratio_h1` (honeypots), `max_avg_trade_usd` (wash trading) y
-  `max_price_change_h1_pct` (subidas absurdas).
+  DexScreener: `quote_tokens` (contra qué monedas debe cotizar el par),
+  mínimos de liquidez/volumen/market cap/edad, `min_txns_h1`, `min_txns_m5` y
+  `min_volume_m5_usd` (actividad ahora mismo), `min_sell_ratio_h1`
+  (honeypots), `max_avg_trade_usd` (wash trading) y `max_price_change_h1_pct`
+  (subidas absurdas).
+- `[solana]` — `check_token_authorities` comprueba en la blockchain que nadie
+  pueda acuñar más tokens (mintAuthority) ni congelar los tuyos
+  (freezeAuthority), con el `rpc_url` indicado. Si el RPC no responde la señal
+  sale igual y queda el aviso en el log.
 - `[geckoterminal]` — `trending_pages`: cuántas páginas del ranking de
   pools trending sumar como candidatos (0 desactiva la fuente).
   `verify_before_alert`: contrastar con GeckoTerminal antes de alertar;
@@ -175,7 +195,8 @@ Secciones disponibles:
   mismo token, umbral de score, cuántos candidatos evaluar por pasada y
   `alert_log_path` (la base SQLite de resultados).
 - `[watch]` — vigilancia rápida y prealertas: intervalo, cuántos tokens
-  vigilar, umbrales de arranque y cooldown propio.
+  vigilar, umbrales de arranque, `require_sustained_seconds` (cuánto tiene que
+  sostenerse el arranque antes de avisar) y cooldown propio.
 - `[scoring]` — `late_penalty_start_h1_pct` y `late_penalty_end_h1_pct`:
   entre esos dos cambios de 1h el score se reduce linealmente hasta 0.
 - `[scoring_weights]` — pesos relativos (deben sumar ~1.0) de cada

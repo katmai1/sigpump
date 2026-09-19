@@ -19,6 +19,7 @@ from sigpump.signals import (
     CandleStats,
     EarlySignal,
     buy_ratio_m5,
+    txns_m5,
     volume_acceleration,
 )
 from sigpump.util import normalize_address, to_float
@@ -55,6 +56,10 @@ COLUMNS: dict[str, str] = {
     "cambio_h1_pct": "REAL",
     "cambio_h6_pct": "REAL",
     "volumen_m5_usd": "REAL",
+    "txns_m5": "REAL",
+    # Contra qué cotiza el par y cuánto llevaba vivo al avisar.
+    "moneda_par": "TEXT",
+    "edad_par_min": "REAL",
     "volumen_h1_usd": "REAL",
     "liquidez_usd": "REAL",
     "market_cap_usd": "REAL",
@@ -234,6 +239,9 @@ class AlertTracker:
             "cambio_h1_pct": to_float(change.get("h1")),
             "cambio_h6_pct": to_float(change.get("h6")),
             "volumen_m5_usd": _round(to_float(volume.get("m5"))),
+            "txns_m5": txns_m5(pair),
+            "moneda_par": str((pair.get("quoteToken") or {}).get("symbol") or ""),
+            "edad_par_min": _round((now - created / 1000) / 60) if (created := to_float(pair.get("pairCreatedAt"))) > 0 else None,
             "volumen_h1_usd": _round(to_float(volume.get("h1"))),
             "liquidez_usd": _round(to_float((pair.get("liquidity") or {}).get("usd"))),
             "market_cap_usd": _round(to_float(pair.get("marketCap")) or to_float(pair.get("fdv"))),

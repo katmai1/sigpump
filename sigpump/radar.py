@@ -15,7 +15,8 @@ import aiohttp  # type: ignore[import-not-found]
 
 from sigpump.config import Config, score_pair
 from sigpump.screener import DexScreenerClient
-from sigpump.signals import RECENT_HIGH_MINUTES, CandleStats, EarlySignal, candle_stats
+from sigpump.signals import RECENT_HIGH_MINUTES, CandleStats, EarlySignal, candle_stats, txns_m5
+from sigpump.solana import TokenAuthorities
 from sigpump.telegram import TelegramAlerter
 from sigpump.tracker import AlertTracker
 from sigpump.util import normalize_address, to_float
@@ -59,6 +60,15 @@ def _liquidity_usd(pair: dict) -> float:
 
 def _symbol(pair: dict) -> object:
     return (pair.get("baseToken") or {}).get("symbol")
+
+
+def _matches_quote(pair: dict, wanted: list[str]) -> bool:
+    """True si el par cotiza contra una de las monedas pedidas, comparando por
+    símbolo o por dirección del quote."""
+    quote = pair.get("quoteToken") or {}
+    symbol = str(quote.get("symbol") or "").upper()
+    address = str(normalize_address(quote.get("address") or ""))
+    return any(str(w).upper() == symbol or str(normalize_address(w)) == address for w in wanted)
 
 
 def _data_key(pair: dict) -> tuple:
@@ -109,6 +119,11 @@ class MemecoinRadar:
         self._watchlist: list[str] = []
         # Boosteados de la última pasada, para puntuar las prealertas.
         self._boosted: set[str] = set()
+        # Arranques detectados que esperan confirmación (require_sustained_seconds):
+        # address -> {"ts", "key" (refresco en que se detectó)}.
+        self._pending_early: dict[str, dict] = {}
+        # Se crea en run(), con la sesión HTTP.
+        self._authorities: TokenAuthorities | None = None
         # Prealertas cuyo arranque se está midiendo si se sostiene:
         # address -> {"row_id", "ts", "key" (último refresco visto), "done"}.
         self._followups: dict[str, dict] = {}
@@ -170,6 +185,12 @@ class MemecoinRadar:
             expired = [addr for addr, ts in registry.items() if ts < now - minutes * 60]
             for addr in expired:
                 del registry[addr]
+        stale = [
+            address for address, pending in self._pending_early.items()
+            if now - pending["ts"] > FOLLOWUP_MAX_SECONDS
+        ]
+        for address in stale:
+            del self._pending_early[address]
         self._history.prune(now)
 
     async def _discover_candidates(self, client: DexScreenerClient) -> tuple[list[str], set[str]]:
@@ -268,6 +289,9 @@ class MemecoinRadar:
         tranquilo y no pasaría los de actividad.
         """
         cfg = self._config
+        if cfg.quote_tokens and not _matches_quote(pair, cfg.quote_tokens):
+            quote = (pair.get("quoteToken") or {}).get("symbol") or "?"
+            return f"par contra {quote}, no contra {' o '.join(cfg.quote_tokens)}"
         liquidity_usd = _liquidity_usd(pair)
         # marketCap suele venir ausente en tokens nuevos (sin supply circulante
         # conocido); fdv (fully diluted valuation) es el fallback de DexScreener.
@@ -312,6 +336,12 @@ class MemecoinRadar:
             return f"volumen 1h ${volume_h1:,.0f} < ${cfg.min_volume_h1_usd:,.0f}"
         if txns < cfg.min_txns_h1:
             return f"{txns:.0f} txns en 1h < {cfg.min_txns_h1}"
+        # Sin actividad ahora mismo, el "arranque" son dos operaciones sueltas.
+        if cfg.min_txns_m5 and txns_m5(pair) < cfg.min_txns_m5:
+            return f"{txns_m5(pair):.0f} txns en 5m < {cfg.min_txns_m5:.0f}"
+        volume_m5 = to_float((pair.get("volume") or {}).get("m5"))
+        if cfg.min_volume_m5_usd and volume_m5 < cfg.min_volume_m5_usd:
+            return f"volumen 5m ${volume_m5:,.0f} < ${cfg.min_volume_m5_usd:,.0f}"
         # Mucho volumen en pocas operaciones: wash trading, o un precio en USD
         # mal calculado que infla el volumen (y la liquidez y el market cap).
         # En memecoins reales el trade medio ronda los cientos de dólares.
@@ -457,6 +487,39 @@ class MemecoinRadar:
             verified.append((pair, score, stats))
         return verified
 
+    async def _unsafe_reasons(self, pairs: list[dict]) -> dict[str, str]:
+        """
+        Motivo por token de los que se pueden acuñar o congelar. {} si la
+        comprobación está apagada o el RPC no responde: es preferible dejar
+        pasar una alerta a perderlas todas por un RPC caído.
+        """
+        if self._authorities is None:
+            return {}
+        addresses = [
+            str(normalize_address((p.get("baseToken") or {}).get("address", ""))) for p in pairs
+        ]
+        return await self._authorities.unsafe_reasons(addresses)
+
+    async def _drop_unsafe(
+        self, candidates: list[tuple[dict, float]]
+    ) -> list[tuple[dict, float]]:
+        """Quita los candidatos cuyo token se puede acuñar o congelar, y los
+        registra para poder revisar después qué se dejó fuera."""
+        unsafe = await self._unsafe_reasons([p for p, _ in candidates])
+        if not unsafe:
+            return candidates
+        safe = []
+        for pair, score in candidates:
+            address = normalize_address((pair.get("baseToken") or {}).get("address", ""))
+            reason = unsafe.get(str(address))
+            if reason is None:
+                safe.append((pair, score))
+                continue
+            log.info("Descartado %s (score=%s): %s", _symbol(pair), score, reason)
+            if self._tracker and not self._tracker.is_tracking(address, sent=False):
+                self._tracker.record(pair, score, None, sent=False, reason=reason)
+        return safe
+
     def _score(self, pair: dict, boosted_addresses: set[str]) -> float:
         return score_pair(
             pair,
@@ -530,12 +593,25 @@ class MemecoinRadar:
             if self._rejection_reason(pair):
                 continue
             signal = self._history.early_signal(pair, now, self._early_thresholds)
-            if signal:
+            if self._confirmed(address, pair, signal, now):
                 signals.append((pair, signal))
         if not signals:
             return
         signals.sort(key=lambda s: s[1].volume_ratio, reverse=True)
         signals = signals[:MAX_EARLY_PER_PASS]
+
+        unsafe = await self._unsafe_reasons([p for p, _ in signals])
+        if unsafe:
+            for pair, _ in signals:
+                reason = unsafe.get(str(normalize_address((pair.get("baseToken") or {}).get("address", ""))))
+                if reason:
+                    log.info("Prealerta de %s descartada: %s", _symbol(pair), reason)
+            signals = [
+                (p, s) for p, s in signals
+                if str(normalize_address((p.get("baseToken") or {}).get("address", ""))) not in unsafe
+            ]
+            if not signals:
+                return
 
         pools: dict[str, dict] = {}
         if self._config.verify_before_alert:
@@ -585,6 +661,31 @@ class MemecoinRadar:
                     self._followups[address] = {
                         "row_id": row_id, "ts": now, "key": _data_key(pair), "done": set(),
                     }
+
+    def _confirmed(self, address: str, pair: dict, signal: EarlySignal | None, now: float) -> bool:
+        """
+        True si hay que avisar del arranque. Con require_sustained_seconds > 0
+        el primer arranque solo se anota: hace falta que siga cumpliéndose
+        pasado ese tiempo y con datos nuevos de DexScreener. Los arranques que
+        no se sostenían rendían bastante peor (-2,1% a 15 min frente a +4,3%).
+        """
+        wait = self._config.early_require_sustained_seconds
+        if not wait:
+            return signal is not None
+        pending = self._pending_early.get(address)
+        if signal is None:
+            if pending is not None:
+                log.debug("El arranque de %s no se sostuvo", _symbol(pair))
+                del self._pending_early[address]
+            return False
+        if pending is None:
+            self._pending_early[address] = {"ts": now, "key": _data_key(pair)}
+            return False
+        # Un refresco nuevo, no el mismo dato dos veces.
+        if now - pending["ts"] < wait or _data_key(pair) == pending["key"]:
+            return False
+        del self._pending_early[address]
+        return True
 
     def _check_followup(self, address: str, pair: dict, now: float) -> None:
         """
@@ -707,6 +808,8 @@ class MemecoinRadar:
                 continue
             to_alert.append((pair, score))
 
+        to_alert = await self._drop_unsafe(to_alert)
+
         # Sin verificación no se piden velas, así que no hay CandleStats.
         verified: list[tuple[dict, float, CandleStats | None]] = (
             await self._verify(client, to_alert)
@@ -752,6 +855,8 @@ class MemecoinRadar:
         # HTTP de Telegram al salir.
         async with aiohttp.ClientSession() as session, alerter:
             client = DexScreenerClient(session)
+            if self._config.check_token_authorities:
+                self._authorities = TokenAuthorities(session, self._config.solana_rpc_url)
             loops = [
                 self._loop(
                     self._scan_once, client, alerter,

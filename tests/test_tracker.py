@@ -82,6 +82,20 @@ class TestAlertTracker(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["bajo_maximo_15m_pct"], 3.0)
         self.assertIsNone(row["ret_5m_pct"])
 
+    def test_guarda_actividad_de_5m_moneda_y_edad_del_par(self):
+        par = _pair()
+        par["quoteToken"] = {"symbol": "SOL"}
+        par["pairCreatedAt"] = (time.time() - 3 * 3600) * 1000
+        self._tracker().record(par, 70.0, None, sent=True)
+        row = self._rows()[0]
+        self.assertEqual(row["txns_m5"], 40)
+        self.assertEqual(row["moneda_par"], "SOL")
+        self.assertAlmostEqual(row["edad_par_min"], 180, delta=1)
+
+    def test_sin_fecha_de_creacion_la_edad_queda_vacia(self):
+        self._tracker().record(_pair(), 70.0, None, sent=True)
+        self.assertIsNone(self._rows()[0]["edad_par_min"])
+
     def test_descarte_guarda_el_motivo(self):
         self._tracker().record(_pair(), 70.0, None, sent=False, reason="llega tarde")
         row = self._rows()[0]

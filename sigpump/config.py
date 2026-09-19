@@ -12,6 +12,7 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 from sigpump.signals import buy_ratio_m5, volume_acceleration
+from sigpump.solana import MAINNET_RPC_URL
 from sigpump.util import normalize_address, to_float
 
 log = logging.getLogger()
@@ -29,6 +30,9 @@ _KNOWN_KEYS: dict[str, set[str]] = {
         "min_sell_ratio_h1",
         "max_avg_trade_usd",
         "max_price_change_h1_pct",
+        "quote_tokens",
+        "min_txns_m5",
+        "min_volume_m5_usd",
     },
     "geckoterminal": {
         "trending_pages",
@@ -47,6 +51,7 @@ _KNOWN_KEYS: dict[str, set[str]] = {
         "verbose",
     },
     "scoring": {"late_penalty_start_h1_pct", "late_penalty_end_h1_pct"},
+    "solana": {"check_token_authorities", "rpc_url"},
     "watch": {
         "enabled",
         "interval_seconds",
@@ -58,6 +63,7 @@ _KNOWN_KEYS: dict[str, set[str]] = {
         "min_buy_ratio",
         "cooldown_minutes",
         "suppress_alert_minutes",
+        "require_sustained_seconds",
     },
     "telegram": {"bot_token", "chat_id", "message_thread_id"},
 }
@@ -76,6 +82,11 @@ _FIELD_TYPES: dict[str, tuple[str, tuple[type, ...]]] = {
     "min_sell_ratio_h1": ("[dexscreener].min_sell_ratio_h1", _NUMBER),
     "max_avg_trade_usd": ("[dexscreener].max_avg_trade_usd", _NUMBER),
     "max_price_change_h1_pct": ("[dexscreener].max_price_change_h1_pct", _NUMBER),
+    "quote_tokens": ("[dexscreener].quote_tokens", (list,)),
+    "min_txns_m5": ("[dexscreener].min_txns_m5", _NUMBER),
+    "min_volume_m5_usd": ("[dexscreener].min_volume_m5_usd", _NUMBER),
+    "check_token_authorities": ("[solana].check_token_authorities", (bool,)),
+    "solana_rpc_url": ("[solana].rpc_url", (str,)),
     "score_alert_threshold": ("[radar].score_alert_threshold", _NUMBER),
     # Se usan como índice de slice y en range(): tienen que ser enteros.
     "top_n_candidates": ("[radar].top_n_candidates", (int,)),
@@ -99,6 +110,7 @@ _FIELD_TYPES: dict[str, tuple[str, tuple[type, ...]]] = {
     "early_min_buy_ratio": ("[watch].min_buy_ratio", _NUMBER),
     "early_cooldown_minutes": ("[watch].cooldown_minutes", _NUMBER),
     "early_suppress_alert_minutes": ("[watch].suppress_alert_minutes", _NUMBER),
+    "early_require_sustained_seconds": ("[watch].require_sustained_seconds", _NUMBER),
     "verbose": ("[radar].verbose", (bool,)),
     "telegram_bot_token": ("[telegram].bot_token", (str,)),
     "telegram_chat_id": ("[telegram].chat_id", (str,)),
@@ -191,6 +203,13 @@ class Config:
     min_sell_ratio_h1: float = 0.1
     max_avg_trade_usd: float = 5_000.0
     max_price_change_h1_pct: float = 1_000.0
+    # Monedas contra las que debe cotizar el par (símbolo o dirección del
+    # quote). Vacío = cualquiera.
+    quote_tokens: list[str] = field(default_factory=list)
+    # Actividad mínima de los últimos 5 minutos: por debajo, el arranque es de
+    # dos operaciones sueltas.
+    min_txns_m5: float = 0.0
+    min_volume_m5_usd: float = 0.0
     score_alert_threshold: float = 70.0
     top_n_candidates: int = 200
     geckoterminal_pages: int = 5
@@ -217,7 +236,13 @@ class Config:
     # Alertas completas de tokens con prealerta reciente: llegaban con la
     # subida ya hecha. 0 = mandarlas igual.
     early_suppress_alert_minutes: float = 360.0
+    # Segundos que el arranque tiene que seguir cumpliéndose (con datos nuevos)
+    # antes de avisar. Los que no se sostenían rendían bastante peor.
+    early_require_sustained_seconds: float = 30.0
     verbose: bool = False
+    # Comprobación en la blockchain de que el token no se pueda acuñar ni congelar.
+    check_token_authorities: bool = True
+    solana_rpc_url: str = MAINNET_RPC_URL
     weights: ScoringWeights = field(default_factory=ScoringWeights)
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
@@ -235,6 +260,12 @@ class Config:
                 raise ValueError(f"{toml_name} tiene un tipo inválido: {value!r}")
         if not self.chain_id:
             raise ValueError("[dexscreener].chain_id no puede estar vacío")
+        if not all(isinstance(quote, str) and quote for quote in self.quote_tokens):
+            raise ValueError(
+                f"[dexscreener].quote_tokens debe ser una lista de textos ({self.quote_tokens!r})"
+            )
+        if self.check_token_authorities and not self.solana_rpc_url:
+            raise ValueError("[solana].rpc_url no puede estar vacío con check_token_authorities")
         if self.poll_interval_seconds <= 0:
             raise ValueError(
                 f"[radar].poll_interval_seconds debe ser > 0 ({self.poll_interval_seconds})"
@@ -291,6 +322,9 @@ class Config:
                 f"[watch].min_buy_ratio debe estar entre 0 y 1 ({self.early_min_buy_ratio})"
             )
         for name in (
+            "min_txns_m5",
+            "min_volume_m5_usd",
+            "early_require_sustained_seconds",
             "early_min_volume_ratio",
             "early_min_txns_ratio",
             "early_cooldown_minutes",
@@ -330,6 +364,7 @@ class Config:
         dexscreener = _section(raw, "dexscreener")
         geckoterminal = _section(raw, "geckoterminal")
         scoring = _section(raw, "scoring")
+        solana = _section(raw, "solana")
         watch = _section(raw, "watch")
         telegram = _section(raw, "telegram")
         weights_raw = raw.get("scoring_weights", {})
@@ -354,6 +389,11 @@ class Config:
             min_sell_ratio_h1=dexscreener.get("min_sell_ratio_h1", 0.1),
             max_avg_trade_usd=dexscreener.get("max_avg_trade_usd", 5_000.0),
             max_price_change_h1_pct=dexscreener.get("max_price_change_h1_pct", 1_000.0),
+            quote_tokens=dexscreener.get("quote_tokens", []),
+            min_txns_m5=dexscreener.get("min_txns_m5", 0.0),
+            min_volume_m5_usd=dexscreener.get("min_volume_m5_usd", 0.0),
+            check_token_authorities=solana.get("check_token_authorities", True),
+            solana_rpc_url=solana.get("rpc_url", MAINNET_RPC_URL),
             score_alert_threshold=radar.get("score_alert_threshold", 70.0),
             top_n_candidates=radar.get("top_n_candidates", 200),
             geckoterminal_pages=geckoterminal.get("trending_pages", 5),
@@ -375,6 +415,7 @@ class Config:
             early_min_buy_ratio=watch.get("min_buy_ratio", 0.55),
             early_cooldown_minutes=watch.get("cooldown_minutes", 360.0),
             early_suppress_alert_minutes=watch.get("suppress_alert_minutes", 360.0),
+            early_require_sustained_seconds=watch.get("require_sustained_seconds", 30.0),
             verbose=radar.get("verbose", False),
             # from_raw solo cubre las claves presentes en el TOML; el resto
             # toma los defaults de ScoringWeights.

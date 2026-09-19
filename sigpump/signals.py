@@ -34,16 +34,21 @@ def volume_acceleration(pair: dict) -> float:
     return to_float(volume.get("m5")) * 12 / volume_h1
 
 
+def txns_m5(pair: dict) -> float:
+    """Compras + ventas de los últimos 5 minutos. 0.0 si la API no las informa."""
+    txns = (pair.get("txns") or {}).get("m5")
+    if not isinstance(txns, dict):
+        return 0.0
+    return to_float(txns.get("buys")) + to_float(txns.get("sells"))
+
+
 def buy_ratio_m5(pair: dict) -> float | None:
     """Fracción de compras sobre el total de txns de los últimos 5 min (0-1).
     None si hubo menos de MIN_TXNS_M5 txns, porque con tan pocas no dice nada."""
-    txns_m5 = (pair.get("txns") or {}).get("m5")
-    if not isinstance(txns_m5, dict):
-        return None
-    buys = to_float(txns_m5.get("buys"))
-    total = buys + to_float(txns_m5.get("sells"))
+    total = txns_m5(pair)
     if total < MIN_TXNS_M5:
         return None
+    buys = to_float(((pair.get("txns") or {}).get("m5") or {}).get("buys"))
     return buys / total
 
 

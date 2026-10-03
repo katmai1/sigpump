@@ -100,6 +100,33 @@ Con cuatro días de datos (692 señales) se afinó lo siguiente:
 - Los de **menos de $500 de volumen en 5 minutos** eran el peor tramo
   (`min_volume_m5_usd`).
 
+## Seguimiento de wallets
+
+Con `[wallets].enabled = true`, un tercer bucle consulta cada
+`interval_seconds` las transacciones nuevas de las wallets listadas en
+`[wallets].file` (una por línea, con la etiqueta detrás de `#`) y avisa por
+Telegram con un 👛 cuando una compra un token ([sigpump/wallets.py](sigpump/wallets.py)).
+
+Una compra se detecta por los saldos de la wallet antes y después de la
+transacción: sube el de un token mientras gasta SOL (al menos `min_sol`) o
+USDC/USDT. No depende del DEX ni del agregador por el que se haga, y recibir
+un token sin pagar (airdrops de spam) no cuenta. El aviso indica si es una
+entrada nueva o amplía una posición, cuánto pagó y qué otras wallets
+seguidas entraron en el mismo token en los últimos `confluence_minutes`.
+
+Se ignoran las compras de tokens que todavía están en la bonding curve de un
+launchpad (pump.fun, Meteora DBC, LaunchLab, Moonshot) y se descartan las de
+tokens que se pueden acuñar o congelar; estas últimas quedan registradas con
+`enviada = 0`. No se aplican los filtros duros ni el score: el aviso es por
+quién compra, no por cómo está el mercado. El score sí se calcula y se
+muestra como referencia.
+
+Al arrancar solo se toma como punto de partida la última transacción de cada
+wallet: no se avisa del historial. El fichero se relee cuando cambia.
+
+Usa el `rpc_url` de `[solana]`. Con 10-15 wallets cada 15 segundos el RPC
+público se queda corto; un plan gratuito de Helius o QuickNode alcanza.
+
 ## Registro de alertas
 
 `alertas.db` (configurable con `[radar].alert_log_path`) es una base SQLite
@@ -122,6 +149,10 @@ mercado del momento y cómo le fue después:
   avisar no se piden velas.
 - `sostenido_30s`, `sostenido_60s` (prealertas): 1 si el arranque seguía
   cumpliéndose con los datos de ~30 y ~60 segundos después.
+- `wallet`, `wallet_etiqueta`, `sol_gastado`, `stable_gastado`,
+  `entrada_nueva`, `wallets_confluencia` y `tx` (`tipo = 'wallet'`): quién
+  compró, cuánto, si ya tenía el token y cuántas otras wallets seguidas
+  habían entrado antes.
 - `txns_m5`, `moneda_par` y `edad_par_min`: actividad del momento, contra qué
   cotiza el par y cuánto llevaba vivo al avisar.
 
@@ -197,6 +228,9 @@ Secciones disponibles:
 - `[watch]` — vigilancia rápida y prealertas: intervalo, cuántos tokens
   vigilar, umbrales de arranque, `require_sustained_seconds` (cuánto tiene que
   sostenerse el arranque antes de avisar) y cooldown propio.
+- `[wallets]` — seguimiento de wallets: `file` con las direcciones,
+  intervalo, `min_sol` (gasto mínimo para contar como compra), cooldown por
+  wallet y token, y ventana de confluencia.
 - `[scoring]` — `late_penalty_start_h1_pct` y `late_penalty_end_h1_pct`:
   entre esos dos cambios de 1h el score se reduce linealmente hasta 0.
 - `[scoring_weights]` — pesos relativos (deben sumar ~1.0) de cada
@@ -234,6 +268,7 @@ sigpump/
   screener.py               Cliente HTTP async de DexScreener y GeckoTerminal
   radar.py                   Orquesta el ciclo descubrir -> puntuar -> alertar
   telegram.py                 Formateo y envío de alertas por Telegram
+  wallets.py                  Seguimiento de las compras de wallets
   util.py                      Conversión defensiva de los campos de la API
 tests/                    Tests (stdlib unittest, sin red)
 ```

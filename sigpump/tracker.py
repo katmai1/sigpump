@@ -45,7 +45,7 @@ _RECENT_HIGH = f"bajo_maximo_{RECENT_HIGH_MINUTES}m_pct"
 COLUMNS: dict[str, str] = {
     "fecha": "TEXT",
     "enviada": "INTEGER",  # 1 = alerta enviada, 0 = descartada por llegar tarde
-    "tipo": "TEXT",  # 'alerta' o 'prealerta'; NULL en filas anteriores = 'alerta'
+    "tipo": "TEXT",  # 'alerta', 'prealerta' o 'wallet'; NULL en filas anteriores = 'alerta'
     "motivo_descarte": "TEXT",
     "simbolo": "TEXT",
     "token": "TEXT",
@@ -75,6 +75,15 @@ COLUMNS: dict[str, str] = {
     # ~30 y ~60 s después (1/0). Mide si exigirlo quitaría los mini pumps.
     "sostenido_30s": "INTEGER",
     "sostenido_60s": "INTEGER",
+    # Solo tipo 'wallet': quién compró, cuánto pagó, si ya tenía el token y
+    # cuántas otras wallets seguidas habían entrado en él poco antes.
+    "wallet": "TEXT",
+    "wallet_etiqueta": "TEXT",
+    "sol_gastado": "REAL",
+    "stable_gastado": "REAL",
+    "entrada_nueva": "INTEGER",
+    "wallets_confluencia": "INTEGER",
+    "tx": "TEXT",
     # Cómo venía la subida en las velas cerradas antes de la señal.
     "sube_15m_pct": "REAL",
     "velas_verdes_seguidas": "INTEGER",
@@ -318,7 +327,7 @@ class AlertTracker:
 
     def last_sent(self, kind: str, since: float) -> dict[str, float]:
         """Token -> timestamp de su última señal enviada de tipo `kind`
-        ('alerta' o 'prealerta') posterior a `since`."""
+        ('alerta', 'prealerta' o 'wallet') posterior a `since`."""
         conn = self._db()
         if conn is None:
             return {}

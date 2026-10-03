@@ -23,6 +23,7 @@ from sigpump.signals import (
     volume_acceleration,
 )
 from sigpump.util import to_float
+from sigpump.wallets import WalletSignal
 
 # Espera máxima aceptable ante flood control. Más que esto bloquearía el
 # loop del radar demasiado tiempo: se deja fallar y se reintenta la próxima pasada.
@@ -60,6 +61,7 @@ class TelegramAlerter:
         score: float,
         candles: CandleStats | None = None,
         early: EarlySignal | None = None,
+        wallet: WalletSignal | None = None,
     ) -> str:
         """Arma el HTML del mensaje de alerta para `pair` con su `score` y,
         si la verificación pidió velas, su posición respecto del mínimo y
@@ -107,7 +109,25 @@ class TelegramAlerter:
             )
             links += f" | <a href=\"{photon_url}\">Ver en Photon</a>"
 
-        if early is None:
+        if wallet is not None:
+            # Aviso de wallet: lo primero es quién entró y cuánto metió.
+            buy = wallet.buy
+            spent = []
+            if buy.sol_spent > 0:
+                spent.append(f"{buy.sol_spent:,.2f} SOL")
+            if buy.stable_spent > 0:
+                spent.append(f"${buy.stable_spent:,.0f}")
+            tx_url = html.escape(f"https://solscan.io/tx/{buy.signature}", quote=True)
+            header = (
+                f"👛 <b>{html.escape(buy.label)} compró {name} ({symbol})</b>\n"
+                f"{'Entrada nueva' if buy.new_position else 'Amplía posición'}: "
+                f"<b>{' + '.join(spent) or '?'}</b> (<a href=\"{tx_url}\">tx</a>)\n"
+            )
+            if wallet.others:
+                header += (
+                    f"👛 También entraron: <b>{html.escape(', '.join(wallet.others))}</b>\n"
+                )
+        elif early is None:
             header = f"🎯 <b>{name} ({symbol})</b>\n"
         else:
             # Prealerta: lo primero que se lee es el arranque, que es lo que
@@ -139,12 +159,14 @@ class TelegramAlerter:
         score: float,
         candles: CandleStats | None = None,
         early: EarlySignal | None = None,
+        wallet: WalletSignal | None = None,
     ) -> None:
-        """Arma y envía el mensaje de alerta (o de prealerta, con `early`) para
-        `pair` con su `score` ya calculado."""
+        """Arma y envía el mensaje de alerta (o de prealerta, con `early`, o
+        de compra de una wallet seguida, con `wallet`) para `pair` con su
+        `score` ya calculado."""
         kwargs = dict(
             chat_id=self._chat_id,
-            text=self.format_message(pair, score, candles, early),
+            text=self.format_message(pair, score, candles, early, wallet),
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
             message_thread_id=self._message_thread_id,

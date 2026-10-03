@@ -65,6 +65,14 @@ _KNOWN_KEYS: dict[str, set[str]] = {
         "suppress_alert_minutes",
         "require_sustained_seconds",
     },
+    "wallets": {
+        "enabled",
+        "file",
+        "interval_seconds",
+        "min_sol",
+        "cooldown_minutes",
+        "confluence_minutes",
+    },
     "telegram": {"bot_token", "chat_id", "message_thread_id"},
 }
 
@@ -111,6 +119,12 @@ _FIELD_TYPES: dict[str, tuple[str, tuple[type, ...]]] = {
     "early_cooldown_minutes": ("[watch].cooldown_minutes", _NUMBER),
     "early_suppress_alert_minutes": ("[watch].suppress_alert_minutes", _NUMBER),
     "early_require_sustained_seconds": ("[watch].require_sustained_seconds", _NUMBER),
+    "wallets_enabled": ("[wallets].enabled", (bool,)),
+    "wallets_file": ("[wallets].file", (str,)),
+    "wallets_interval_seconds": ("[wallets].interval_seconds", _NUMBER),
+    "wallets_min_sol": ("[wallets].min_sol", _NUMBER),
+    "wallets_cooldown_minutes": ("[wallets].cooldown_minutes", _NUMBER),
+    "wallets_confluence_minutes": ("[wallets].confluence_minutes", _NUMBER),
     "verbose": ("[radar].verbose", (bool,)),
     "telegram_bot_token": ("[telegram].bot_token", (str,)),
     "telegram_chat_id": ("[telegram].chat_id", (str,)),
@@ -239,6 +253,17 @@ class Config:
     # Segundos que el arranque tiene que seguir cumpliéndose (con datos nuevos)
     # antes de avisar. Los que no se sostenían rendían bastante peor.
     early_require_sustained_seconds: float = 30.0
+    # Seguimiento de wallets: avisa cuando una de las del fichero entra en un token.
+    wallets_enabled: bool = False
+    wallets_file: str = "wallets.txt"
+    wallets_interval_seconds: float = 15.0
+    # Mínimo de SOL gastado para considerar que una transacción es una compra.
+    wallets_min_sol: float = 0.1
+    # Minutos sin repetir aviso de la misma wallet en el mismo token.
+    wallets_cooldown_minutes: float = 60.0
+    # Ventana en la que otras wallets seguidas que entraron en el mismo token
+    # se mencionan en el aviso.
+    wallets_confluence_minutes: float = 60.0
     verbose: bool = False
     # Comprobación en la blockchain de que el token no se pueda acuñar ni congelar.
     check_token_authorities: bool = True
@@ -266,6 +291,14 @@ class Config:
             )
         if self.check_token_authorities and not self.solana_rpc_url:
             raise ValueError("[solana].rpc_url no puede estar vacío con check_token_authorities")
+        if self.wallets_enabled and not self.solana_rpc_url:
+            raise ValueError("[solana].rpc_url no puede estar vacío con [wallets].enabled")
+        if self.wallets_enabled and not self.wallets_file:
+            raise ValueError("[wallets].file no puede estar vacío con [wallets].enabled")
+        if self.wallets_interval_seconds <= 0:
+            raise ValueError(
+                f"[wallets].interval_seconds debe ser > 0 ({self.wallets_interval_seconds})"
+            )
         if self.poll_interval_seconds <= 0:
             raise ValueError(
                 f"[radar].poll_interval_seconds debe ser > 0 ({self.poll_interval_seconds})"
@@ -325,6 +358,9 @@ class Config:
             "min_txns_m5",
             "min_volume_m5_usd",
             "early_require_sustained_seconds",
+            "wallets_min_sol",
+            "wallets_cooldown_minutes",
+            "wallets_confluence_minutes",
             "early_min_volume_ratio",
             "early_min_txns_ratio",
             "early_cooldown_minutes",
@@ -366,6 +402,7 @@ class Config:
         scoring = _section(raw, "scoring")
         solana = _section(raw, "solana")
         watch = _section(raw, "watch")
+        wallets = _section(raw, "wallets")
         telegram = _section(raw, "telegram")
         weights_raw = raw.get("scoring_weights", {})
         if not isinstance(weights_raw, dict):
@@ -416,6 +453,12 @@ class Config:
             early_cooldown_minutes=watch.get("cooldown_minutes", 360.0),
             early_suppress_alert_minutes=watch.get("suppress_alert_minutes", 360.0),
             early_require_sustained_seconds=watch.get("require_sustained_seconds", 30.0),
+            wallets_enabled=wallets.get("enabled", False),
+            wallets_file=wallets.get("file", "wallets.txt"),
+            wallets_interval_seconds=wallets.get("interval_seconds", 15.0),
+            wallets_min_sol=wallets.get("min_sol", 0.1),
+            wallets_cooldown_minutes=wallets.get("cooldown_minutes", 60.0),
+            wallets_confluence_minutes=wallets.get("confluence_minutes", 60.0),
             verbose=radar.get("verbose", False),
             # from_raw solo cubre las claves presentes en el TOML; el resto
             # toma los defaults de ScoringWeights.

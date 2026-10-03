@@ -99,6 +99,26 @@ require_sustained_seconds = 30
 check_token_authorities = true
 rpc_url = "https://api.mainnet-beta.solana.com"
 
+[wallets]
+# Seguimiento de wallets: avisa cuando una de las del fichero compra un token.
+# Usa el rpc_url de [solana]; el RPC público corta enseguida, conviene uno con
+# API key (Helius, QuickNode...). Las compras en bonding curve (pump.fun antes
+# de graduarse, etc.) y las de tokens que se pueden acuñar o congelar se ignoran.
+enabled = false
+# Una dirección por línea; lo que va detrás de # es la etiqueta del aviso:
+#   5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1  # ballena 1
+# Se relee solo cuando cambia: no hace falta reiniciar para añadir wallets.
+file = "wallets.txt"
+interval_seconds = 15
+# SOL mínimo gastado para contar una transacción como compra (descarta
+# airdrops de spam y transferencias). Pagar con USDC/USDT cuenta siempre.
+min_sol = 0.1
+# Minutos sin repetir aviso de la misma wallet en el mismo token (las que
+# compran en varias tx seguidas).
+cooldown_minutes = 60
+# Si otra wallet seguida entró en el mismo token en estos minutos, el aviso lo dice.
+confluence_minutes = 60
+
 [scoring]
 # Penalización por subida ya hecha: si el cambio de 1h supera start, el score
 # se multiplica por un factor que baja linealmente de 1 (en start) a 0 (en end).

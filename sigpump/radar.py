@@ -20,6 +20,7 @@ from sigpump.solana import TokenAuthorities
 from sigpump.telegram import TelegramAlerter
 from sigpump.tracker import AlertTracker
 from sigpump.util import normalize_address, to_float
+from sigpump.wallets import WalletBuy, WalletSignal, WalletWatcher
 from sigpump.watch import EarlyThresholds, PoolHistory
 
 log = logging.getLogger()
@@ -51,6 +52,9 @@ FOLLOWUP_MAX_SECONDS = 180
 CANDLE_FEATURES_MAX_AGE_MINUTES = 45
 # Tope de espera por esas velas: es solo medición y no debe frenar la vigilancia.
 CANDLE_FEATURES_TIMEOUT_SECONDS = 10.0
+# dexId de DexScreener de los pools que son bonding curves de un launchpad
+# (el token todavía no se graduó a un AMM): las compras de wallets ahí se ignoran.
+BONDING_CURVE_DEX_IDS = {"pumpfun", "meteoradbc", "launchlab", "moonshot"}
 
 
 def _liquidity_usd(pair: dict) -> float:
@@ -122,8 +126,13 @@ class MemecoinRadar:
         # Arranques detectados que esperan confirmación (require_sustained_seconds):
         # address -> {"ts", "key" (refresco en que se detectó)}.
         self._pending_early: dict[str, dict] = {}
-        # Se crea en run(), con la sesión HTTP.
+        # Se crean en run(), con la sesión HTTP.
         self._authorities: TokenAuthorities | None = None
+        self._wallet_watcher: WalletWatcher | None = None
+        # Último aviso por (wallet, token), para no repetirlo si compra en varias tx.
+        self._wallet_alerted: dict[tuple[str, str], float] = {}
+        # Compras recientes por token (avisadas o no), para la confluencia.
+        self._wallet_buys: dict[str, list[WalletBuy]] = {}
         # Prealertas cuyo arranque se está midiendo si se sostiene:
         # address -> {"row_id", "ts", "key" (último refresco visto), "done"}.
         self._followups: dict[str, dict] = {}
@@ -185,6 +194,14 @@ class MemecoinRadar:
             expired = [addr for addr, ts in registry.items() if ts < now - minutes * 60]
             for addr in expired:
                 del registry[addr]
+        wallet_cooldown = self._config.wallets_cooldown_minutes * 60
+        for key in [k for k, ts in self._wallet_alerted.items() if ts < now - wallet_cooldown]:
+            del self._wallet_alerted[key]
+        confluence_since = now - self._config.wallets_confluence_minutes * 60
+        self._wallet_buys = {
+            mint: recent for mint, buys in self._wallet_buys.items()
+            if (recent := [b for b in buys if b.ts >= confluence_since])
+        }
         stale = [
             address for address, pending in self._pending_early.items()
             if now - pending["ts"] > FOLLOWUP_MAX_SECONDS
@@ -745,6 +762,104 @@ class MemecoinRadar:
         if stats is not None:
             self._tracker.set_candle_stats(row["id"], stats)
 
+    def _wallet_cooldown_active(self, buy: WalletBuy) -> bool:
+        """True si ya se avisó de esta wallet en este token hace menos de
+        [wallets].cooldown_minutes."""
+        last = self._wallet_alerted.get((buy.wallet, buy.mint))
+        return last is not None and (time.time() - last) / 60 < self._config.wallets_cooldown_minutes
+
+    def _confluence(self, buy: WalletBuy) -> tuple[str, ...]:
+        """Anota la compra y devuelve las etiquetas de las otras wallets
+        seguidas que entraron en el mismo token dentro de confluence_minutes."""
+        since = buy.ts - self._config.wallets_confluence_minutes * 60
+        recent = [b for b in self._wallet_buys.get(buy.mint, []) if b.ts >= since]
+        others = tuple(dict.fromkeys(b.label for b in recent if b.wallet != buy.wallet))
+        self._wallet_buys[buy.mint] = recent + [buy]
+        return others
+
+    async def _wallets_once(self, client: DexScreenerClient, alerter: TelegramAlerter) -> None:
+        """
+        Vuelta del seguimiento de wallets: busca sus compras nuevas y avisa
+        de cada una, salvo tokens en bonding curve (sin pool en un AMM),
+        tokens que se pueden acuñar o congelar, y compras repetidas de la
+        misma wallet en el mismo token dentro de su cooldown.
+        """
+        if self._wallet_watcher is None:
+            return
+        buys = await self._wallet_watcher.poll()
+        if not buys:
+            return
+        signals = [
+            WalletSignal(buy, self._confluence(buy)) for buy in buys
+            if not self._wallet_cooldown_active(buy)
+        ]
+        if not signals:
+            return
+
+        mints = list(dict.fromkeys(s.buy.mint for s in signals))
+        all_pairs = await client.get_pairs_for_tokens(self._config.chain_id, mints)
+        amm_pairs = [p for p in all_pairs if p.get("dexId") not in BONDING_CURVE_DEX_IDS]
+        pairs = {
+            normalize_address((p.get("baseToken") or {}).get("address", "")): p
+            for p in self._best_pair_per_token(amm_pairs, mints)
+        }
+        unsafe = await self._unsafe_reasons(list(pairs.values()))
+
+        for signal in signals:
+            buy = signal.buy
+            pair = pairs.get(buy.mint)
+            if pair is None:
+                log.info("Compra de %s en %s ignorada: sin pool fuera de bonding curve", buy.label, buy.mint)
+                continue
+            # Una wallet que compra en varias tx seguidas da una señal por tx
+            # en la misma vuelta: solo cuenta la primera.
+            if self._wallet_cooldown_active(buy):
+                continue
+            key = (buy.wallet, buy.mint)
+            # Se marca también al descartar, para no registrar una fila por
+            # cada compra repetida del mismo token peligroso.
+            self._wallet_alerted[key] = time.time()
+            score = self._score(pair, self._boosted)
+            reason = unsafe.get(buy.mint)
+            if reason:
+                log.info("Compra de %s en %s descartada: %s", buy.label, _symbol(pair), reason)
+                self._record_wallet(pair, score, signal, sent=False, reason=reason)
+                continue
+            log.info(
+                "Wallet: %s compró %s (%.2f SOL, %s)%s",
+                buy.label,
+                _symbol(pair),
+                buy.sol_spent,
+                "entrada nueva" if buy.new_position else "amplía",
+                f" | también {', '.join(signal.others)}" if signal.others else "",
+            )
+            try:
+                await alerter.send(pair, score, wallet=signal)
+            except Exception:
+                log.exception("Error enviando aviso de wallet para %s", buy.mint)
+                self._wallet_alerted.pop(key, None)
+                continue
+            self._record_wallet(pair, score, signal, sent=True)
+
+    def _record_wallet(
+        self, pair: dict, score: float, signal: WalletSignal, sent: bool, reason: str = ""
+    ) -> None:
+        if not self._tracker:
+            return
+        row_id = self._tracker.record(pair, score, None, sent=sent, reason=reason, kind="wallet")
+        if row_id is None:
+            return
+        buy = signal.buy
+        self._tracker.update_row(row_id, {
+            "wallet": buy.wallet,
+            "wallet_etiqueta": buy.label,
+            "sol_gastado": buy.sol_spent,
+            "stable_gastado": buy.stable_spent,
+            "entrada_nueva": int(buy.new_position),
+            "wallets_confluencia": len(signal.others),
+            "tx": buy.signature,
+        })
+
     async def _scan_once(self, client: DexScreenerClient, alerter: TelegramAlerter) -> None:
         """Ejecuta una pasada completa: descubrir -> traer datos de mercado ->
         filtrar -> puntuar -> verificar -> alertar. Se invoca en loop desde run()."""
@@ -857,6 +972,13 @@ class MemecoinRadar:
             client = DexScreenerClient(session)
             if self._config.check_token_authorities:
                 self._authorities = TokenAuthorities(session, self._config.solana_rpc_url)
+            if self._config.wallets_enabled:
+                self._wallet_watcher = WalletWatcher(
+                    session,
+                    self._config.solana_rpc_url,
+                    Path(self._config.wallets_file),
+                    self._config.wallets_min_sol,
+                )
             loops = [
                 self._loop(
                     self._scan_once, client, alerter,
@@ -871,6 +993,13 @@ class MemecoinRadar:
                     self._loop(
                         self._watch_once, client, alerter,
                         self._config.watch_interval_seconds, "Error durante la vigilancia",
+                    )
+                )
+            if self._wallet_watcher is not None:
+                loops.append(
+                    self._loop(
+                        self._wallets_once, client, alerter,
+                        self._config.wallets_interval_seconds, "Error siguiendo las wallets",
                     )
                 )
             await asyncio.gather(*loops)

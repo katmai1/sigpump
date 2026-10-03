@@ -16,6 +16,7 @@ from sigpump.wallets import (
     LAMPORTS_PER_SOL,
     MAX_TRANSACTION_VERSION,
     MAX_TX_ATTEMPTS,
+    DIRTY_RETRIES,
     WSOL_MINT,
     FollowedWallet,
     WalletBuy,
@@ -26,6 +27,7 @@ from sigpump.wallets import (
     load_temporary_blacklist,
     load_wallets,
     parse_buys,
+    ws_url,
 )
 from tests.test_radar import _FakeClient, _config, _pair
 
@@ -308,6 +310,109 @@ class TestWalletWatcher(unittest.IsolatedAsyncioTestCase):
         rpc.txs = {"NUEVA": _tx(post_tokens=[_saldo(TOKEN, 1)], sol_gastado=1)}
         self.assertEqual(len(await watcher.poll()), 1)
 
+
+
+class _FakeWs:
+    def __init__(self):
+        self.enviados: list[dict] = []
+
+    async def send_json(self, data):
+        self.enviados.append(data)
+
+
+def _aviso(sub, err=None):
+    return {
+        "jsonrpc": "2.0", "method": "logsNotification",
+        "params": {"subscription": sub, "result": {"value": {"signature": "S", "err": err}}},
+    }
+
+
+class TestWebSocket(unittest.IsolatedAsyncioTestCase):
+    setUp = TestWalletWatcher.setUp
+
+    async def _conectado(self, rpc):
+        """Watcher con la wallet ya suscrita (suscripción 77) y su punto de partida fijado."""
+        watcher = WalletWatcher(rpc, "http://rpc", self.path, min_sol=0.1)
+        await watcher.poll()
+        watcher._connected = True
+        watcher._next_full_poll = time.monotonic() + 600
+        ws = _FakeWs()
+        await watcher._sync_subscriptions(ws)
+        [pedida] = ws.enviados
+        self.assertEqual(pedida["method"], "logsSubscribe")
+        self.assertEqual(pedida["params"][0], {"mentions": [WALLET]})
+        watcher._handle({"jsonrpc": "2.0", "id": pedida["id"], "result": 77})
+        rpc.llamadas.clear()
+        return watcher, ws
+
+    def test_url_del_websocket(self):
+        self.assertEqual(ws_url("https://mainnet.helius-rpc.com/?api-key=K"), "wss://mainnet.helius-rpc.com/?api-key=K")
+        self.assertEqual(ws_url("http://localhost:8899"), "ws://localhost:8899")
+
+    async def test_sin_avisos_no_consulta_nada(self):
+        rpc = _FakeRpc(firmas=["VIEJA"])
+        watcher, _ = await self._conectado(rpc)
+        self.assertEqual(await watcher.poll(), [])
+        self.assertEqual(rpc.llamadas, [])
+
+    async def test_un_aviso_consulta_solo_esa_wallet(self):
+        rpc = _FakeRpc(firmas=["VIEJA"])
+        watcher, _ = await self._conectado(rpc)
+        rpc.firmas = ["NUEVA", "VIEJA"]
+        rpc.txs["NUEVA"] = _tx(post_tokens=[_saldo(TOKEN, 1)], sol_gastado=1)
+        watcher._handle(_aviso(77))
+        [buy] = await watcher.poll()
+        self.assertEqual(buy.signature, "NUEVA")
+        rpc.llamadas.clear()
+        self.assertEqual(await watcher.poll(), [])
+        self.assertEqual(rpc.llamadas, [])
+
+    async def test_las_transacciones_fallidas_no_marcan(self):
+        rpc = _FakeRpc(firmas=["VIEJA"])
+        watcher, _ = await self._conectado(rpc)
+        watcher._handle(_aviso(77, err={"InstructionError": [0, "Custom"]}))
+        await watcher.poll()
+        self.assertEqual(rpc.llamadas, [])
+
+    async def test_si_el_rpc_va_por_detras_reintenta_unas_vueltas(self):
+        rpc = _FakeRpc(firmas=["VIEJA"])
+        watcher, _ = await self._conectado(rpc)
+        watcher._handle(_aviso(77))
+        # El aviso llegó pero getSignaturesForAddress aún no tiene la firma.
+        for _ in range(DIRTY_RETRIES):
+            await watcher.poll()
+        self.assertEqual(len(rpc.llamadas), DIRTY_RETRIES)
+        await watcher.poll()
+        self.assertEqual(len(rpc.llamadas), DIRTY_RETRIES)
+
+    async def test_desconectado_consulta_todas(self):
+        rpc = _FakeRpc(firmas=["VIEJA"])
+        watcher, _ = await self._conectado(rpc)
+        watcher._connected = False
+        await watcher.poll()
+        self.assertEqual([m for m, _ in rpc.llamadas], ["getSignaturesForAddress"])
+
+    async def test_pasada_completa_periodica(self):
+        rpc = _FakeRpc(firmas=["VIEJA"])
+        watcher, _ = await self._conectado(rpc)
+        watcher._next_full_poll = 0.0
+        await watcher.poll()
+        self.assertEqual(len(rpc.llamadas), 1)
+        rpc.llamadas.clear()
+        await watcher.poll()
+        self.assertEqual(rpc.llamadas, [])
+
+    async def test_quitar_una_wallet_del_fichero_la_desuscribe(self):
+        rpc = _FakeRpc(firmas=["VIEJA"])
+        watcher, ws = await self._conectado(rpc)
+        self.path.write_text("", encoding="utf-8")
+        watcher._mtime = None
+        watcher.reload()
+        await watcher._sync_subscriptions(ws)
+        self.assertEqual(ws.enviados[-1]["method"], "logsUnsubscribe")
+        self.assertEqual(ws.enviados[-1]["params"], [77])
+        watcher._handle(_aviso(77))
+        self.assertEqual(watcher._dirty, {})
 
 class TestTransaccionesQueFallan(unittest.IsolatedAsyncioTestCase):
     setUp = TestWalletWatcher.setUp

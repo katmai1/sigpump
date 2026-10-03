@@ -149,6 +149,14 @@ blacklist_file = ""
 # Una wallet con una compra que cae este % en el seguimiento (rug) entra sola
 # en la lista negra. 0 = no hacerlo.
 rug_drop_pct = 90
+# Avisos de actividad por el WebSocket del RPC (logsSubscribe): solo se
+# consultan las wallets que acaban de hacer algo, en vez de todas en cada
+# vuelta. Si se cae, se vuelve a consultar todas hasta que reconecta.
+websocket = true
+# Vacío = el de [solana].rpc_url cambiando https:// por wss://.
+ws_url = ""
+# Con el WebSocket, cada cuánto se consultan todas por si se perdió un aviso.
+full_poll_minutes = 10
 
 [scoring]
 # Penalización por subida ya hecha: si el cambio de 1h supera start, el score

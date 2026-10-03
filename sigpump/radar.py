@@ -21,7 +21,7 @@ from sigpump.solana import TokenAuthorities
 from sigpump.telegram import TelegramAlerter
 from sigpump.tracker import AlertTracker
 from sigpump.util import normalize_address, to_float
-from sigpump.wallets import WalletBuy, WalletSignal, WalletWatcher
+from sigpump.wallets import WalletBuy, WalletSignal, WalletWatcher, ws_url
 from sigpump.watch import EarlyThresholds, PoolHistory
 
 log = logging.getLogger()
@@ -1116,6 +1116,7 @@ class MemecoinRadar:
                     Path(self._config.wallets_file),
                     self._config.wallets_min_sol,
                     Path(self._config.wallets_blacklist_file) if self._config.wallets_blacklist_file else None,
+                    self._config.wallets_full_poll_minutes * 60,
                 )
             loops = []
             if self._scan_needed():
@@ -1142,6 +1143,10 @@ class MemecoinRadar:
                         self._config.wallets_interval_seconds, "Error siguiendo las wallets",
                     )
                 )
+                if self._config.wallets_websocket:
+                    loops.append(self._wallet_watcher.listen(
+                        self._config.wallets_ws_url or ws_url(self._config.solana_rpc_url)
+                    ))
             await asyncio.gather(*loops)
 
     @staticmethod

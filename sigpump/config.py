@@ -79,6 +79,9 @@ _KNOWN_KEYS: dict[str, set[str]] = {
         "max_tokens_per_hour",
         "blacklist_file",
         "rug_drop_pct",
+        "websocket",
+        "ws_url",
+        "full_poll_minutes",
     },
     "telegram": {"bot_token", "chat_id", "message_thread_id"},
 }
@@ -139,6 +142,9 @@ _FIELD_TYPES: dict[str, tuple[str, tuple[type, ...]]] = {
     "wallets_max_tokens_per_hour": ("[wallets].max_tokens_per_hour", (int,)),
     "wallets_blacklist_file": ("[wallets].blacklist_file", (str,)),
     "wallets_rug_drop_pct": ("[wallets].rug_drop_pct", _NUMBER),
+    "wallets_websocket": ("[wallets].websocket", (bool,)),
+    "wallets_ws_url": ("[wallets].ws_url", (str,)),
+    "wallets_full_poll_minutes": ("[wallets].full_poll_minutes", _NUMBER),
     "verbose": ("[radar].verbose", (bool,)),
     "telegram_bot_token": ("[telegram].bot_token", (str,)),
     "telegram_chat_id": ("[telegram].chat_id", (str,)),
@@ -297,6 +303,12 @@ class Config:
     # Una wallet cuya compra cae este % (rug) en el seguimiento entra en la
     # lista negra sola. 0 = no hacerlo.
     wallets_rug_drop_pct: float = 90.0
+    # Avisos de actividad por el WebSocket del RPC: solo se consultan las
+    # wallets que hicieron algo. ws_url vacío = el de rpc_url con wss://.
+    wallets_websocket: bool = True
+    wallets_ws_url: str = ""
+    # Con el WebSocket, cada cuánto se consultan todas por si se perdió algún aviso.
+    wallets_full_poll_minutes: float = 10.0
     verbose: bool = False
     # Comprobación en la blockchain de que el token no se pueda acuñar ni congelar.
     check_token_authorities: bool = True
@@ -347,6 +359,10 @@ class Config:
             )
         if self.wallets_enabled and not self.wallets_file:
             raise ValueError("[wallets].file no puede estar vacío con [wallets].enabled")
+        if self.wallets_full_poll_minutes <= 0:
+            raise ValueError(
+                f"[wallets].full_poll_minutes debe ser > 0 ({self.wallets_full_poll_minutes})"
+            )
         if self.wallets_interval_seconds <= 0:
             raise ValueError(
                 f"[wallets].interval_seconds debe ser > 0 ({self.wallets_interval_seconds})"
@@ -519,6 +535,9 @@ class Config:
             wallets_max_tokens_per_hour=wallets.get("max_tokens_per_hour", 0),
             wallets_blacklist_file=wallets.get("blacklist_file", ""),
             wallets_rug_drop_pct=wallets.get("rug_drop_pct", 90.0),
+            wallets_websocket=wallets.get("websocket", True),
+            wallets_ws_url=wallets.get("ws_url", ""),
+            wallets_full_poll_minutes=wallets.get("full_poll_minutes", 10.0),
             verbose=radar.get("verbose", False),
             # from_raw solo cubre las claves presentes en el TOML; el resto
             # toma los defaults de ScoringWeights.

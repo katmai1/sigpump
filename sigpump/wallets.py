@@ -8,9 +8,14 @@ Una compra se reconoce por los saldos antes y después de la transacción
 (preTokenBalances/postTokenBalances y los lamports de la wallet), no por el
 programa que la ejecutó: así vale igual para Raydium, Pump.fun, Jupiter,
 Meteora o cualquier agregador, sin interpretar cada uno.
+
+Con el WebSocket del RPC (logsSubscribe) solo se consultan las wallets que
+acaban de hacer algo, en vez de todas en cada vuelta: el gasto de créditos
+pasa a depender de cuánto operan, no del intervalo.
 """
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -46,6 +51,15 @@ MAX_TX_ATTEMPTS = 3
 # "confirmed" llega ~10 s antes que "finalized"; revertir una confirmada es
 # rarísimo y aquí solo se avisa, no se opera.
 COMMITMENT = "confirmed"
+# Vueltas que se sigue consultando una wallet que el WebSocket marcó, si el
+# RPC todavía no devuelve su transacción nueva (otro nodo puede ir detrás).
+DIRTY_RETRIES = 3
+# Ping del WebSocket: Helius cierra las conexiones calladas al minuto.
+WS_HEARTBEAT_SECONDS = 30
+# Cada cuánto se revisan las suscripciones contra el fichero de wallets.
+WS_SYNC_SECONDS = 5
+# Espera máxima entre reconexiones (empieza en 1 s y se dobla).
+WS_RECONNECT_MAX_SECONDS = 60
 # Direcciones de Solana: base58 de 32 bytes.
 _ADDRESS_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 # Marca de wallet de confianza en el fichero, detrás de la dirección.
@@ -285,6 +299,14 @@ def parse_buys(
     ]
 
 
+def ws_url(rpc_url: str) -> str:
+    """URL del WebSocket de un RPC HTTP: la misma con wss:// (o ws://)."""
+    for http, ws in (("https://", "wss://"), ("http://", "ws://")):
+        if rpc_url.startswith(http):
+            return ws + rpc_url.removeprefix(http)
+    return rpc_url
+
+
 class WalletWatcher:
     """Consulta las transacciones nuevas de las wallets del fichero y
     devuelve sus compras. Relee el fichero (y la lista negra) cuando
@@ -297,6 +319,7 @@ class WalletWatcher:
         path: Path,
         min_sol: float,
         blacklist_path: Path | None = None,
+        full_poll_seconds: float = 600.0,
     ):
         self._session = session
         self._rpc_url = rpc_url
@@ -316,6 +339,21 @@ class WalletWatcher:
         self._attempts: dict[str, int] = {}
         self._rate_lock = asyncio.Lock()
         self._next_request = 0.0
+        # Wallets con actividad avisada por el WebSocket -> vueltas que quedan
+        # para reintentar si el RPC aún no la devuelve.
+        self._dirty: dict[str, int] = {}
+        # Con el WebSocket conectado solo se consultan las marcadas, y todas
+        # cada full_poll_seconds por si se perdió algún aviso.
+        self._connected = False
+        self._full_poll_seconds = full_poll_seconds
+        self._next_full_poll = 0.0
+        # Estado de la conexión actual: wallet -> id de su suscripción (None
+        # mientras no llega la respuesta), id de suscripción -> wallet, e id
+        # de petición -> wallet de las suscripciones pedidas.
+        self._ws_wallets: dict[str, int | None] = {}
+        self._ws_subs: dict[int, str] = {}
+        self._ws_requests: dict[int, str] = {}
+        self._ws_next_id = 0
 
     @property
     def wallets(self) -> dict[str, FollowedWallet]:
@@ -393,7 +431,8 @@ class WalletWatcher:
         return data.get("result")
 
     async def poll(self) -> list[WalletBuy]:
-        """Compras nuevas de todas las wallets desde la vuelta anterior."""
+        """Compras nuevas desde la vuelta anterior: de todas las wallets, o
+        con el WebSocket conectado, solo de las que hicieron algo."""
         self.reload()
         active = {}
         for wallet, info in self._wallets.items():
@@ -403,12 +442,31 @@ class WalletWatcher:
                 self._last_signature.pop(wallet, None)
             else:
                 active[wallet] = info
+        for gone in set(self._dirty) - set(active):
+            del self._dirty[gone]
+        now = time.monotonic()
+        if not self._connected or now >= self._next_full_poll:
+            targets = active
+            if self._connected:
+                self._next_full_poll = now + self._full_poll_seconds
+        else:
+            targets = {wallet: active[wallet] for wallet in self._dirty}
+        marks = {wallet: self._dirty.pop(wallet) for wallet in list(self._dirty) if wallet in targets}
         results = await asyncio.gather(
-            *(self._poll_wallet(wallet, info) for wallet, info in active.items())
+            *(self._poll_wallet(wallet, info) for wallet, info in targets.items())
         )
-        return [buy for buys in results for buy in buys]
+        buys: list[WalletBuy] = []
+        for wallet, (wallet_buys, done) in zip(targets, results):
+            buys += wallet_buys
+            # Marcada y sin leer todavía: se vuelve a mirar en la próxima vuelta,
+            # salvo que el WebSocket ya la haya marcado de nuevo.
+            if not done and marks.get(wallet, 0) > 1 and wallet not in self._dirty:
+                self._dirty[wallet] = marks[wallet] - 1
+        return buys
 
-    async def _poll_wallet(self, wallet: str, info: FollowedWallet) -> list[WalletBuy]:
+    async def _poll_wallet(self, wallet: str, info: FollowedWallet) -> tuple[list[WalletBuy], bool]:
+        """Compras de `wallet` desde su última firma, y si se llegó a leer
+        algo nuevo hasta el final (False: conviene volver a mirar)."""
         label = info.label
         first = wallet not in self._last_signature
         options: dict[str, object] = {
@@ -421,16 +479,17 @@ class WalletWatcher:
             entries = await self._rpc("getSignaturesForAddress", [wallet, options])
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
             log.warning("No se pudieron consultar las transacciones de %s: %s", label, exc)
-            return []
+            return [], False
         if not isinstance(entries, list):
-            return []
+            return [], False
         if first:
             self._last_signature[wallet] = entries[0].get("signature") if entries else None
-            return []
+            return [], True
         if len(entries) == MAX_SIGNATURES_PER_POLL:
             log.debug("%s hizo más de %d transacciones desde la última vuelta", label, len(entries))
 
         buys: list[WalletBuy] = []
+        done = bool(entries)
         # Vienen de la más nueva a la más vieja: se procesan en orden y se
         # avanza la marca solo hasta la última que se pudo leer, para
         # reintentar el resto en la próxima vuelta.
@@ -457,6 +516,7 @@ class WalletWatcher:
                     if attempts < MAX_TX_ATTEMPTS:
                         self._attempts[signature] = attempts
                         log.debug("No se pudo leer la transacción %s de %s: %s", signature, label, problem)
+                        done = False
                         break
                     log.warning(
                         "Se salta la transacción %s de %s tras %d intentos: %s",
@@ -466,4 +526,92 @@ class WalletWatcher:
                 if isinstance(tx, dict):
                     buys += parse_buys(tx, wallet, label, signature, self._min_sol, info.trusted)
             self._last_signature[wallet] = signature
-        return buys
+        return buys, done
+
+    async def listen(self, url: str) -> None:
+        """Mantiene una suscripción logsSubscribe por wallet en el WebSocket
+        `url` y marca las que hacen transacciones para la próxima vuelta de
+        poll(). Se reconecta sola; mientras está caído, poll() consulta todas."""
+        delay = 1.0
+        while True:
+            started = time.monotonic()
+            try:
+                async with self._session.ws_connect(url, heartbeat=WS_HEARTBEAT_SECONDS) as ws:
+                    log.info("WebSocket de wallets conectado")
+                    await self._serve(ws)
+                log.warning("El WebSocket de wallets se cerró")
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError) as exc:
+                # La URL lleva la API key: no se escribe en el log.
+                log.warning("WebSocket de wallets caído: %s", exc or type(exc).__name__)
+            finally:
+                self._connected = False
+            if time.monotonic() - started > WS_RECONNECT_MAX_SECONDS:
+                delay = 1.0
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, WS_RECONNECT_MAX_SECONDS)
+
+    async def _serve(self, ws) -> None:
+        """Atiende una conexión hasta que se cierra."""
+        self._ws_wallets, self._ws_subs, self._ws_requests = {}, {}, {}
+        self._connected = True
+        # Lo que pasó mientras estaba caído no llega por aquí: pasada completa.
+        self._next_full_poll = 0.0
+        while True:
+            await self._sync_subscriptions(ws)
+            try:
+                msg = await ws.receive(timeout=WS_SYNC_SECONDS)
+            except asyncio.TimeoutError:
+                continue
+            if msg.type == aiohttp.WSMsgType.TEXT:
+                self._handle(json.loads(msg.data))
+            elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING,
+                              aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                return
+
+    async def _sync_subscriptions(self, ws) -> None:
+        """Suscribe las wallets nuevas del fichero y quita las que ya no están."""
+        wanted = set(self._wallets)
+        for wallet in wanted - self._ws_wallets.keys():
+            self._ws_next_id += 1
+            self._ws_requests[self._ws_next_id] = wallet
+            self._ws_wallets[wallet] = None
+            await ws.send_json({
+                "jsonrpc": "2.0", "id": self._ws_next_id, "method": "logsSubscribe",
+                "params": [{"mentions": [wallet]}, {"commitment": COMMITMENT}],
+            })
+        for wallet in self._ws_wallets.keys() - wanted:
+            sub = self._ws_wallets.pop(wallet)
+            if sub is None:
+                continue
+            self._ws_subs.pop(sub, None)
+            self._ws_next_id += 1
+            await ws.send_json({
+                "jsonrpc": "2.0", "id": self._ws_next_id, "method": "logsUnsubscribe", "params": [sub],
+            })
+
+    def _handle(self, data: object) -> None:
+        """Respuesta a una suscripción o aviso de una transacción."""
+        if not isinstance(data, dict):
+            return
+        wallet = self._ws_requests.pop(data.get("id"), None) if isinstance(data.get("id"), int) else None
+        if wallet is not None:
+            sub = data.get("result")
+            if data.get("error") or not isinstance(sub, int):
+                # Se queda sin suscripción: solo la cubre la pasada completa.
+                info = self._wallets.get(wallet)
+                log.warning(
+                    "No se pudo suscribir a %s en el WebSocket: %s",
+                    info.label if info else wallet, data.get("error"),
+                )
+            elif wallet in self._ws_wallets:
+                self._ws_wallets[wallet] = sub
+                self._ws_subs[sub] = wallet
+            return
+        if data.get("method") != "logsNotification":
+            return
+        params = data.get("params") or {}
+        wallet = self._ws_subs.get(params.get("subscription"))
+        value = (params.get("result") or {}).get("value") or {}
+        # Una transacción fallida no compra nada: no merece la consulta.
+        if wallet is not None and value.get("err") is None:
+            self._dirty[wallet] = DIRTY_RETRIES

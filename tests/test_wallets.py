@@ -75,6 +75,26 @@ class TestLoadWallets(unittest.TestCase):
         # Sin etiqueta, la dirección abreviada.
         self.assertEqual(wallets[OTRA], "7Q54…e4j9")
 
+    def test_duplicadas_se_eliminan_del_fichero(self):
+        self.path.write_text(
+            f"# mis wallets\n{WALLET}  # ballena 1\n{OTRA}\n{WALLET} # repetida\n{OTRA}\n",
+            encoding="utf-8",
+        )
+        wallets = load_wallets(self.path)
+        self.assertEqual(list(wallets), [WALLET, OTRA])
+        # Se queda la primera aparición, con su etiqueta.
+        self.assertEqual(wallets[WALLET], "ballena 1")
+        self.assertEqual(
+            self.path.read_text(encoding="utf-8"),
+            f"# mis wallets\n{WALLET}  # ballena 1\n{OTRA}\n",
+        )
+
+    def test_sin_duplicadas_no_toca_el_fichero(self):
+        self.path.write_text(f"{WALLET}\n{OTRA}\n", encoding="utf-8")
+        mtime = self.path.stat().st_mtime_ns
+        load_wallets(self.path)
+        self.assertEqual(self.path.stat().st_mtime_ns, mtime)
+
 
 class TestParseBuys(unittest.TestCase):
     def test_compra_con_sol_es_entrada_nueva(self):

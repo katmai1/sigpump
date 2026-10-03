@@ -76,18 +76,34 @@ def load_wallets(path: Path) -> dict[str, str]:
     Dirección -> etiqueta, desde un fichero con una wallet por línea. Lo que
     va detrás de `#` es la etiqueta; las líneas que empiezan por `#` y las
     vacías se ignoran. Una línea que no es una dirección se avisa y se salta,
-    para que un typo no tire el resto de la lista.
+    para que un typo no tire el resto de la lista. Una dirección repetida se
+    queda con su primera aparición y las demás se borran del fichero.
     """
     wallets: dict[str, str] = {}
-    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    kept: list[str] = []
+    duplicated = False
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(keepends=True), start=1):
         address, _, label = line.partition("#")
         address = address.strip()
+        if address in wallets:
+            log.warning("%s:%d wallet duplicada, se elimina: %s", path, number, address)
+            duplicated = True
+            continue
+        kept.append(line)
         if not address:
             continue
         if not _ADDRESS_RE.match(address):
             log.warning("%s:%d no es una dirección de Solana, se ignora: %r", path, number, address)
             continue
         wallets[address] = label.strip() or f"{address[:4]}…{address[-4:]}"
+    if duplicated:
+        # Se escribe aparte y se renombra para no dejar el fichero a medias.
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            tmp.write_text("".join(kept), encoding="utf-8")
+            tmp.replace(path)
+        except OSError as exc:
+            log.warning("No se pudieron quitar las wallets duplicadas de %s: %s", path, exc)
     return wallets
 
 

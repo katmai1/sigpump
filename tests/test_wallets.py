@@ -17,9 +17,12 @@ from sigpump.wallets import (
     MAX_TRANSACTION_VERSION,
     MAX_TX_ATTEMPTS,
     WSOL_MINT,
+    FollowedWallet,
     WalletBuy,
     WalletSignal,
     WalletWatcher,
+    add_to_blacklist,
+    load_blacklist,
     load_wallets,
     parse_buys,
 )
@@ -71,9 +74,9 @@ class TestLoadWallets(unittest.TestCase):
         )
         wallets = load_wallets(self.path)
         self.assertEqual(list(wallets), [WALLET, OTRA])
-        self.assertEqual(wallets[WALLET], "ballena 1")
+        self.assertEqual(wallets[WALLET], FollowedWallet("ballena 1"))
         # Sin etiqueta, la dirección abreviada.
-        self.assertEqual(wallets[OTRA], "7Q54…e4j9")
+        self.assertEqual(wallets[OTRA].label, "7Q54…e4j9")
 
     def test_duplicadas_se_eliminan_del_fichero(self):
         self.path.write_text(
@@ -83,7 +86,7 @@ class TestLoadWallets(unittest.TestCase):
         wallets = load_wallets(self.path)
         self.assertEqual(list(wallets), [WALLET, OTRA])
         # Se queda la primera aparición, con su etiqueta.
-        self.assertEqual(wallets[WALLET], "ballena 1")
+        self.assertEqual(wallets[WALLET].label, "ballena 1")
         self.assertEqual(
             self.path.read_text(encoding="utf-8"),
             f"# mis wallets\n{WALLET}  # ballena 1\n{OTRA}\n",
@@ -94,6 +97,23 @@ class TestLoadWallets(unittest.TestCase):
         mtime = self.path.stat().st_mtime_ns
         load_wallets(self.path)
         self.assertEqual(self.path.stat().st_mtime_ns, mtime)
+
+    def test_asterisco_marca_wallet_de_confianza(self):
+        self.path.write_text(f"{WALLET} *  # ballena\n{OTRA}*\n", encoding="utf-8")
+        wallets = load_wallets(self.path)
+        self.assertEqual(wallets[WALLET], FollowedWallet("ballena", trusted=True))
+        self.assertTrue(wallets[OTRA].trusted)
+
+    def test_las_de_la_lista_negra_se_eliminan_del_fichero(self):
+        self.path.write_text(f"{WALLET}  # ballena\n{OTRA}  # rug\n", encoding="utf-8")
+        negra = self.path.with_name("negra.txt")
+        add_to_blacklist(negra, OTRA, "rug NGU -96%")
+        wallets = load_wallets(self.path, load_blacklist(negra))
+        self.assertEqual(list(wallets), [WALLET])
+        self.assertEqual(self.path.read_text(encoding="utf-8"), f"{WALLET}  # ballena\n")
+
+    def test_lista_negra_sin_fichero_esta_vacia(self):
+        self.assertEqual(load_blacklist(self.path.with_name("no-existe.txt")), set())
 
 
 class TestParseBuys(unittest.TestCase):
@@ -185,6 +205,27 @@ class _FakeRpc:
 
 
 class TestWalletWatcher(unittest.IsolatedAsyncioTestCase):
+    async def test_blacklist_deja_de_seguir_y_quita_del_fichero(self):
+        negra = self.path.with_name("negra.txt")
+        watcher = WalletWatcher(_FakeRpc(firmas=[]), "http://rpc", self.path, 0.1, negra)
+        watcher.reload()
+        watcher.blacklist(WALLET, "ballena: rug NGU -96%")
+        self.assertEqual(watcher.wallets, {})
+        watcher.reload()
+        self.assertEqual(watcher.wallets, {})
+        self.assertEqual(self.path.read_text(encoding="utf-8"), "")
+        self.assertIn(WALLET, load_blacklist(negra))
+
+    async def test_la_confianza_llega_a_la_compra(self):
+        self.path.write_text(f"{WALLET} *  # ballena\n", encoding="utf-8")
+        rpc = _FakeRpc(firmas=["VIEJA"], txs={})
+        watcher = WalletWatcher(rpc, "http://rpc", self.path, min_sol=0.1)
+        await watcher.poll()
+        rpc.firmas = ["NUEVA", "VIEJA"]
+        rpc.txs["NUEVA"] = _tx(post_tokens=[_saldo(TOKEN, 1)], sol_gastado=1)
+        [buy] = await watcher.poll()
+        self.assertTrue(buy.trusted)
+
     def setUp(self):
         logging.disable(logging.CRITICAL)
         self.addCleanup(logging.disable, logging.NOTSET)
@@ -251,10 +292,11 @@ class TestTransaccionesQueFallan(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(params[1]["maxSupportedTransactionVersion"], MAX_TRANSACTION_VERSION)
 
 
-def _buy(wallet=WALLET, label="ballena", mint="TOK", ts=None, new=True):
+def _buy(wallet=WALLET, label="ballena", mint="TOK", ts=None, new=True, trusted=False):
     return WalletBuy(
         wallet=wallet, label=label, mint=mint, sol_spent=1.5, stable_spent=0.0,
         new_position=new, signature="SIG", ts=time.time() if ts is None else ts,
+        trusted=trusted,
     )
 
 
@@ -406,6 +448,68 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         [(_, signal)] = alerter.wallet
         self.assertEqual(signal.others, ("ballena",))
 
+    async def test_wallet_de_confianza_avisa_sola(self):
+        radar = self._radar([_buy(trusted=True)], wallets_min_wallets=2)
+        alerter = _FakeAlerter()
+        await radar._wallets_once(_FakeClient(pairs=[_pair("TOK")]), alerter)
+        self.assertEqual(len(alerter.wallet), 1)
+
+    async def test_un_aviso_por_token_salvo_que_entren_mas_wallets(self):
+        tercera = "8Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j8"
+        cuarta = "9Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j7"
+        radar = self._radar(
+            [_buy()], [_buy(wallet=OTRA)], [_buy(wallet=tercera)], [_buy(wallet=cuarta)],
+            wallets_token_cooldown_minutes=120, wallets_realert_new_wallets=2,
+        )
+        alerter = _FakeAlerter()
+        client = _FakeClient(pairs=[_pair("TOK")])
+        for _ in range(4):
+            await radar._wallets_once(client, alerter)
+        # 1 wallet: aviso; 2: ya avisado; 3: dos más que en el aviso, actualización.
+        self.assertEqual([(1 + len(s.others), s.update) for _, s in alerter.wallet], [(1, False), (3, True)])
+        self.assertEqual(
+            [f["motivo_descarte"] for f in self._rows()],
+            [None, "token ya avisado con 1 wallets", None, "token ya avisado con 3 wallets"],
+        )
+
+    async def test_el_aviso_por_token_sobrevive_a_un_reinicio(self):
+        radar = self._radar([_buy()], wallets_token_cooldown_minutes=120)
+        client = _FakeClient(pairs=[_pair("TOK")])
+        await radar._wallets_once(client, _FakeAlerter())
+        reiniciado = self._radar([_buy(wallet=OTRA)], wallets_token_cooldown_minutes=120)
+        reiniciado._restore_cooldowns()
+        alerter = _FakeAlerter()
+        await reiniciado._wallets_once(client, alerter)
+        self.assertEqual(alerter.wallet, [])
+
+    async def test_wallet_hiperactiva_no_avisa_ni_cuenta_para_la_confluencia(self):
+        compras = [_buy(mint=f"T{i}") for i in range(3)] + [_buy(mint="TOK")]
+        radar = self._radar(compras, [_buy(wallet=OTRA)], wallets_max_tokens_per_hour=3)
+        alerter = _FakeAlerter()
+        pairs = [_pair(m) for m in ("T0", "T1", "T2", "TOK")]
+        client = _FakeClient(pairs=pairs)
+        await radar._wallets_once(client, alerter)
+        await radar._wallets_once(client, alerter)
+        motivos = [f["motivo_descarte"] for f in self._rows()]
+        self.assertEqual(motivos[:4], ["wallet hiperactiva (4 tokens en 1h)"] * 4)
+        [(_, signal)] = alerter.wallet
+        self.assertEqual((signal.buy.wallet, signal.others), (OTRA, ()))
+
+    async def test_wallet_que_compra_un_rug_va_a_la_lista_negra(self):
+        tmp = self.path.parent
+        wallets_txt, negra = tmp / "wallets.txt", tmp / "negra.txt"
+        wallets_txt.write_text(f"{WALLET}  # ballena\n{OTRA}  # buena\n", encoding="utf-8")
+        radar = self._radar([_buy()], wallets_blacklist_file=str(negra), wallets_rug_drop_pct=90)
+        await radar._wallets_once(_FakeClient(pairs=[_pair("TOK", symbol="NGU")]), _FakeAlerter())
+        radar._tracker.update_row(self._rows()[0]["id"], {"peor_ret_30m_pct": -96.0})
+        radar._wallet_watcher = WalletWatcher(None, "http://rpc", wallets_txt, 0.1, negra)
+        radar._wallet_watcher.reload()
+        radar._blacklist_ruggers()
+        self.assertEqual(list(radar._wallet_watcher.wallets), [OTRA])
+        self.assertIn("rug NGU -96%", negra.read_text(encoding="utf-8"))
+        radar._wallet_watcher.reload()
+        self.assertEqual(wallets_txt.read_text(encoding="utf-8"), f"{OTRA}  # buena\n")
+
     async def test_solo_wallets_muestrea_el_precio_de_las_senales(self):
         """Sin alertas ni prealertas no corre otro bucle que actualice el registro."""
         radar = self._radar(alerts_enabled=False, watch_enabled=False, wallets_enabled=True)
@@ -430,3 +534,11 @@ class TestMensajeDeWallet(unittest.TestCase):
         self.assertIn("1.50 SOL", text)
         self.assertIn("https://solscan.io/tx/SIG", text)
         self.assertIn("También entraron: <b>otra</b>", text)
+        self.assertNotIn("ACTUALIZACIÓN", text)
+
+    def test_encabezado_de_actualizacion_y_confianza(self):
+        alerter = TelegramAlerter("123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11", "-100123")
+        signal = WalletSignal(_buy(trusted=True), others=("a", "b"), update=True)
+        text = alerter.format_message(_pair("TOK", symbol="PEPE"), 50.0, wallet=signal)
+        self.assertTrue(text.startswith("🔁 <b>ACTUALIZACIÓN</b>"))
+        self.assertIn("⭐ ballena compró", text)

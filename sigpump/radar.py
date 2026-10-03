@@ -8,6 +8,7 @@ umbral y dispara alertas de Telegram, respetando un cooldown por dirección.
 
 import time
 import asyncio
+import dataclasses
 import logging
 from pathlib import Path
 
@@ -55,6 +56,8 @@ CANDLE_FEATURES_TIMEOUT_SECONDS = 10.0
 # dexId de DexScreener de los pools que son bonding curves de un launchpad
 # (el token todavía no se graduó a un AMM): las compras de wallets ahí se ignoran.
 BONDING_CURVE_DEX_IDS = {"pumpfun", "meteoradbc", "launchlab", "moonshot"}
+# Ventana del tope [wallets].max_tokens_per_hour.
+WALLET_ACTIVITY_SECONDS = 3600
 
 
 def _liquidity_usd(pair: dict) -> float:
@@ -133,6 +136,12 @@ class MemecoinRadar:
         self._wallet_alerted: dict[tuple[str, str], float] = {}
         # Compras recientes por token (avisadas o no), para la confluencia.
         self._wallet_buys: dict[str, list[WalletBuy]] = {}
+        # Tokens comprados por cada wallet en la última hora (wallet -> token
+        # -> última compra), para el tope [wallets].max_tokens_per_hour.
+        self._wallet_activity: dict[str, dict[str, float]] = {}
+        # Último aviso enviado por token y cuántas wallets llevaba, para no
+        # repetirlo dentro de [wallets].token_cooldown_minutes.
+        self._wallet_token_alerted: dict[str, tuple[float, int]] = {}
         # Prealertas cuyo arranque se está midiendo si se sostiene:
         # address -> {"row_id", "ts", "key" (último refresco visto), "done"}.
         self._followups: dict[str, dict] = {}
@@ -184,14 +193,23 @@ class MemecoinRadar:
         )
         # Sin las compras recientes, un reinicio entre la compra de una wallet
         # y la de otra perdía la confluencia (y con min_wallets > 1, el aviso).
-        since = now - self._config.wallets_confluence_minutes * 60
-        for row in self._tracker.recent_wallet_buys(since):
-            buy = WalletBuy(
-                wallet=row["wallet"], label=row["wallet_etiqueta"] or row["wallet"],
-                mint=row["token"], sol_spent=0.0, stable_spent=0.0, new_position=False,
-                signature="", ts=row["timestamp"],
-            )
-            self._wallet_buys.setdefault(buy.mint, []).append(buy)
+        # Lo mismo con la actividad de cada wallet y los tokens ya avisados.
+        confluence_since = now - self._config.wallets_confluence_minutes * 60
+        token_since = now - self._config.wallets_token_cooldown_minutes * 60
+        activity_since = now - WALLET_ACTIVITY_SECONDS
+        for row in self._tracker.recent_wallet_buys(min(confluence_since, token_since, activity_since)):
+            if row["timestamp"] > confluence_since:
+                buy = WalletBuy(
+                    wallet=row["wallet"], label=row["wallet_etiqueta"] or row["wallet"],
+                    mint=row["token"], sol_spent=0.0, stable_spent=0.0, new_position=False,
+                    signature="", ts=row["timestamp"],
+                )
+                self._wallet_buys.setdefault(buy.mint, []).append(buy)
+            if row["timestamp"] > activity_since:
+                self._wallet_activity.setdefault(row["wallet"], {})[row["token"]] = row["timestamp"]
+            if row["enviada"] and row["timestamp"] > token_since:
+                wallets = 1 + (row["wallets_confluencia"] or 0)
+                self._wallet_token_alerted[row["token"]] = (row["timestamp"], wallets)
 
     def _prune_alerted(self) -> None:
         """Elimina los cooldowns expirados y las fotos viejas, para que la
@@ -211,6 +229,15 @@ class MemecoinRadar:
         self._wallet_buys = {
             mint: recent for mint, buys in self._wallet_buys.items()
             if (recent := [b for b in buys if b.ts >= confluence_since])
+        }
+        activity_since = now - WALLET_ACTIVITY_SECONDS
+        self._wallet_activity = {
+            wallet: recent for wallet, mints in self._wallet_activity.items()
+            if (recent := {m: ts for m, ts in mints.items() if ts >= activity_since})
+        }
+        token_since = now - self._config.wallets_token_cooldown_minutes * 60
+        self._wallet_token_alerted = {
+            mint: last for mint, last in self._wallet_token_alerted.items() if last[0] >= token_since
         }
         stale = [
             address for address, pending in self._pending_early.items()
@@ -778,13 +805,54 @@ class MemecoinRadar:
         last = self._wallet_alerted.get((buy.wallet, buy.mint))
         return last is not None and (time.time() - last) / 60 < self._config.wallets_cooldown_minutes
 
+    def _tokens_last_hour(self, wallet: str) -> int:
+        """Tokens distintos que compró `wallet` en la última hora."""
+        since = time.time() - WALLET_ACTIVITY_SECONDS
+        return sum(ts >= since for ts in self._wallet_activity.get(wallet, {}).values())
+
+    def _hyperactive(self, wallet: str) -> bool:
+        """True si `wallet` pasó de [wallets].max_tokens_per_hour: compra de
+        todo (un bot o un degen) y sus compras no dicen nada."""
+        limit = self._config.wallets_max_tokens_per_hour
+        return bool(limit) and self._tokens_last_hour(wallet) > limit
+
+    def _last_token_alert(self, mint: str) -> int | None:
+        """Wallets que llevaba el último aviso de `mint`, si fue hace menos
+        de [wallets].token_cooldown_minutes; None si no lo hubo."""
+        last = self._wallet_token_alerted.get(mint)
+        if last is None or (time.time() - last[0]) / 60 >= self._config.wallets_token_cooldown_minutes:
+            return None
+        return last[1]
+
+    def _blacklist_ruggers(self) -> None:
+        """Mete en la lista negra las wallets seguidas que compraron un token
+        que luego hizo rug (cayó [wallets].rug_drop_pct en el seguimiento)."""
+        watcher = self._wallet_watcher
+        drop = self._config.wallets_rug_drop_pct
+        if not (self._tracker and watcher and drop and self._config.wallets_blacklist_file):
+            return
+        for wallet, reason in self._tracker.rug_wallets(drop).items():
+            info = watcher.wallets.get(wallet)
+            if info is None:
+                continue
+            try:
+                watcher.blacklist(wallet, f"{info.label}: {reason}")
+            except OSError as exc:
+                log.warning("No se pudo añadir %s a la lista negra: %s", info.label, exc)
+                continue
+            log.warning("Wallet %s a la lista negra: %s", info.label, reason)
+
     def _confluence(self, buy: WalletBuy) -> tuple[str, ...]:
         """Anota la compra y devuelve las etiquetas de las otras wallets
-        seguidas que entraron en el mismo token dentro de confluence_minutes."""
+        seguidas que entraron en el mismo token dentro de confluence_minutes.
+        Las hiperactivas no cuentan."""
         since = buy.ts - self._config.wallets_confluence_minutes * 60
         recent = [b for b in self._wallet_buys.get(buy.mint, []) if b.ts >= since]
         # Una por wallet: dos wallets con la misma etiqueta cuentan como dos.
-        others = tuple({b.wallet: b.label for b in recent if b.wallet != buy.wallet}.values())
+        others = tuple({
+            b.wallet: b.label for b in recent
+            if b.wallet != buy.wallet and not self._hyperactive(b.wallet)
+        }.values())
         self._wallet_buys[buy.mint] = recent + [buy]
         return others
 
@@ -793,21 +861,28 @@ class MemecoinRadar:
         Vuelta del seguimiento de wallets: busca sus compras nuevas y avisa
         de cada una, salvo tokens en bonding curve (sin pool en un AMM),
         tokens que se pueden acuñar o congelar, compras repetidas de la
-        misma wallet en el mismo token dentro de su cooldown y, con
-        [wallets].min_wallets > 1, compras sin suficientes wallets en el token.
+        misma wallet en el mismo token dentro de su cooldown, wallets
+        hiperactivas, tokens ya avisados sin wallets nuevas suficientes y,
+        con [wallets].min_wallets > 1, compras sin suficientes wallets en el
+        token (salvo de wallets de confianza).
         """
         if self._wallet_watcher is None:
             return
         # Sin alertas ni prealertas no corre ningún otro bucle que muestree el
         # precio de las señales registradas: lo hace este.
+        if not self._scan_needed():
+            self._prune_alerted()
         if self._tracker and not self._scan_needed():
             try:
                 await self._tracker.update(client, self._config.chain_id)
             except Exception:
                 log.exception("Error actualizando el registro de alertas")
+        self._blacklist_ruggers()
         buys = await self._wallet_watcher.poll()
         if not buys:
             return
+        for buy in buys:
+            self._wallet_activity.setdefault(buy.wallet, {})[buy.mint] = buy.ts
         signals = [
             WalletSignal(buy, self._confluence(buy)) for buy in buys
             if not self._wallet_cooldown_active(buy)
@@ -841,14 +916,24 @@ class MemecoinRadar:
             score = self._score(pair, self._boosted)
             reason = unsafe.get(buy.mint)
             wallets = 1 + len(signal.others)
-            if not reason and wallets < self._config.wallets_min_wallets:
+            if not reason and self._hyperactive(buy.wallet):
+                reason = f"wallet hiperactiva ({self._tokens_last_hour(buy.wallet)} tokens en 1h)"
+            if not reason and wallets < self._config.wallets_min_wallets and not buy.trusted:
                 reason = f"{wallets} de {self._config.wallets_min_wallets} wallets"
+            previous = self._last_token_alert(buy.mint)
+            if not reason and previous is not None and (
+                wallets < previous + self._config.wallets_realert_new_wallets
+            ):
+                reason = f"token ya avisado con {previous} wallets"
             if reason:
                 log.info("Compra de %s en %s descartada: %s", buy.label, _symbol(pair), reason)
                 self._record_wallet(pair, score, signal, sent=False, reason=reason)
                 continue
+            if previous is not None:
+                signal = dataclasses.replace(signal, update=True)
             log.info(
-                "Wallet: %s compró %s (%.2f SOL, %s)%s",
+                "Wallet%s: %s compró %s (%.2f SOL, %s)%s",
+                " (actualización)" if signal.update else "",
                 buy.label,
                 _symbol(pair),
                 buy.sol_spent,
@@ -861,6 +946,7 @@ class MemecoinRadar:
                 log.exception("Error enviando aviso de wallet para %s", buy.mint)
                 self._wallet_alerted.pop(key, None)
                 continue
+            self._wallet_token_alerted[buy.mint] = (time.time(), wallets)
             self._record_wallet(pair, score, signal, sent=True)
 
     def _record_wallet(
@@ -1009,6 +1095,7 @@ class MemecoinRadar:
                     self._config.solana_rpc_url,
                     Path(self._config.wallets_file),
                     self._config.wallets_min_sol,
+                    Path(self._config.wallets_blacklist_file) if self._config.wallets_blacklist_file else None,
                 )
             loops = []
             if self._scan_needed():

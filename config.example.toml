@@ -113,6 +113,9 @@ rpc_url = "https://api.mainnet-beta.solana.com"
 enabled = false
 # Una dirección por línea; lo que va detrás de # es la etiqueta del aviso:
 #   5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1  # ballena 1
+# Un * detrás de la dirección la marca de confianza: avisa sola aunque no
+# llegue a min_wallets.
+#   5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1 *  # ballena 1
 # Se relee solo cuando cambia: no hace falta reiniciar para añadir wallets.
 file = "wallets.txt"
 interval_seconds = 15
@@ -128,6 +131,21 @@ confluence_minutes = 60
 # confluence_minutes para avisar. 1 = avisar de cada compra. Las compras que
 # no llegan quedan en el registro con enviada = 0.
 min_wallets = 1
+# Minutos sin volver a avisar de un token ya avisado por wallets: las compras
+# siguientes quedan en el registro con enviada = 0, salvo que se sumen
+# realert_new_wallets wallets más que en el último aviso (sale como
+# actualización). 0 = sin límite por token.
+token_cooldown_minutes = 0
+realert_new_wallets = 2
+# Una wallet que compra más tokens distintos que esto en una hora (un bot o un
+# degen que entra en todo) no avisa ni cuenta para la confluencia. 0 = sin tope.
+max_tokens_per_hour = 0
+# Lista negra: sus wallets se quitan de `file` y no se vuelven a seguir.
+# Mismo formato que `file`. Vacío = sin lista negra.
+blacklist_file = ""
+# Una wallet con una compra que cae este % en el seguimiento (rug) entra sola
+# en la lista negra. 0 = no hacerlo.
+rug_drop_pct = 90
 
 [scoring]
 # Penalización por subida ya hecha: si el cambio de 1h supera start, el score

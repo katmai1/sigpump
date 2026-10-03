@@ -47,6 +47,16 @@ MAX_TX_ATTEMPTS = 3
 COMMITMENT = "confirmed"
 # Direcciones de Solana: base58 de 32 bytes.
 _ADDRESS_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
+# Marca de wallet de confianza en el fichero, detrás de la dirección.
+TRUSTED_MARK = "*"
+
+
+@dataclass(frozen=True)
+class FollowedWallet:
+    """Wallet del fichero: su etiqueta y si es de confianza (avisa sola,
+    aunque no llegue a [wallets].min_wallets)."""
+    label: str
+    trusted: bool = False
 
 
 @dataclass(frozen=True)
@@ -61,33 +71,63 @@ class WalletBuy:
     new_position: bool
     signature: str
     ts: float
+    trusted: bool = False
 
 
 @dataclass(frozen=True)
 class WalletSignal:
     """Lo que se avisa: la compra y las otras wallets seguidas que entraron
-    en el mismo token hace poco (confluencia)."""
+    en el mismo token hace poco (confluencia). `update` marca un token ya
+    avisado al que se sumaron wallets nuevas."""
     buy: WalletBuy
     others: tuple[str, ...] = field(default_factory=tuple)
+    update: bool = False
 
 
-def load_wallets(path: Path) -> dict[str, str]:
+def load_blacklist(path: Path) -> set[str]:
+    """Direcciones de la lista negra (una por línea, lo que va detrás de `#`
+    es el motivo). Sin fichero, la lista está vacía."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return set()
+    return {
+        address for line in text.splitlines()
+        if _ADDRESS_RE.match(address := line.partition("#")[0].strip())
+    }
+
+
+def add_to_blacklist(path: Path, address: str, reason: str) -> None:
+    """Añade `address` a la lista negra con su motivo."""
+    with path.open("a", encoding="utf-8") as f:
+        f.write(f"{address}  # {reason}\n")
+
+
+def load_wallets(path: Path, blacklist: set[str] | frozenset[str] = frozenset()) -> dict[str, FollowedWallet]:
     """
-    Dirección -> etiqueta, desde un fichero con una wallet por línea. Lo que
-    va detrás de `#` es la etiqueta; las líneas que empiezan por `#` y las
-    vacías se ignoran. Una línea que no es una dirección se avisa y se salta,
-    para que un typo no tire el resto de la lista. Una dirección repetida se
-    queda con su primera aparición y las demás se borran del fichero.
+    Dirección -> wallet, desde un fichero con una wallet por línea. Lo que
+    va detrás de `#` es la etiqueta; un `*` detrás de la dirección la marca
+    de confianza. Las líneas que empiezan por `#` y las vacías se ignoran.
+    Una línea que no es una dirección se avisa y se salta, para que un typo
+    no tire el resto de la lista. Una dirección repetida se queda con su
+    primera aparición y las demás se borran del fichero, igual que las que
+    están en `blacklist`.
     """
-    wallets: dict[str, str] = {}
+    wallets: dict[str, FollowedWallet] = {}
     kept: list[str] = []
-    duplicated = False
+    removed = False
     for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(keepends=True), start=1):
         address, _, label = line.partition("#")
         address = address.strip()
+        trusted = address.endswith(TRUSTED_MARK)
+        address = address.removesuffix(TRUSTED_MARK).strip()
         if address in wallets:
             log.warning("%s:%d wallet duplicada, se elimina: %s", path, number, address)
-            duplicated = True
+            removed = True
+            continue
+        if address in blacklist:
+            log.warning("%s:%d wallet en la lista negra, se elimina: %s", path, number, address)
+            removed = True
             continue
         kept.append(line)
         if not address:
@@ -95,15 +135,15 @@ def load_wallets(path: Path) -> dict[str, str]:
         if not _ADDRESS_RE.match(address):
             log.warning("%s:%d no es una dirección de Solana, se ignora: %r", path, number, address)
             continue
-        wallets[address] = label.strip() or f"{address[:4]}…{address[-4:]}"
-    if duplicated:
+        wallets[address] = FollowedWallet(label.strip() or f"{address[:4]}…{address[-4:]}", trusted)
+    if removed:
         # Se escribe aparte y se renombra para no dejar el fichero a medias.
         tmp = path.with_name(path.name + ".tmp")
         try:
             tmp.write_text("".join(kept), encoding="utf-8")
             tmp.replace(path)
         except OSError as exc:
-            log.warning("No se pudieron quitar las wallets duplicadas de %s: %s", path, exc)
+            log.warning("No se pudieron quitar wallets de %s: %s", path, exc)
     return wallets
 
 
@@ -137,7 +177,9 @@ def _account_index(tx: dict, address: str) -> int | None:
     return None
 
 
-def parse_buys(tx: dict, wallet: str, label: str, signature: str, min_sol: float) -> list[WalletBuy]:
+def parse_buys(
+    tx: dict, wallet: str, label: str, signature: str, min_sol: float, trusted: bool = False
+) -> list[WalletBuy]:
     """
     Compras de `wallet` en la transacción `tx` (getTransaction con
     jsonParsed): tokens cuyo saldo sube mientras la wallet paga SOL (al menos
@@ -175,6 +217,7 @@ def parse_buys(tx: dict, wallet: str, label: str, signature: str, min_sol: float
             new_position=pre.get(mint, 0.0) <= 0,
             signature=signature,
             ts=float(ts),
+            trusted=trusted,
         )
         for mint, delta in deltas.items()
         if delta > 0 and mint not in QUOTE_MINTS
@@ -183,15 +226,24 @@ def parse_buys(tx: dict, wallet: str, label: str, signature: str, min_sol: float
 
 class WalletWatcher:
     """Consulta las transacciones nuevas de las wallets del fichero y
-    devuelve sus compras. Relee el fichero cuando cambia, sin reiniciar."""
+    devuelve sus compras. Relee el fichero (y la lista negra) cuando
+    cambia, sin reiniciar."""
 
-    def __init__(self, session: aiohttp.ClientSession, rpc_url: str, path: Path, min_sol: float):
+    def __init__(
+        self,
+        session: aiohttp.ClientSession,
+        rpc_url: str,
+        path: Path,
+        min_sol: float,
+        blacklist_path: Path | None = None,
+    ):
         self._session = session
         self._rpc_url = rpc_url
         self._path = path
         self._min_sol = min_sol
-        self._wallets: dict[str, str] = {}
-        self._mtime: float | None = None
+        self._blacklist_path = blacklist_path
+        self._wallets: dict[str, FollowedWallet] = {}
+        self._mtime: tuple[float, float | None] | None = None
         # Wallet -> última firma procesada. Una wallet sin entrada todavía no
         # tiene punto de partida: su primera vuelta solo lo fija, para no
         # avisar de su historial al arrancar.
@@ -202,17 +254,39 @@ class WalletWatcher:
         self._next_request = 0.0
 
     @property
-    def wallets(self) -> dict[str, str]:
+    def wallets(self) -> dict[str, FollowedWallet]:
         return self._wallets
 
-    def reload(self) -> None:
-        """Relee el fichero si cambió desde la última vez. Si no se puede
-        leer se sigue con la lista anterior."""
+    def _blacklist_mtime(self) -> float | None:
+        if self._blacklist_path is None:
+            return None
         try:
-            mtime = self._path.stat().st_mtime
+            return self._blacklist_path.stat().st_mtime
+        except FileNotFoundError:
+            return None
+
+    def blacklist(self, address: str, reason: str) -> None:
+        """Mete `address` en la lista negra y deja de seguirla ya. Lanza
+        OSError si no se puede escribir la lista."""
+        if self._blacklist_path is None:
+            return
+        add_to_blacklist(self._blacklist_path, address, reason)
+        self._wallets.pop(address, None)
+        self._last_signature.pop(address, None)
+        # Fuerza la relectura, que la quita también del fichero de wallets.
+        self._mtime = None
+
+    def reload(self) -> None:
+        """Relee el fichero si cambió (él o la lista negra) desde la última
+        vez. Si no se puede leer se sigue con la lista anterior."""
+        try:
+            mtime = (self._path.stat().st_mtime, self._blacklist_mtime())
             if mtime == self._mtime:
                 return
-            wallets = load_wallets(self._path)
+            blacklist = load_blacklist(self._blacklist_path) if self._blacklist_path else set()
+            wallets = load_wallets(self._path, blacklist)
+            # Quitar wallets reescribe el fichero y cambia su fecha.
+            mtime = (self._path.stat().st_mtime, mtime[1])
         except OSError as exc:
             if self._mtime is not None or not self._wallets:
                 log.warning("No se pudo leer el fichero de wallets %s: %s", self._path, exc)
@@ -246,11 +320,12 @@ class WalletWatcher:
         """Compras nuevas de todas las wallets desde la vuelta anterior."""
         self.reload()
         results = await asyncio.gather(
-            *(self._poll_wallet(wallet, label) for wallet, label in self._wallets.items())
+            *(self._poll_wallet(wallet, info) for wallet, info in self._wallets.items())
         )
         return [buy for buys in results for buy in buys]
 
-    async def _poll_wallet(self, wallet: str, label: str) -> list[WalletBuy]:
+    async def _poll_wallet(self, wallet: str, info: FollowedWallet) -> list[WalletBuy]:
+        label = info.label
         first = wallet not in self._last_signature
         options: dict[str, object] = {
             "limit": 1 if first else MAX_SIGNATURES_PER_POLL,
@@ -305,6 +380,6 @@ class WalletWatcher:
                     )
                 self._attempts.pop(signature, None)
                 if isinstance(tx, dict):
-                    buys += parse_buys(tx, wallet, label, signature, self._min_sol)
+                    buys += parse_buys(tx, wallet, label, signature, self._min_sol, info.trusted)
             self._last_signature[wallet] = signature
         return buys

@@ -327,13 +327,15 @@ class AlertTracker:
 
     def recent_wallet_buys(self, since: float) -> list[dict]:
         """Compras de wallets seguidas (avisadas o no) posteriores a `since`,
-        de la más vieja a la más nueva: token, wallet, wallet_etiqueta y timestamp."""
+        de la más vieja a la más nueva: token, wallet, wallet_etiqueta,
+        timestamp, enviada y wallets_confluencia."""
         conn = self._db()
         if conn is None:
             return []
         try:
             rows = conn.execute(
-                "SELECT token, wallet, wallet_etiqueta, timestamp FROM alertas "
+                "SELECT token, wallet, wallet_etiqueta, timestamp, enviada, wallets_confluencia "
+                "FROM alertas "
                 "WHERE tipo = 'wallet' AND wallet IS NOT NULL AND timestamp > :since "
                 "ORDER BY timestamp",
                 {"since": since},
@@ -342,6 +344,27 @@ class AlertTracker:
             log.warning("No se pudo leer %s: %s", self._path, exc)
             return []
         return [dict(row) for row in rows]
+
+    def rug_wallets(self, drop_pct: float) -> dict[str, str]:
+        """Wallet -> descripción del rug, de las wallets con alguna compra
+        (avisada o no) que cayó al menos `drop_pct` en su seguimiento."""
+        conn = self._db()
+        if conn is None:
+            return {}
+        try:
+            rows = conn.execute(
+                f"SELECT wallet, simbolo, token, MIN({_WORST}) AS peor FROM alertas "
+                f"WHERE tipo = 'wallet' AND wallet IS NOT NULL AND {_WORST} <= :limit "
+                "GROUP BY wallet",
+                {"limit": -drop_pct},
+            ).fetchall()
+        except sqlite3.Error as exc:
+            log.warning("No se pudo leer %s: %s", self._path, exc)
+            return {}
+        return {
+            row["wallet"]: f"rug {row['simbolo'] or row['token']} {row['peor']:+.0f}%"
+            for row in rows
+        }
 
     def last_sent(self, kind: str, since: float) -> dict[str, float]:
         """Token -> timestamp de su última señal enviada de tipo `kind`

@@ -6,3 +6,5 @@ alertas.db
 alertas.db-journal
 # Wallets seguidas ([wallets].file)
 wallets.txt
+# Lista negra de wallets ([wallets].blacklist_file)
+wallets_blacklist.txt

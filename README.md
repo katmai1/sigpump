@@ -131,7 +131,19 @@ Con `min_wallets = 2` (o más) solo se avisa cuando ese número de wallets
 seguidas distintas compraron el mismo token dentro de `confluence_minutes`:
 la primera compra queda registrada con `enviada = 0` y el aviso sale con la
 que completa el número. Las compras recientes se recuperan del registro al
-reiniciar, así que un reinicio entre las dos no pierde el aviso.
+reiniciar, así que un reinicio entre las dos no pierde el aviso. Una wallet
+marcada de confianza (un `*` detrás de la dirección en el fichero) avisa sola,
+aunque no llegue a `min_wallets`.
+
+Para no recibir el mismo token una y otra vez, `token_cooldown_minutes` deja
+un solo aviso por token en esa ventana; solo se vuelve a avisar, marcado como
+🔁 actualización, si se suman `realert_new_wallets` wallets más que en el
+último aviso. `max_tokens_per_hour` silencia las wallets que compran de todo
+(bots o degens): ni avisan ni cuentan para la confluencia de las demás.
+
+Con `blacklist_file`, las wallets cuya compra cae `rug_drop_pct` (90% por
+defecto) en el seguimiento entran solas en la lista negra: se quitan del
+fichero de wallets y, si se vuelven a añadir, se quitan otra vez.
 
 Para recibir solo los avisos de wallets, desactivá las alertas
 (`[radar].alerts_enabled = false`) y las prealertas (`[watch].enabled = false`).
@@ -243,8 +255,10 @@ Secciones disponibles:
   sostenerse el arranque antes de avisar) y cooldown propio.
 - `[wallets]` — seguimiento de wallets: `file` con las direcciones,
   intervalo, `min_sol` (gasto mínimo para contar como compra), cooldown por
-  wallet y token, ventana de confluencia y `min_wallets` (cuántas wallets
-  tienen que coincidir en un token para avisar).
+  wallet y token, ventana de confluencia, `min_wallets` (cuántas wallets
+  tienen que coincidir en un token para avisar), un aviso por token
+  (`token_cooldown_minutes`, `realert_new_wallets`), tope de actividad
+  (`max_tokens_per_hour`) y lista negra (`blacklist_file`, `rug_drop_pct`).
 - `[scoring]` — `late_penalty_start_h1_pct` y `late_penalty_end_h1_pct`:
   entre esos dos cambios de 1h el score se reduce linealmente hasta 0.
 - `[scoring_weights]` — pesos relativos (deben sumar ~1.0) de cada

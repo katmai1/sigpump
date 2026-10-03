@@ -118,8 +118,10 @@ class TelegramAlerter:
             if buy.stable_spent > 0:
                 spent.append(f"${buy.stable_spent:,.0f}")
             tx_url = html.escape(f"https://solscan.io/tx/{buy.signature}", quote=True)
-            header = (
-                f"👛 <b>{html.escape(buy.label)} compró {name} ({symbol})</b>\n"
+            header = "🔁 <b>ACTUALIZACIÓN</b>: entran más wallets\n" if wallet.update else ""
+            star = "⭐ " if buy.trusted else ""
+            header += (
+                f"👛 <b>{star}{html.escape(buy.label)} compró {name} ({symbol})</b>\n"
                 f"{'Entrada nueva' if buy.new_position else 'Amplía posición'}: "
                 f"<b>{' + '.join(spent) or '?'}</b> (<a href=\"{tx_url}\">tx</a>)\n"
             )

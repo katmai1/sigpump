@@ -74,6 +74,11 @@ _KNOWN_KEYS: dict[str, set[str]] = {
         "cooldown_minutes",
         "confluence_minutes",
         "min_wallets",
+        "token_cooldown_minutes",
+        "realert_new_wallets",
+        "max_tokens_per_hour",
+        "blacklist_file",
+        "rug_drop_pct",
     },
     "telegram": {"bot_token", "chat_id", "message_thread_id"},
 }
@@ -129,6 +134,11 @@ _FIELD_TYPES: dict[str, tuple[str, tuple[type, ...]]] = {
     "wallets_cooldown_minutes": ("[wallets].cooldown_minutes", _NUMBER),
     "wallets_confluence_minutes": ("[wallets].confluence_minutes", _NUMBER),
     "wallets_min_wallets": ("[wallets].min_wallets", (int,)),
+    "wallets_token_cooldown_minutes": ("[wallets].token_cooldown_minutes", _NUMBER),
+    "wallets_realert_new_wallets": ("[wallets].realert_new_wallets", (int,)),
+    "wallets_max_tokens_per_hour": ("[wallets].max_tokens_per_hour", (int,)),
+    "wallets_blacklist_file": ("[wallets].blacklist_file", (str,)),
+    "wallets_rug_drop_pct": ("[wallets].rug_drop_pct", _NUMBER),
     "verbose": ("[radar].verbose", (bool,)),
     "telegram_bot_token": ("[telegram].bot_token", (str,)),
     "telegram_chat_id": ("[telegram].chat_id", (str,)),
@@ -274,6 +284,19 @@ class Config:
     # Wallets seguidas distintas que tienen que haber comprado el token dentro
     # de confluence_minutes para avisar. 1 = avisar de cada compra.
     wallets_min_wallets: int = 1
+    # Minutos sin volver a avisar de un token ya avisado por wallets, salvo
+    # que se sumen realert_new_wallets wallets más. 0 = sin límite por token.
+    wallets_token_cooldown_minutes: float = 0.0
+    wallets_realert_new_wallets: int = 2
+    # Una wallet que compra más tokens distintos que esto en una hora no
+    # avisa ni cuenta para la confluencia de otras. 0 = sin tope.
+    wallets_max_tokens_per_hour: int = 0
+    # Lista negra: sus wallets se quitan del fichero y no se vuelven a seguir.
+    # Vacío = sin lista negra.
+    wallets_blacklist_file: str = ""
+    # Una wallet cuya compra cae este % (rug) en el seguimiento entra en la
+    # lista negra sola. 0 = no hacerlo.
+    wallets_rug_drop_pct: float = 90.0
     verbose: bool = False
     # Comprobación en la blockchain de que el token no se pueda acuñar ni congelar.
     check_token_authorities: bool = True
@@ -310,6 +333,18 @@ class Config:
             raise ValueError("[solana].rpc_url no puede estar vacío con [wallets].enabled")
         if self.wallets_min_wallets < 1:
             raise ValueError(f"[wallets].min_wallets debe ser >= 1 ({self.wallets_min_wallets})")
+        if self.wallets_realert_new_wallets < 1:
+            raise ValueError(
+                f"[wallets].realert_new_wallets debe ser >= 1 ({self.wallets_realert_new_wallets})"
+            )
+        if self.wallets_max_tokens_per_hour < 0:
+            raise ValueError(
+                f"[wallets].max_tokens_per_hour debe ser >= 0 ({self.wallets_max_tokens_per_hour})"
+            )
+        if not 0 <= self.wallets_rug_drop_pct <= 100:
+            raise ValueError(
+                f"[wallets].rug_drop_pct debe estar entre 0 y 100 ({self.wallets_rug_drop_pct})"
+            )
         if self.wallets_enabled and not self.wallets_file:
             raise ValueError("[wallets].file no puede estar vacío con [wallets].enabled")
         if self.wallets_interval_seconds <= 0:
@@ -378,6 +413,7 @@ class Config:
             "wallets_min_sol",
             "wallets_cooldown_minutes",
             "wallets_confluence_minutes",
+            "wallets_token_cooldown_minutes",
             "early_min_volume_ratio",
             "early_min_txns_ratio",
             "early_cooldown_minutes",
@@ -478,6 +514,11 @@ class Config:
             wallets_cooldown_minutes=wallets.get("cooldown_minutes", 60.0),
             wallets_confluence_minutes=wallets.get("confluence_minutes", 60.0),
             wallets_min_wallets=wallets.get("min_wallets", 1),
+            wallets_token_cooldown_minutes=wallets.get("token_cooldown_minutes", 0.0),
+            wallets_realert_new_wallets=wallets.get("realert_new_wallets", 2),
+            wallets_max_tokens_per_hour=wallets.get("max_tokens_per_hour", 0),
+            wallets_blacklist_file=wallets.get("blacklist_file", ""),
+            wallets_rug_drop_pct=wallets.get("rug_drop_pct", 90.0),
             verbose=radar.get("verbose", False),
             # from_raw solo cubre las claves presentes en el TOML; el resto
             # toma los defaults de ScoringWeights.

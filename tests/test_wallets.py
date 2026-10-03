@@ -8,6 +8,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 from sigpump.radar import MemecoinRadar
 from sigpump.telegram import TelegramAlerter
@@ -270,8 +271,8 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(tmp.cleanup)
         self.path = Path(tmp.name) / "alertas.db"
 
-    def _radar(self, *rondas, unsafe=None):
-        radar = MemecoinRadar(_config(alert_log_path=str(self.path)))
+    def _radar(self, *rondas, unsafe=None, **kwargs):
+        radar = MemecoinRadar(_config(alert_log_path=str(self.path), **kwargs))
         self.addCleanup(radar._tracker.close)
         radar._wallet_watcher = _FakeWatcher(*rondas)
         radar._authorities = _FakeAutoridades(unsafe)
@@ -344,6 +345,59 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         await radar._wallets_once(client, alerter)
         await radar._wallets_once(client, alerter)
         self.assertEqual(alerter.wallet[-1][1].others, ())
+
+    async def test_min_wallets_espera_a_la_segunda_wallet(self):
+        radar = self._radar([_buy()], [_buy(wallet=OTRA, label="ballena 2")], wallets_min_wallets=2)
+        alerter = _FakeAlerter()
+        client = _FakeClient(pairs=[_pair("TOK")])
+        await radar._wallets_once(client, alerter)
+        self.assertEqual(alerter.wallet, [])
+        await radar._wallets_once(client, alerter)
+        [(_, signal)] = alerter.wallet
+        self.assertEqual((signal.buy.label, signal.others), ("ballena 2", ("ballena",)))
+        filas = self._rows()
+        self.assertEqual([(f["enviada"], f["motivo_descarte"]) for f in filas],
+                         [(0, "1 de 2 wallets"), (1, None)])
+
+    async def test_min_wallets_no_cuenta_dos_veces_la_misma_wallet(self):
+        radar = self._radar([_buy()], [_buy()], wallets_min_wallets=2, wallets_cooldown_minutes=0)
+        alerter = _FakeAlerter()
+        client = _FakeClient(pairs=[_pair("TOK")])
+        await radar._wallets_once(client, alerter)
+        await radar._wallets_once(client, alerter)
+        self.assertEqual(alerter.wallet, [])
+
+    async def test_dos_wallets_con_la_misma_etiqueta_cuentan_como_dos(self):
+        radar = self._radar([_buy()], [_buy(wallet=OTRA)], wallets_min_wallets=2)
+        alerter = _FakeAlerter()
+        client = _FakeClient(pairs=[_pair("TOK")])
+        await radar._wallets_once(client, alerter)
+        await radar._wallets_once(client, alerter)
+        self.assertEqual(len(alerter.wallet), 1)
+
+    async def test_la_confluencia_sobrevive_a_un_reinicio(self):
+        radar = self._radar([_buy()], wallets_min_wallets=2)
+        client = _FakeClient(pairs=[_pair("TOK")])
+        await radar._wallets_once(client, _FakeAlerter())
+        reiniciado = self._radar([_buy(wallet=OTRA, label="ballena 2")], wallets_min_wallets=2)
+        reiniciado._restore_cooldowns()
+        alerter = _FakeAlerter()
+        await reiniciado._wallets_once(client, alerter)
+        [(_, signal)] = alerter.wallet
+        self.assertEqual(signal.others, ("ballena",))
+
+    async def test_solo_wallets_muestrea_el_precio_de_las_senales(self):
+        """Sin alertas ni prealertas no corre otro bucle que actualice el registro."""
+        radar = self._radar(alerts_enabled=False, watch_enabled=False, wallets_enabled=True)
+        radar._tracker.update = AsyncMock()
+        await radar._wallets_once(_FakeClient(pairs=[]), _FakeAlerter())
+        radar._tracker.update.assert_awaited_once()
+
+    async def test_con_alertas_el_precio_lo_muestrea_la_pasada(self):
+        radar = self._radar()
+        radar._tracker.update = AsyncMock()
+        await radar._wallets_once(_FakeClient(pairs=[]), _FakeAlerter())
+        radar._tracker.update.assert_not_awaited()
 
 
 class TestMensajeDeWallet(unittest.TestCase):

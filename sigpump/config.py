@@ -43,6 +43,7 @@ _KNOWN_KEYS: dict[str, set[str]] = {
         "max_drop_from_recent_high_pct",
     },
     "radar": {
+        "alerts_enabled",
         "poll_interval_seconds",
         "alert_cooldown_minutes",
         "score_alert_threshold",
@@ -72,6 +73,7 @@ _KNOWN_KEYS: dict[str, set[str]] = {
         "min_sol",
         "cooldown_minutes",
         "confluence_minutes",
+        "min_wallets",
     },
     "telegram": {"bot_token", "chat_id", "message_thread_id"},
 }
@@ -80,6 +82,7 @@ _NUMBER = (int, float)
 # Campo de Config -> (nombre en el TOML, tipos aceptados).
 _FIELD_TYPES: dict[str, tuple[str, tuple[type, ...]]] = {
     "chain_id": ("[dexscreener].chain_id", (str,)),
+    "alerts_enabled": ("[radar].alerts_enabled", (bool,)),
     "poll_interval_seconds": ("[radar].poll_interval_seconds", _NUMBER),
     "alert_cooldown_minutes": ("[radar].alert_cooldown_minutes", _NUMBER),
     "min_liquidity_usd": ("[dexscreener].min_liquidity_usd", _NUMBER),
@@ -125,6 +128,7 @@ _FIELD_TYPES: dict[str, tuple[str, tuple[type, ...]]] = {
     "wallets_min_sol": ("[wallets].min_sol", _NUMBER),
     "wallets_cooldown_minutes": ("[wallets].cooldown_minutes", _NUMBER),
     "wallets_confluence_minutes": ("[wallets].confluence_minutes", _NUMBER),
+    "wallets_min_wallets": ("[wallets].min_wallets", (int,)),
     "verbose": ("[radar].verbose", (bool,)),
     "telegram_bot_token": ("[telegram].bot_token", (str,)),
     "telegram_chat_id": ("[telegram].chat_id", (str,)),
@@ -207,6 +211,9 @@ class ScoringWeights:
 class Config:
     """Configuración completa del radar, con defaults sensatos si el TOML no los define."""
     chain_id: str = "solana"
+    # Alertas completas (las de la pasada con score y velas). Las prealertas
+    # se apagan con watch_enabled.
+    alerts_enabled: bool = True
     poll_interval_seconds: int = 90
     alert_cooldown_minutes: int = 60
     min_liquidity_usd: float = 5_000.0
@@ -264,6 +271,9 @@ class Config:
     # Ventana en la que otras wallets seguidas que entraron en el mismo token
     # se mencionan en el aviso.
     wallets_confluence_minutes: float = 60.0
+    # Wallets seguidas distintas que tienen que haber comprado el token dentro
+    # de confluence_minutes para avisar. 1 = avisar de cada compra.
+    wallets_min_wallets: int = 1
     verbose: bool = False
     # Comprobación en la blockchain de que el token no se pueda acuñar ni congelar.
     check_token_authorities: bool = True
@@ -291,8 +301,15 @@ class Config:
             )
         if self.check_token_authorities and not self.solana_rpc_url:
             raise ValueError("[solana].rpc_url no puede estar vacío con check_token_authorities")
+        if not (self.alerts_enabled or self.watch_enabled or self.wallets_enabled):
+            raise ValueError(
+                "No hay nada que avisar: [radar].alerts_enabled, [watch].enabled y "
+                "[wallets].enabled están todos desactivados"
+            )
         if self.wallets_enabled and not self.solana_rpc_url:
             raise ValueError("[solana].rpc_url no puede estar vacío con [wallets].enabled")
+        if self.wallets_min_wallets < 1:
+            raise ValueError(f"[wallets].min_wallets debe ser >= 1 ({self.wallets_min_wallets})")
         if self.wallets_enabled and not self.wallets_file:
             raise ValueError("[wallets].file no puede estar vacío con [wallets].enabled")
         if self.wallets_interval_seconds <= 0:
@@ -416,6 +433,7 @@ class Config:
 
         return cls(
             chain_id=dexscreener.get("chain_id", "solana"),
+            alerts_enabled=radar.get("alerts_enabled", True),
             poll_interval_seconds=radar.get("poll_interval_seconds", 90),
             alert_cooldown_minutes=radar.get("alert_cooldown_minutes", 60),
             min_liquidity_usd=dexscreener.get("min_liquidity_usd", 5_000.0),
@@ -459,6 +477,7 @@ class Config:
             wallets_min_sol=wallets.get("min_sol", 0.1),
             wallets_cooldown_minutes=wallets.get("cooldown_minutes", 60.0),
             wallets_confluence_minutes=wallets.get("confluence_minutes", 60.0),
+            wallets_min_wallets=wallets.get("min_wallets", 1),
             verbose=radar.get("verbose", False),
             # from_raw solo cubre las claves presentes en el TOML; el resto
             # toma los defaults de ScoringWeights.

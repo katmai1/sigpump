@@ -260,6 +260,9 @@ class TestConfigValidation(unittest.TestCase):
             dict(watch_max_tokens=0),
             dict(watch_max_tokens=10.5),
             dict(watch_enabled="si"),
+            dict(alerts_enabled="si"),
+            dict(wallets_min_wallets=0),
+            dict(wallets_min_wallets=1.5),
             dict(early_min_price_move_pct=-1.0),
             dict(early_min_price_move_pct=40.0, early_max_price_move_pct=30.0),
             dict(early_min_buy_ratio=1.5),
@@ -364,6 +367,19 @@ class TestFromToml(unittest.TestCase):
         with self.assertLogs(level=logging.WARNING) as logs:
             Config.from_toml(self._write("[solana]\nrcp_url = 'x'\n"))
         self.assertIn("rcp_url", "".join(logs.output))
+
+    def test_alertas_activadas_por_defecto(self):
+        self.assertTrue(Config().alerts_enabled)
+
+    def test_lee_alerts_enabled(self):
+        config = Config.from_toml(self._write("[radar]\nalerts_enabled = false\n"))
+        self.assertFalse(config.alerts_enabled)
+
+    def test_todo_desactivado_da_error(self):
+        with self.assertRaises(ValueError):
+            Config(alerts_enabled=False, watch_enabled=False, wallets_enabled=False)
+        # Solo wallets es válido.
+        Config(alerts_enabled=False, watch_enabled=False, wallets_enabled=True)
 
     def test_lee_la_vigilancia(self):
         config = Config.from_toml(

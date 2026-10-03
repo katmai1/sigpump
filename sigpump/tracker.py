@@ -325,6 +325,24 @@ class AlertTracker:
             return None
         return dict(row)
 
+    def recent_wallet_buys(self, since: float) -> list[dict]:
+        """Compras de wallets seguidas (avisadas o no) posteriores a `since`,
+        de la más vieja a la más nueva: token, wallet, wallet_etiqueta y timestamp."""
+        conn = self._db()
+        if conn is None:
+            return []
+        try:
+            rows = conn.execute(
+                "SELECT token, wallet, wallet_etiqueta, timestamp FROM alertas "
+                "WHERE tipo = 'wallet' AND wallet IS NOT NULL AND timestamp > :since "
+                "ORDER BY timestamp",
+                {"since": since},
+            ).fetchall()
+        except sqlite3.Error as exc:
+            log.warning("No se pudo leer %s: %s", self._path, exc)
+            return []
+        return [dict(row) for row in rows]
+
     def last_sent(self, kind: str, since: float) -> dict[str, float]:
         """Token -> timestamp de su última señal enviada de tipo `kind`
         ('alerta', 'prealerta' o 'wallet') posterior a `since`."""

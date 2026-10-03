@@ -48,6 +48,11 @@ max_rise_from_low_pct = 150.0
 max_drop_from_recent_high_pct = 20.0
 
 [radar]
+# Alertas completas (pasada con score, filtros y velas). false = no se mandan;
+# la pasada sigue corriendo si hace falta para elegir los tokens que vigilan
+# las prealertas. Las prealertas se activan/desactivan con [watch].enabled y
+# los avisos de wallets con [wallets].enabled.
+alerts_enabled = true
 poll_interval_seconds = 90
 alert_cooldown_minutes = 60
 score_alert_threshold = 70.0
@@ -66,6 +71,7 @@ verbose = false
 # pool se compara con sus propias fotos de hace 5-20 min: si estaba tranquilo
 # y arranca, manda una prealerta sin esperar a la pasada completa. Sin velas,
 # así que es menos fiable que la alerta completa, que se sigue mandando aparte.
+# false = sin prealertas.
 enabled = true
 # DexScreener refresca sus datos cada ~30 s: consultar más seguido no aporta.
 interval_seconds = 30
@@ -118,6 +124,10 @@ min_sol = 0.1
 cooldown_minutes = 60
 # Si otra wallet seguida entró en el mismo token en estos minutos, el aviso lo dice.
 confluence_minutes = 60
+# Wallets seguidas distintas que tienen que haber comprado el token dentro de
+# confluence_minutes para avisar. 1 = avisar de cada compra. Las compras que
+# no llegan quedan en el registro con enviada = 0.
+min_wallets = 1
 
 [scoring]
 # Penalización por subida ya hecha: si el cambio de 1h supera start, el score

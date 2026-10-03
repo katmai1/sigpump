@@ -396,6 +396,19 @@ class TestScanOnce(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.requested, [])
         self.assertEqual(alerter.sent, [])
 
+    async def test_alertas_desactivadas_no_alerta(self):
+        _, alerter = await self._scan(_config(alerts_enabled=False, watch_enabled=True), [_pair("TOK")])
+        self.assertEqual(alerter.sent, [])
+
+    async def test_alertas_desactivadas_sigue_eligiendo_los_vigilados(self):
+        radar, _ = await self._scan(_config(alerts_enabled=False, watch_enabled=True), [_pair("TOK")])
+        self.assertEqual(radar._watchlist, ["TOK"])
+
+    def test_sin_alertas_ni_prealertas_no_hace_falta_la_pasada(self):
+        radar = MemecoinRadar(_config(alerts_enabled=False, wallets_enabled=True))
+        self.assertFalse(radar._scan_needed())
+        self.assertTrue(MemecoinRadar(_config(alerts_enabled=False, watch_enabled=True))._scan_needed())
+
 
 def _con_txns(pair, buys=80, sells=40):
     pair["txns"] = {"h1": {"buys": buys, "sells": sells}}

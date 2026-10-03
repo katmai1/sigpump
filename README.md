@@ -127,6 +127,17 @@ wallet: no se avisa del historial. El fichero se relee cuando cambia.
 Usa el `rpc_url` de `[solana]`. Con 10-15 wallets cada 15 segundos el RPC
 público se queda corto; un plan gratuito de Helius o QuickNode alcanza.
 
+Con `min_wallets = 2` (o más) solo se avisa cuando ese número de wallets
+seguidas distintas compraron el mismo token dentro de `confluence_minutes`:
+la primera compra queda registrada con `enviada = 0` y el aviso sale con la
+que completa el número. Las compras recientes se recuperan del registro al
+reiniciar, así que un reinicio entre las dos no pierde el aviso.
+
+Para recibir solo los avisos de wallets, desactivá las alertas
+(`[radar].alerts_enabled = false`) y las prealertas (`[watch].enabled = false`).
+Con las alertas apagadas y las prealertas encendidas, la pasada completa sigue
+corriendo para elegir los tokens vigilados, pero no manda alertas.
+
 ## Registro de alertas
 
 `alertas.db` (configurable con `[radar].alert_log_path`) es una base SQLite
@@ -222,15 +233,18 @@ Secciones disponibles:
   `max_price_deviation_pct` y `max_candle_drop_pct` son sus umbrales, y
   `max_rise_from_low_pct` y `max_drop_from_recent_high_pct` los de "llega
   tarde".
-- `[radar]` — intervalo de polling, cooldown entre alertas repetidas del
-  mismo token, umbral de score, cuántos candidatos evaluar por pasada y
-  `alert_log_path` (la base SQLite de resultados).
-- `[watch]` — vigilancia rápida y prealertas: intervalo, cuántos tokens
+- `[radar]` — `alerts_enabled` (activa o desactiva las alertas completas),
+  intervalo de polling, cooldown entre alertas repetidas del mismo token,
+  umbral de score, cuántos candidatos evaluar por pasada y `alert_log_path`
+  (la base SQLite de resultados).
+- `[watch]` — vigilancia rápida y prealertas (`enabled` las activa o
+  desactiva): intervalo, cuántos tokens
   vigilar, umbrales de arranque, `require_sustained_seconds` (cuánto tiene que
   sostenerse el arranque antes de avisar) y cooldown propio.
 - `[wallets]` — seguimiento de wallets: `file` con las direcciones,
   intervalo, `min_sol` (gasto mínimo para contar como compra), cooldown por
-  wallet y token, y ventana de confluencia.
+  wallet y token, ventana de confluencia y `min_wallets` (cuántas wallets
+  tienen que coincidir en un token para avisar).
 - `[scoring]` — `late_penalty_start_h1_pct` y `late_penalty_end_h1_pct`:
   entre esos dos cambios de 1h el score se reduce linealmente hasta 0.
 - `[scoring_weights]` — pesos relativos (deben sumar ~1.0) de cada

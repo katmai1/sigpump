@@ -182,6 +182,16 @@ class MemecoinRadar:
         self._early_alerted.update(
             self._tracker.last_sent("prealerta", now - self._early_memory_minutes() * 60)
         )
+        # Sin las compras recientes, un reinicio entre la compra de una wallet
+        # y la de otra perdía la confluencia (y con min_wallets > 1, el aviso).
+        since = now - self._config.wallets_confluence_minutes * 60
+        for row in self._tracker.recent_wallet_buys(since):
+            buy = WalletBuy(
+                wallet=row["wallet"], label=row["wallet_etiqueta"] or row["wallet"],
+                mint=row["token"], sol_spent=0.0, stable_spent=0.0, new_position=False,
+                signature="", ts=row["timestamp"],
+            )
+            self._wallet_buys.setdefault(buy.mint, []).append(buy)
 
     def _prune_alerted(self) -> None:
         """Elimina los cooldowns expirados y las fotos viejas, para que la
@@ -773,7 +783,8 @@ class MemecoinRadar:
         seguidas que entraron en el mismo token dentro de confluence_minutes."""
         since = buy.ts - self._config.wallets_confluence_minutes * 60
         recent = [b for b in self._wallet_buys.get(buy.mint, []) if b.ts >= since]
-        others = tuple(dict.fromkeys(b.label for b in recent if b.wallet != buy.wallet))
+        # Una por wallet: dos wallets con la misma etiqueta cuentan como dos.
+        others = tuple({b.wallet: b.label for b in recent if b.wallet != buy.wallet}.values())
         self._wallet_buys[buy.mint] = recent + [buy]
         return others
 
@@ -781,11 +792,19 @@ class MemecoinRadar:
         """
         Vuelta del seguimiento de wallets: busca sus compras nuevas y avisa
         de cada una, salvo tokens en bonding curve (sin pool en un AMM),
-        tokens que se pueden acuñar o congelar, y compras repetidas de la
-        misma wallet en el mismo token dentro de su cooldown.
+        tokens que se pueden acuñar o congelar, compras repetidas de la
+        misma wallet en el mismo token dentro de su cooldown y, con
+        [wallets].min_wallets > 1, compras sin suficientes wallets en el token.
         """
         if self._wallet_watcher is None:
             return
+        # Sin alertas ni prealertas no corre ningún otro bucle que muestree el
+        # precio de las señales registradas: lo hace este.
+        if self._tracker and not self._scan_needed():
+            try:
+                await self._tracker.update(client, self._config.chain_id)
+            except Exception:
+                log.exception("Error actualizando el registro de alertas")
         buys = await self._wallet_watcher.poll()
         if not buys:
             return
@@ -821,6 +840,9 @@ class MemecoinRadar:
             self._wallet_alerted[key] = time.time()
             score = self._score(pair, self._boosted)
             reason = unsafe.get(buy.mint)
+            wallets = 1 + len(signal.others)
+            if not reason and wallets < self._config.wallets_min_wallets:
+                reason = f"{wallets} de {self._config.wallets_min_wallets} wallets"
             if reason:
                 log.info("Compra de %s en %s descartada: %s", buy.label, _symbol(pair), reason)
                 self._record_wallet(pair, score, signal, sent=False, reason=reason)
@@ -893,6 +915,10 @@ class MemecoinRadar:
             # Antes de verificar las alertas completas, que tarda: la
             # prealerta vale por llegar pronto.
             await self._check_early(client, alerter, pairs)
+        # Con las alertas desactivadas la pasada solo sirve para elegir los
+        # tokens vigilados.
+        if not self._config.alerts_enabled:
+            return
 
         to_alert: list[tuple[dict, float]] = []
         for pair in pairs:
@@ -952,6 +978,11 @@ class MemecoinRadar:
             if self._tracker:
                 self._tracker.record(pair, score, stats, sent=True)
 
+    def _scan_needed(self) -> bool:
+        """La pasada completa manda las alertas y elige los tokens que vigila
+        el bucle de prealertas: sin ninguna de las dos no hace falta."""
+        return self._config.alerts_enabled or self._config.watch_enabled
+
     async def run(self) -> None:
         """Loop principal: crea la sesión HTTP y el bot de Telegram una sola
         vez, y repite _scan_once cada poll_interval_seconds indefinidamente."""
@@ -979,12 +1010,14 @@ class MemecoinRadar:
                     Path(self._config.wallets_file),
                     self._config.wallets_min_sol,
                 )
-            loops = [
-                self._loop(
-                    self._scan_once, client, alerter,
-                    self._config.poll_interval_seconds, "Error durante el escaneo",
+            loops = []
+            if self._scan_needed():
+                loops.append(
+                    self._loop(
+                        self._scan_once, client, alerter,
+                        self._config.poll_interval_seconds, "Error durante el escaneo",
+                    )
                 )
-            ]
             # La vigilancia corre en paralelo con su propio intervalo: esperar
             # a que termine la pasada completa (2-3 min) es justo lo que hace
             # llegar tarde.

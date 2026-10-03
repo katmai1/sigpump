@@ -13,6 +13,8 @@ from sigpump.radar import MemecoinRadar
 from sigpump.telegram import TelegramAlerter
 from sigpump.wallets import (
     LAMPORTS_PER_SOL,
+    MAX_TRANSACTION_VERSION,
+    MAX_TX_ATTEMPTS,
     WSOL_MINT,
     WalletBuy,
     WalletSignal,
@@ -201,6 +203,31 @@ class TestWalletWatcher(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await watcher.poll(), [])
         rpc.txs = {"NUEVA": _tx(post_tokens=[_saldo(TOKEN, 1)], sol_gastado=1)}
         self.assertEqual(len(await watcher.poll()), 1)
+
+
+class TestTransaccionesQueFallan(unittest.IsolatedAsyncioTestCase):
+    setUp = TestWalletWatcher.setUp
+
+    async def test_se_salta_tras_varios_intentos_y_sigue_con_las_demas(self):
+        rpc = _FakeRpc(firmas=["VIEJA"])
+        watcher = WalletWatcher(rpc, "http://rpc", self.path, min_sol=0.1)
+        await watcher.poll()
+        # ROTA nunca se puede leer (p. ej. una versión de transacción nueva).
+        rpc.firmas = ["BUENA", "ROTA", "VIEJA"]
+        rpc.txs = {"BUENA": _tx(post_tokens=[_saldo(TOKEN, 1)], sol_gastado=1)}
+        for _ in range(MAX_TX_ATTEMPTS - 1):
+            self.assertEqual(await watcher.poll(), [])
+        [buy] = await watcher.poll()
+        self.assertEqual(buy.signature, "BUENA")
+
+    async def test_pide_la_version_de_transaccion_soportada(self):
+        rpc = _FakeRpc(firmas=["VIEJA"])
+        watcher = WalletWatcher(rpc, "http://rpc", self.path, min_sol=0.1)
+        await watcher.poll()
+        rpc.firmas = ["NUEVA", "VIEJA"]
+        await watcher.poll()
+        [params] = [p for m, p in rpc.llamadas if m == "getTransaction"]
+        self.assertEqual(params[1]["maxSupportedTransactionVersion"], MAX_TRANSACTION_VERSION)
 
 
 def _buy(wallet=WALLET, label="ballena", mint="TOK", ts=None, new=True):

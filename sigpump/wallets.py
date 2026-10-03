@@ -36,6 +36,12 @@ REQUEST_TIMEOUT_SECONDS = 15
 # Ritmo máximo de peticiones al RPC. El plan gratuito de Helius corta a 10
 # por segundo; se deja margen para la comprobación de autoridades.
 MAX_REQUESTS_PER_SECOND = 8
+# Versión de transacción más alta que se acepta. Si llega una más nueva, el
+# RPC da error y esa transacción se salta tras MAX_TX_ATTEMPTS intentos.
+MAX_TRANSACTION_VERSION = 1
+# Intentos de leer una transacción antes de saltarla. Sin tope, una que falla
+# siempre dejaba la wallet atascada en ella sin ver nada de lo posterior.
+MAX_TX_ATTEMPTS = 3
 # "confirmed" llega ~10 s antes que "finalized"; revertir una confirmada es
 # rarísimo y aquí solo se avisa, no se opera.
 COMMITMENT = "confirmed"
@@ -174,6 +180,8 @@ class WalletWatcher:
         # tiene punto de partida: su primera vuelta solo lo fija, para no
         # avisar de su historial al arrancar.
         self._last_signature: dict[str, str | None] = {}
+        # Firma -> intentos fallidos de leerla.
+        self._attempts: dict[str, int] = {}
         self._rate_lock = asyncio.Lock()
         self._next_request = 0.0
 
@@ -262,15 +270,24 @@ class WalletWatcher:
                         [signature, {
                             "encoding": "jsonParsed",
                             "commitment": COMMITMENT,
-                            "maxSupportedTransactionVersion": 0,
+                            "maxSupportedTransactionVersion": MAX_TRANSACTION_VERSION,
                         }],
                     )
+                    # None: todavía no está disponible en el nodo.
+                    problem = "el RPC aún no la tiene" if tx is None else None
                 except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
-                    log.warning("No se pudo leer la transacción %s de %s: %s", signature, label, exc)
-                    break
-                if tx is None:
-                    # Todavía no disponible en el nodo: se reintenta.
-                    break
+                    tx, problem = None, str(exc)
+                if problem is not None:
+                    attempts = self._attempts.get(signature, 0) + 1
+                    if attempts < MAX_TX_ATTEMPTS:
+                        self._attempts[signature] = attempts
+                        log.debug("No se pudo leer la transacción %s de %s: %s", signature, label, problem)
+                        break
+                    log.warning(
+                        "Se salta la transacción %s de %s tras %d intentos: %s",
+                        signature, label, attempts, problem,
+                    )
+                self._attempts.pop(signature, None)
                 if isinstance(tx, dict):
                     buys += parse_buys(tx, wallet, label, signature, self._min_sol)
             self._last_signature[wallet] = signature

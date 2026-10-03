@@ -15,6 +15,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 import aiohttp  # type: ignore[import-not-found]
@@ -49,6 +50,8 @@ COMMITMENT = "confirmed"
 _ADDRESS_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 # Marca de wallet de confianza en el fichero, detrás de la dirección.
 TRUSTED_MARK = "*"
+# Entrada temporal de la lista negra: el motivo empieza por "hasta <fecha ISO>".
+UNTIL_PREFIX = "hasta "
 
 
 @dataclass(frozen=True)
@@ -84,23 +87,81 @@ class WalletSignal:
     update: bool = False
 
 
-def load_blacklist(path: Path) -> set[str]:
-    """Direcciones de la lista negra (una por línea, lo que va detrás de `#`
-    es el motivo). Sin fichero, la lista está vacía."""
+def _until(reason: str) -> float | None:
+    """Fin (epoch) de una entrada temporal de la lista negra, por su motivo;
+    None si es permanente."""
+    reason = reason.strip()
+    if not reason.startswith(UNTIL_PREFIX):
+        return None
+    stamp = reason.removeprefix(UNTIL_PREFIX).partition(" ")[0]
+    try:
+        return datetime.fromisoformat(stamp).timestamp()
+    except ValueError:
+        return None
+
+
+def _read_blacklist(path: Path) -> dict[str, float | None]:
+    """Dirección -> fin de su entrada en la lista negra (None si es
+    permanente). Si una dirección aparece varias veces, gana la permanente
+    o la que acaba más tarde. Sin fichero, la lista está vacía."""
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return set()
+        return {}
+    entries: dict[str, float | None] = {}
+    for line in text.splitlines():
+        address, _, reason = line.partition("#")
+        address = address.strip()
+        if not _ADDRESS_RE.match(address):
+            continue
+        until = _until(reason)
+        if address in entries:
+            previous = entries[address]
+            until = None if previous is None or until is None else max(previous, until)
+        entries[address] = until
+    return entries
+
+
+def load_blacklist(path: Path) -> set[str]:
+    """Direcciones de la lista negra permanente (una por línea, lo que va
+    detrás de `#` es el motivo). Sin fichero, la lista está vacía."""
+    return {address for address, until in _read_blacklist(path).items() if until is None}
+
+
+def load_temporary_blacklist(path: Path) -> dict[str, float]:
+    """Dirección -> fin (epoch) de las entradas temporales de la lista negra
+    que siguen vigentes."""
+    now = time.time()
     return {
-        address for line in text.splitlines()
-        if _ADDRESS_RE.match(address := line.partition("#")[0].strip())
+        address: until for address, until in _read_blacklist(path).items()
+        if until is not None and until > now
     }
 
 
-def add_to_blacklist(path: Path, address: str, reason: str) -> None:
-    """Añade `address` a la lista negra con su motivo."""
-    with path.open("a", encoding="utf-8") as f:
-        f.write(f"{address}  # {reason}\n")
+def add_to_blacklist(path: Path, address: str, reason: str, until: float | None = None) -> None:
+    """Añade `address` a la lista negra con su motivo; con `until` (epoch),
+    solo hasta entonces. De paso quita las entradas temporales ya vencidas,
+    para que el fichero no crezca con cada vuelta de una wallet hiperactiva."""
+    if until is not None:
+        stamp = datetime.fromtimestamp(until, timezone.utc).isoformat(timespec="seconds")
+        reason = f"{UNTIL_PREFIX}{stamp} · {reason}"
+    line = f"{address}  # {reason}\n"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except FileNotFoundError:
+        lines = []
+    now = time.time()
+    kept = [l for l in lines if (u := _until(l.partition("#")[2])) is None or u > now]
+    if len(kept) == len(lines):
+        with path.open("a", encoding="utf-8") as f:
+            f.write(line)
+        return
+    if kept and not kept[-1].endswith("\n"):
+        kept[-1] += "\n"
+    # Se escribe aparte y se renombra para no dejar el fichero a medias.
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text("".join(kept) + line, encoding="utf-8")
+    tmp.replace(path)
 
 
 def load_wallets(path: Path, blacklist: set[str] | frozenset[str] = frozenset()) -> dict[str, FollowedWallet]:
@@ -243,6 +304,9 @@ class WalletWatcher:
         self._min_sol = min_sol
         self._blacklist_path = blacklist_path
         self._wallets: dict[str, FollowedWallet] = {}
+        # Wallet -> fin (epoch) de su entrada temporal en la lista negra: no
+        # se consulta hasta entonces, pero sigue en el fichero de wallets.
+        self._banned_until: dict[str, float] = {}
         self._mtime: tuple[float, float | None] | None = None
         # Wallet -> última firma procesada. Una wallet sin entrada todavía no
         # tiene punto de partida: su primera vuelta solo lo fija, para no
@@ -265,13 +329,23 @@ class WalletWatcher:
         except FileNotFoundError:
             return None
 
-    def blacklist(self, address: str, reason: str) -> None:
-        """Mete `address` en la lista negra y deja de seguirla ya. Lanza
-        OSError si no se puede escribir la lista."""
+    def banned(self, address: str) -> bool:
+        """True si `address` tiene una entrada temporal vigente en la lista negra."""
+        return self._banned_until.get(address, 0.0) > time.time()
+
+    def blacklist(self, address: str, reason: str, seconds: float | None = None) -> None:
+        """Mete `address` en la lista negra y deja de seguirla ya. Con
+        `seconds`, solo durante ese tiempo: sigue en el fichero de wallets y
+        se vuelve a consultar al acabar. Lanza OSError si no se puede
+        escribir la lista."""
         if self._blacklist_path is None:
             return
-        add_to_blacklist(self._blacklist_path, address, reason)
-        self._wallets.pop(address, None)
+        until = None if seconds is None else time.time() + seconds
+        add_to_blacklist(self._blacklist_path, address, reason, until)
+        if until is None:
+            self._wallets.pop(address, None)
+        else:
+            self._banned_until[address] = until
         self._last_signature.pop(address, None)
         # Fuerza la relectura, que la quita también del fichero de wallets.
         self._mtime = None
@@ -284,6 +358,7 @@ class WalletWatcher:
             if mtime == self._mtime:
                 return
             blacklist = load_blacklist(self._blacklist_path) if self._blacklist_path else set()
+            banned = load_temporary_blacklist(self._blacklist_path) if self._blacklist_path else {}
             wallets = load_wallets(self._path, blacklist)
             # Quitar wallets reescribe el fichero y cambia su fecha.
             mtime = (self._path.stat().st_mtime, mtime[1])
@@ -293,6 +368,7 @@ class WalletWatcher:
             self._mtime = None
             return
         self._mtime = mtime
+        self._banned_until = banned
         if wallets != self._wallets:
             log.info("Siguiendo %d wallets de %s", len(wallets), self._path)
         self._wallets = wallets
@@ -319,8 +395,16 @@ class WalletWatcher:
     async def poll(self) -> list[WalletBuy]:
         """Compras nuevas de todas las wallets desde la vuelta anterior."""
         self.reload()
+        active = {}
+        for wallet, info in self._wallets.items():
+            if self.banned(wallet):
+                # Al acabar el castigo se empieza desde su última firma, sin
+                # avisar de lo que compró mientras tanto.
+                self._last_signature.pop(wallet, None)
+            else:
+                active[wallet] = info
         results = await asyncio.gather(
-            *(self._poll_wallet(wallet, info) for wallet, info in self._wallets.items())
+            *(self._poll_wallet(wallet, info) for wallet, info in active.items())
         )
         return [buy for buys in results for buy in buys]
 

@@ -139,9 +139,12 @@ token_cooldown_minutes = 0
 realert_new_wallets = 2
 # Una wallet que compra más tokens distintos que esto en una hora (un bot o un
 # degen que entra en todo) no avisa ni cuenta para la confluencia. 0 = sin tope.
+# Con blacklist_file, además pasa 1h en la lista negra sin consultarse.
 max_tokens_per_hour = 0
 # Lista negra: sus wallets se quitan de `file` y no se vuelven a seguir.
-# Mismo formato que `file`. Vacío = sin lista negra.
+# Mismo formato que `file`. Las entradas cuyo motivo empieza por
+# "hasta <fecha ISO>" son temporales: la wallet se deja de consultar hasta
+# esa fecha, pero sigue en `file`. Vacío = sin lista negra.
 blacklist_file = ""
 # Una wallet con una compra que cae este % en el seguimiento (rug) entra sola
 # en la lista negra. 0 = no hacerlo.

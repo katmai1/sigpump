@@ -139,7 +139,9 @@ Para no recibir el mismo token una y otra vez, `token_cooldown_minutes` deja
 un solo aviso por token en esa ventana; solo se vuelve a avisar, marcado como
 🔁 actualización, si se suman `realert_new_wallets` wallets más que en el
 último aviso. `max_tokens_per_hour` silencia las wallets que compran de todo
-(bots o degens): ni avisan ni cuentan para la confluencia de las demás.
+(bots o degens): ni avisan ni cuentan para la confluencia de las demás, y
+con `blacklist_file` pasan 1 h en la lista negra sin consultarse (siguen en
+el fichero de wallets y vuelven a seguirse al acabar).
 
 Con `blacklist_file`, las wallets cuya compra cae `rug_drop_pct` (90% por
 defecto) en el seguimiento entran solas en la lista negra: se quitan del

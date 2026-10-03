@@ -23,6 +23,7 @@ from sigpump.wallets import (
     WalletWatcher,
     add_to_blacklist,
     load_blacklist,
+    load_temporary_blacklist,
     load_wallets,
     parse_buys,
 )
@@ -114,6 +115,29 @@ class TestLoadWallets(unittest.TestCase):
 
     def test_lista_negra_sin_fichero_esta_vacia(self):
         self.assertEqual(load_blacklist(self.path.with_name("no-existe.txt")), set())
+
+    def test_las_temporales_no_se_eliminan_del_fichero(self):
+        self.path.write_text(f"{WALLET}  # ballena\n{OTRA}  # bot\n", encoding="utf-8")
+        negra = self.path.with_name("negra.txt")
+        hasta = time.time() + 3600
+        add_to_blacklist(negra, OTRA, "bot: 12 tokens en 1h", until=hasta)
+        self.assertEqual(load_blacklist(negra), set())
+        self.assertAlmostEqual(load_temporary_blacklist(negra)[OTRA], hasta, delta=1)
+        self.assertEqual(list(load_wallets(self.path, load_blacklist(negra))), [WALLET, OTRA])
+
+    def test_las_temporales_vencidas_se_ignoran_y_se_limpian(self):
+        negra = self.path.with_name("negra.txt")
+        add_to_blacklist(negra, OTRA, "bot", until=time.time() - 1)
+        self.assertEqual(load_temporary_blacklist(negra), {})
+        add_to_blacklist(negra, WALLET, "rug")
+        self.assertEqual(negra.read_text(encoding="utf-8"), f"{WALLET}  # rug\n")
+
+    def test_la_permanente_gana_a_la_temporal(self):
+        negra = self.path.with_name("negra.txt")
+        add_to_blacklist(negra, OTRA, "bot", until=time.time() + 3600)
+        add_to_blacklist(negra, OTRA, "rug")
+        self.assertEqual(load_blacklist(negra), {OTRA})
+        self.assertEqual(load_temporary_blacklist(negra), {})
 
 
 class TestParseBuys(unittest.TestCase):
@@ -215,6 +239,24 @@ class TestWalletWatcher(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(watcher.wallets, {})
         self.assertEqual(self.path.read_text(encoding="utf-8"), "")
         self.assertIn(WALLET, load_blacklist(negra))
+
+    async def test_blacklist_temporal_deja_de_consultarla_hasta_que_acaba(self):
+        negra = self.path.with_name("negra.txt")
+        rpc = _FakeRpc(firmas=["VIEJA"])
+        watcher = WalletWatcher(rpc, "http://rpc", self.path, 0.1, negra)
+        await watcher.poll()
+        watcher.blacklist(WALLET, "ballena: 12 tokens en 1h", seconds=3600)
+        rpc.llamadas.clear()
+        await watcher.poll()
+        self.assertEqual(rpc.llamadas, [])
+        self.assertIn(WALLET, watcher.wallets)
+        self.assertEqual(self.path.read_text(encoding="utf-8"), f"{WALLET}  # ballena\n")
+        # Al acabar vuelve a consultarse, desde su última firma.
+        watcher._banned_until[WALLET] = time.time() - 1
+        rpc.firmas = ["NUEVA", "VIEJA"]
+        rpc.txs["NUEVA"] = _tx(post_tokens=[_saldo(TOKEN, 1)], sol_gastado=1)
+        self.assertEqual(await watcher.poll(), [])
+        self.assertEqual(rpc.llamadas[0][1][1]["limit"], 1)
 
     async def test_la_confianza_llega_a_la_compra(self):
         self.path.write_text(f"{WALLET} *  # ballena\n", encoding="utf-8")
@@ -494,6 +536,24 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(motivos[:4], ["wallet hiperactiva (4 tokens en 1h)"] * 4)
         [(_, signal)] = alerter.wallet
         self.assertEqual((signal.buy.wallet, signal.others), (OTRA, ()))
+
+    async def test_wallet_hiperactiva_va_a_la_lista_negra_una_hora(self):
+        tmp = self.path.parent
+        wallets_txt, negra = tmp / "wallets.txt", tmp / "negra.txt"
+        wallets_txt.write_text(f"{WALLET}  # ballena\n", encoding="utf-8")
+        compras = [_buy(mint=f"T{i}") for i in range(4)]
+        radar = self._radar(wallets_blacklist_file=str(negra), wallets_max_tokens_per_hour=3)
+        watcher = WalletWatcher(None, "http://rpc", wallets_txt, 0.1, negra)
+        watcher.reload()
+        watcher.poll = AsyncMock(return_value=compras)
+        radar._wallet_watcher = watcher
+        await radar._wallets_once(_FakeClient(pairs=[_pair(f"T{i}") for i in range(4)]), _FakeAlerter())
+        self.assertTrue(watcher.banned(WALLET))
+        self.assertAlmostEqual(load_temporary_blacklist(negra)[WALLET], time.time() + 3600, delta=5)
+        self.assertEqual(negra.read_text(encoding="utf-8").count(WALLET), 1)
+        self.assertIn("ballena: 4 tokens en 1h", negra.read_text(encoding="utf-8"))
+        watcher.reload()
+        self.assertEqual(list(watcher.wallets), [WALLET])
 
     async def test_wallet_que_compra_un_rug_va_a_la_lista_negra(self):
         tmp = self.path.parent

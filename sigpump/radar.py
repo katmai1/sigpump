@@ -58,6 +58,8 @@ CANDLE_FEATURES_TIMEOUT_SECONDS = 10.0
 BONDING_CURVE_DEX_IDS = {"pumpfun", "meteoradbc", "launchlab", "moonshot"}
 # Ventana del tope [wallets].max_tokens_per_hour.
 WALLET_ACTIVITY_SECONDS = 3600
+# Tiempo que pasa en la lista negra una wallet que supera ese tope.
+HYPERACTIVE_BLACKLIST_SECONDS = 3600
 
 
 def _liquidity_usd(pair: dict) -> float:
@@ -842,6 +844,22 @@ class MemecoinRadar:
                 continue
             log.warning("Wallet %s a la lista negra: %s", info.label, reason)
 
+    def _blacklist_hyperactive(self, buy: WalletBuy) -> None:
+        """Mete en la lista negra durante HYPERACTIVE_BLACKLIST_SECONDS la
+        wallet de `buy` si pasó de [wallets].max_tokens_per_hour."""
+        watcher = self._wallet_watcher
+        if not (watcher and self._config.wallets_blacklist_file and self._hyperactive(buy.wallet)):
+            return
+        if watcher.banned(buy.wallet):
+            return
+        reason = f"{self._tokens_last_hour(buy.wallet)} tokens en 1h"
+        try:
+            watcher.blacklist(buy.wallet, f"{buy.label}: {reason}", seconds=HYPERACTIVE_BLACKLIST_SECONDS)
+        except OSError as exc:
+            log.warning("No se pudo añadir %s a la lista negra: %s", buy.label, exc)
+            return
+        log.warning("Wallet %s a la lista negra durante 1h: %s", buy.label, reason)
+
     def _confluence(self, buy: WalletBuy) -> tuple[str, ...]:
         """Anota la compra y devuelve las etiquetas de las otras wallets
         seguidas que entraron en el mismo token dentro de confluence_minutes.
@@ -883,6 +901,8 @@ class MemecoinRadar:
             return
         for buy in buys:
             self._wallet_activity.setdefault(buy.wallet, {})[buy.mint] = buy.ts
+        for buy in buys:
+            self._blacklist_hyperactive(buy)
         signals = [
             WalletSignal(buy, self._confluence(buy)) for buy in buys
             if not self._wallet_cooldown_active(buy)

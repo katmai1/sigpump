@@ -152,6 +152,26 @@ class TestBestPairPerToken(unittest.TestCase):
                 self.assertEqual(len(elegidos), 1)
                 self.assertEqual(elegidos[0]["liquidity"]["usd"], 900_000)
 
+    def test_prefiere_el_pool_en_los_dex_y_quote_pedidos(self):
+        """Un token con su pool más profundo en otro dex o contra USDC se
+        evalúa con su pool contra SOL en pumpswap, aunque sea más chico."""
+        radar = MemecoinRadar(_config(dex_ids=["pumpswap", "raydium"], quote_tokens=["SOL"]))
+        bueno = {**_con_quote(_pair("TOK", liquidity=5_000)), "dexId": "pumpswap"}
+        otro_dex = {**_con_quote(_pair("TOK", liquidity=900_000)), "dexId": "meteora"}
+        otro_quote = {**_con_quote(_pair("TOK", liquidity=900_000), symbol="USDC", address="EPjF"),
+                      "dexId": "raydium"}
+        for orden in ([bueno, otro_dex, otro_quote], [otro_quote, otro_dex, bueno]):
+            with self.subTest(orden=[p["dexId"] for p in orden]):
+                [elegido] = radar._best_pair_per_token(orden, ["TOK"])
+                self.assertIs(elegido, bueno)
+
+    def test_sin_pool_valido_queda_el_de_mayor_liquidez(self):
+        radar = MemecoinRadar(_config(dex_ids=["pumpswap"]))
+        chico = {**_pair("TOK", liquidity=5_000), "dexId": "orca"}
+        grande = {**_pair("TOK", liquidity=900_000), "dexId": "meteora"}
+        [elegido] = radar._best_pair_per_token([chico, grande], ["TOK"])
+        self.assertIs(elegido, grande)
+
     def test_descarta_pares_donde_el_token_pedido_es_el_quote(self):
         """En un par SOL/TOKEN el baseToken es SOL: alertar sobre él sería
         alertar sobre el token equivocado."""
@@ -1175,6 +1195,17 @@ class TestFiltrosDeParYActividad(unittest.IsolatedAsyncioTestCase):
 
     async def test_sin_lista_de_monedas_no_filtra(self):
         alerter = await self._scan(_config(), [_con_quote(_pair("TOK"), symbol="USDC", address="EPjF")])
+        self.assertEqual(len(alerter.sent), 1)
+
+    async def test_solo_pares_en_los_dex_pedidos(self):
+        config = _config(dex_ids=["pumpswap", "raydium"])
+        for dex, enviadas in (("pumpswap", 1), ("Raydium", 1), ("meteora", 0), (None, 0)):
+            with self.subTest(dex=dex):
+                alerter = await self._scan(config, [{**_pair("TOK"), "dexId": dex}])
+                self.assertEqual(len(alerter.sent), enviadas)
+
+    async def test_sin_lista_de_dex_no_filtra(self):
+        alerter = await self._scan(_config(), [{**_pair("TOK"), "dexId": "meteora"}])
         self.assertEqual(len(alerter.sent), 1)
 
     async def test_actividad_minima_en_5_minutos(self):

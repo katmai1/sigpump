@@ -324,7 +324,15 @@ class MemecoinRadar:
         Además descarta los pares donde el token pedido es el quote (p. ej.
         SOL en un par SOL/TOKEN): ahí el baseToken es otro token y alertar
         sobre él sería alertar sobre el token equivocado.
+
+        Prefiere los pares que cumplen [dexscreener].dex_ids y quote_tokens:
+        un token con su pool más profundo en otro dex o contra USDC se evalúa
+        con su pool contra SOL en pumpswap, si lo tiene. Si no tiene ninguno
+        se queda el de más liquidez, que luego se descarta por eso.
         """
+        def rank(pair: dict) -> tuple[bool, float]:
+            return self._venue_reason(pair) is None, _liquidity_usd(pair)
+
         wanted = set(addresses)
         best: dict[str, dict] = {}
         for pair in pairs:
@@ -332,21 +340,34 @@ class MemecoinRadar:
             if address not in wanted:
                 continue
             current = best.get(address)
-            if current is None or _liquidity_usd(pair) > _liquidity_usd(current):
+            if current is None or rank(pair) > rank(current):
                 best[address] = pair
         return list(best.values())
 
-    def _structural_rejection_reason(self, pair: dict) -> str | None:
-        """
-        Filtros duros que no dependen de la actividad del momento: liquidez,
-        capitalización, edad y subida absurda. Deciden también qué tokens se
-        vigilan, porque el que interesa vigilar es justo el que todavía está
-        tranquilo y no pasaría los de actividad.
-        """
+    def _venue_reason(self, pair: dict) -> str | None:
+        """Motivo para descartar un par por dónde cotiza ([dexscreener].dex_ids
+        y quote_tokens), o None si pasa."""
         cfg = self._config
+        if cfg.dex_ids:
+            dex_id = str(pair.get("dexId") or "")
+            if dex_id.lower() not in {d.lower() for d in cfg.dex_ids}:
+                return f"par en {dex_id or '?'}, no en {' o '.join(cfg.dex_ids)}"
         if cfg.quote_tokens and not _matches_quote(pair, cfg.quote_tokens):
             quote = (pair.get("quoteToken") or {}).get("symbol") or "?"
             return f"par contra {quote}, no contra {' o '.join(cfg.quote_tokens)}"
+        return None
+
+    def _structural_rejection_reason(self, pair: dict) -> str | None:
+        """
+        Filtros duros que no dependen de la actividad del momento: dex y
+        quote del par, liquidez, capitalización, edad y subida absurda.
+        Deciden también qué tokens se vigilan, porque el que interesa vigilar
+        es justo el que todavía está tranquilo y no pasaría los de actividad.
+        """
+        cfg = self._config
+        venue_reason = self._venue_reason(pair)
+        if venue_reason:
+            return venue_reason
         liquidity_usd = _liquidity_usd(pair)
         # marketCap suele venir ausente en tokens nuevos (sin supply circulante
         # conocido); fdv (fully diluted valuation) es el fallback de DexScreener.
@@ -868,9 +889,12 @@ class MemecoinRadar:
 
     def _wallet_pair_rejection(self, pair: dict) -> str | None:
         """Motivo para no avisar de una compra de wallet por cómo está el par
-        ([wallets].min_pair_age_minutes, max_price_change_h1_pct y
-        min_market_cap_usd), o None si pasa."""
+        ([dexscreener].dex_ids y quote_tokens; [wallets].min_pair_age_minutes,
+        max_price_change_h1_pct y min_market_cap_usd), o None si pasa."""
         cfg = self._config
+        venue_reason = self._venue_reason(pair)
+        if venue_reason:
+            return venue_reason
         created_at = to_float(pair.get("pairCreatedAt"))
         # Sin pairCreatedAt no se puede evaluar la edad: no se descarta por ella.
         if cfg.wallets_min_pair_age_minutes and created_at > 0:

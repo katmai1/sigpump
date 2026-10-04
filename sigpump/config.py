@@ -31,6 +31,7 @@ _KNOWN_KEYS: dict[str, set[str]] = {
         "max_avg_trade_usd",
         "max_price_change_h1_pct",
         "quote_tokens",
+        "dex_ids",
         "min_txns_m5",
         "min_volume_m5_usd",
     },
@@ -107,6 +108,7 @@ _FIELD_TYPES: dict[str, tuple[str, tuple[type, ...]]] = {
     "max_avg_trade_usd": ("[dexscreener].max_avg_trade_usd", _NUMBER),
     "max_price_change_h1_pct": ("[dexscreener].max_price_change_h1_pct", _NUMBER),
     "quote_tokens": ("[dexscreener].quote_tokens", (list,)),
+    "dex_ids": ("[dexscreener].dex_ids", (list,)),
     "min_txns_m5": ("[dexscreener].min_txns_m5", _NUMBER),
     "min_volume_m5_usd": ("[dexscreener].min_volume_m5_usd", _NUMBER),
     "check_token_authorities": ("[solana].check_token_authorities", (bool,)),
@@ -253,6 +255,9 @@ class Config:
     # Monedas contra las que debe cotizar el par (símbolo o dirección del
     # quote). Vacío = cualquiera.
     quote_tokens: list[str] = field(default_factory=list)
+    # dexId de DexScreener en los que debe estar el par (pumpswap, raydium...).
+    # Vacío = cualquiera.
+    dex_ids: list[str] = field(default_factory=list)
     # Actividad mínima de los últimos 5 minutos: por debajo, el arranque es de
     # dos operaciones sueltas.
     min_txns_m5: float = 0.0
@@ -356,6 +361,8 @@ class Config:
             raise ValueError(
                 f"[dexscreener].quote_tokens debe ser una lista de textos ({self.quote_tokens!r})"
             )
+        if not all(isinstance(dex, str) and dex for dex in self.dex_ids):
+            raise ValueError(f"[dexscreener].dex_ids debe ser una lista de textos ({self.dex_ids!r})")
         if self.check_token_authorities and not self.solana_rpc_url:
             raise ValueError("[solana].rpc_url no puede estar vacío con check_token_authorities")
         if not (self.alerts_enabled or self.watch_enabled or self.wallets_enabled):
@@ -526,6 +533,7 @@ class Config:
             max_avg_trade_usd=dexscreener.get("max_avg_trade_usd", 5_000.0),
             max_price_change_h1_pct=dexscreener.get("max_price_change_h1_pct", 1_000.0),
             quote_tokens=dexscreener.get("quote_tokens", []),
+            dex_ids=dexscreener.get("dex_ids", []),
             min_txns_m5=dexscreener.get("min_txns_m5", 0.0),
             min_volume_m5_usd=dexscreener.get("min_volume_m5_usd", 0.0),
             check_token_authorities=solana.get("check_token_authorities", True),

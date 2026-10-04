@@ -35,9 +35,10 @@ El bucle principal ([sigpump/radar.py](sigpump/radar.py)) repite cada
 
 1. Descubre candidatos (boosts + trending + perfiles/takeovers/ads).
 2. Trae sus datos de mercado y aplica filtros duros: moneda contra la que
-   cotiza el par (`quote_tokens`), liquidez, market cap, edad, volumen y txns
-   de 1 hora y de 5 minutos, ratio de ventas (honeypots), tamaño medio de
-   trade (wash trading) y subida máxima en 1h.
+   cotiza el par (`quote_tokens`), dex del pool (`dex_ids`), liquidez,
+   market cap, edad, volumen y txns de 1 hora y de 5 minutos, ratio de
+   ventas (honeypots), tamaño medio de trade (wash trading) y subida máxima
+   en 1h.
 3. Calcula un score 0-100 ([sigpump/config.py](sigpump/config.py)). Premia
    que el movimiento esté empezando: aceleración del volumen y presión
    compradora de los últimos 5 minutos ([sigpump/signals.py](sigpump/signals.py)),
@@ -239,6 +240,8 @@ Secciones disponibles:
 
 - `[dexscreener]` — chain a monitorear y filtros duros sobre los datos de
   DexScreener: `quote_tokens` (contra qué monedas debe cotizar el par),
+  `dex_ids` (en qué dex debe estar el pool: pumpswap, raydium...; también
+  rige para las compras de wallets),
   mínimos de liquidez/volumen/market cap/edad, `min_txns_h1`, `min_txns_m5` y
   `min_volume_m5_usd` (actividad ahora mismo), `min_sell_ratio_h1`
   (honeypots), `max_avg_trade_usd` (wash trading) y `max_price_change_h1_pct`

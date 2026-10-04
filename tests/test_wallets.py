@@ -589,6 +589,23 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(alerter.wallet, [])
         self.assertEqual(radar._tracker.last_sent("wallet", 0), {})
 
+    async def test_descarta_compras_fuera_de_los_dex_y_quote_pedidos(self):
+        sol = {"symbol": "SOL", "address": "So11111111111111111111111111111111111111112"}
+        usdc = {"symbol": "USDC", "address": "EPjF"}
+        casos = (("meteora", sol, "par en meteora"), ("pumpswap", usdc, "par contra USDC"))
+        for dex, quote, motivo in casos:
+            with self.subTest(dex=dex, quote=quote["symbol"]):
+                self.path.unlink(missing_ok=True)
+                radar = self._radar([_buy()], dex_ids=["pumpswap", "raydium"], quote_tokens=["SOL"])
+                alerter = _FakeAlerter()
+                pair = {**_pair("TOK"), "dexId": dex, "quoteToken": quote}
+                await radar._wallets_once(_FakeClient(pairs=[pair]), alerter)
+                self.assertEqual(alerter.wallet, [])
+                [fila] = self._rows()
+                self.assertEqual(fila["enviada"], 0)
+                self.assertIn(motivo, fila["motivo_descarte"])
+                radar._tracker.close()
+
     async def test_sin_pool_en_dexscreener_se_ignora(self):
         radar = self._radar([_buy()])
         alerter = _FakeAlerter()

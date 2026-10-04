@@ -23,6 +23,10 @@ max_price_change_h1_pct = 1000.0
 # Monedas contra las que debe cotizar el par, por símbolo o dirección del
 # quote (en Solana, casi todo cotiza contra SOL). Vacío = cualquiera.
 quote_tokens = ["SOL"]
+# dexId de DexScreener en los que debe estar el par (pumpswap, raydium,
+# meteora, orca...). Si el token tiene varios pools, se usa el de más liquidez
+# entre los que cumplen esto y quote_tokens. Vacío = cualquiera.
+dex_ids = ["pumpswap", "raydium"]
 # Actividad mínima en los últimos 5 minutos: por debajo, el "arranque" son dos
 # operaciones sueltas. 0 = sin filtro.
 min_txns_m5 = 10
@@ -159,6 +163,7 @@ loser_max_median_ret_pct = -30
 # los primeros datos, los pares de menos de 2 h daban una mediana de -67% a
 # 30 min, los que ya subían más de 50% en 1h -25% y los de market cap por
 # debajo de 100k -21%. Lo descartado queda en el registro con su motivo.
+# También se les aplican [dexscreener].dex_ids y quote_tokens.
 min_pair_age_minutes = 120
 max_price_change_h1_pct = 50
 min_market_cap_usd = 100000

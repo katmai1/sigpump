@@ -236,6 +236,8 @@ class TestConfigValidation(unittest.TestCase):
             dict(quote_tokens="SOL"),          # tiene que ser una lista
             dict(quote_tokens=["SOL", ""]),    # ni textos vacíos
             dict(quote_tokens=["SOL", 3]),
+            dict(dex_ids="pumpswap"),
+            dict(dex_ids=["pumpswap", ""]),
             dict(min_txns_m5=-1.0),
             dict(min_volume_m5_usd=-1.0),
             dict(early_require_sustained_seconds=-1.0),
@@ -355,12 +357,14 @@ class TestFromToml(unittest.TestCase):
         config = Config.from_toml(
             self._write(
                 '[dexscreener]\nquote_tokens = ["SOL", "USDC"]\nmin_txns_m5 = 12\n'
+                'dex_ids = ["pumpswap", "raydium"]\n'
                 "min_volume_m5_usd = 750\n"
                 '[solana]\ncheck_token_authorities = false\nrpc_url = "https://rpc.ejemplo"\n'
                 "[watch]\nrequire_sustained_seconds = 45\n"
             )
         )
         self.assertEqual(config.quote_tokens, ["SOL", "USDC"])
+        self.assertEqual(config.dex_ids, ["pumpswap", "raydium"])
         self.assertEqual(config.min_txns_m5, 12)
         self.assertEqual(config.min_volume_m5_usd, 750)
         self.assertFalse(config.check_token_authorities)

@@ -366,6 +366,27 @@ class AlertTracker:
             for row in rows
         }
 
+    def wallet_returns(self) -> dict[str, list[float]]:
+        """Wallet -> rendimiento a 30 min de la primera compra registrada de
+        cada token (avisada o no), solo las ya medidas. Una por token: las
+        compras repetidas del mismo token no deben pesar más."""
+        conn = self._db()
+        if conn is None:
+            return {}
+        try:
+            rows = conn.execute(
+                "SELECT wallet, ret_30m_pct FROM alertas WHERE id IN ("
+                "SELECT MIN(id) FROM alertas WHERE tipo = 'wallet' AND wallet IS NOT NULL "
+                "GROUP BY wallet, token) AND ret_30m_pct IS NOT NULL"
+            ).fetchall()
+        except sqlite3.Error as exc:
+            log.warning("No se pudo leer %s: %s", self._path, exc)
+            return {}
+        returns: dict[str, list[float]] = {}
+        for row in rows:
+            returns.setdefault(row["wallet"], []).append(row["ret_30m_pct"])
+        return returns
+
     def last_sent(self, kind: str, since: float) -> dict[str, float]:
         """Token -> timestamp de su última señal enviada de tipo `kind`
         ('alerta', 'prealerta' o 'wallet') posterior a `since`."""

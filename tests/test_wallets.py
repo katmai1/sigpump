@@ -16,7 +16,6 @@ from sigpump.wallets import (
     LAMPORTS_PER_SOL,
     MAX_TRANSACTION_VERSION,
     MAX_TX_ATTEMPTS,
-    DIRTY_RETRIES,
     WSOL_MINT,
     FollowedWallet,
     WalletBuy,
@@ -27,9 +26,10 @@ from sigpump.wallets import (
     load_temporary_blacklist,
     load_wallets,
     parse_buys,
+    only_transfers,
     ws_url,
 )
-from tests.test_radar import _FakeClient, _config, _pair
+from tests.test_radar import _FakeClient, _config, _hace_horas, _pair
 
 WALLET = "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1"
 OTRA = "7Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j9"
@@ -320,11 +320,27 @@ class _FakeWs:
         self.enviados.append(data)
 
 
-def _aviso(sub, err=None):
+def _aviso(sub, firma="S", err=None, logs=None):
     return {
         "jsonrpc": "2.0", "method": "logsNotification",
-        "params": {"subscription": sub, "result": {"value": {"signature": "S", "err": err}}},
+        "params": {"subscription": sub, "result": {"value": {"signature": firma, "err": err, "logs": logs}}},
     }
+
+
+_LOGS_TRANSFERENCIA = [
+    "Program ComputeBudget111111111111111111111111111111 invoke [1]",
+    "Program ComputeBudget111111111111111111111111111111 success",
+    "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA invoke [1]",
+    "Program log: Instruction: Transfer",
+    "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA success",
+]
+_LOGS_SWAP = [
+    "Program JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4 invoke [1]",
+    "Program log: Instruction: Route",
+    "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA invoke [2]",
+    "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA success",
+    "Program JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4 success",
+]
 
 
 class TestWebSocket(unittest.IsolatedAsyncioTestCase):
@@ -355,17 +371,48 @@ class TestWebSocket(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await watcher.poll(), [])
         self.assertEqual(rpc.llamadas, [])
 
-    async def test_un_aviso_consulta_solo_esa_wallet(self):
+    async def test_un_aviso_lee_solo_esa_transaccion(self):
         rpc = _FakeRpc(firmas=["VIEJA"])
         watcher, _ = await self._conectado(rpc)
         rpc.firmas = ["NUEVA", "VIEJA"]
         rpc.txs["NUEVA"] = _tx(post_tokens=[_saldo(TOKEN, 1)], sol_gastado=1)
-        watcher._handle(_aviso(77))
+        watcher._handle(_aviso(77, "NUEVA"))
         [buy] = await watcher.poll()
         self.assertEqual(buy.signature, "NUEVA")
+        # Directamente por la firma del aviso, sin getSignaturesForAddress.
+        self.assertEqual([(m, p[0]) for m, p in rpc.llamadas], [("getTransaction", "NUEVA")])
         rpc.llamadas.clear()
         self.assertEqual(await watcher.poll(), [])
         self.assertEqual(rpc.llamadas, [])
+
+    async def test_la_pasada_completa_no_relee_lo_avisado(self):
+        rpc = _FakeRpc(firmas=["VIEJA"])
+        watcher, _ = await self._conectado(rpc)
+        rpc.firmas = ["SPAM", "NUEVA", "VIEJA"]
+        rpc.txs["NUEVA"] = _tx(post_tokens=[_saldo(TOKEN, 1)], sol_gastado=1)
+        watcher._handle(_aviso(77, "NUEVA"))
+        watcher._handle(_aviso(77, "SPAM", logs=_LOGS_TRANSFERENCIA))
+        self.assertEqual(len(await watcher.poll()), 1)
+        rpc.llamadas.clear()
+        watcher._next_full_poll = 0.0
+        self.assertEqual(await watcher.poll(), [])
+        self.assertEqual([m for m, _ in rpc.llamadas], ["getSignaturesForAddress"])
+        # Y la marca avanza: la siguiente pasada parte de SPAM.
+        rpc.llamadas.clear()
+        watcher._next_full_poll = 0.0
+        await watcher.poll()
+        self.assertEqual(rpc.llamadas[0][1][1]["until"], "SPAM")
+
+    async def test_un_aviso_repetido_se_lee_una_vez(self):
+        rpc = _FakeRpc(firmas=["VIEJA"])
+        watcher, _ = await self._conectado(rpc)
+        rpc.txs["NUEVA"] = _tx(post_tokens=[_saldo(TOKEN, 1)], sol_gastado=1)
+        watcher._handle(_aviso(77, "NUEVA"))
+        watcher._handle(_aviso(77, "NUEVA"))
+        self.assertEqual(len(await watcher.poll()), 1)
+        watcher._handle(_aviso(77, "NUEVA"))
+        self.assertEqual(await watcher.poll(), [])
+        self.assertEqual(len(rpc.llamadas), 1)
 
     async def test_las_transacciones_fallidas_no_marcan(self):
         rpc = _FakeRpc(firmas=["VIEJA"])
@@ -374,16 +421,44 @@ class TestWebSocket(unittest.IsolatedAsyncioTestCase):
         await watcher.poll()
         self.assertEqual(rpc.llamadas, [])
 
+    async def test_las_transferencias_no_marcan(self):
+        rpc = _FakeRpc(firmas=["VIEJA"])
+        watcher, _ = await self._conectado(rpc)
+        watcher._handle(_aviso(77, logs=_LOGS_TRANSFERENCIA))
+        await watcher.poll()
+        self.assertEqual(rpc.llamadas, [])
+
+    async def test_un_swap_marca(self):
+        rpc = _FakeRpc(firmas=["VIEJA"])
+        watcher, _ = await self._conectado(rpc)
+        watcher._handle(_aviso(77, logs=_LOGS_SWAP))
+        await watcher.poll()
+        self.assertEqual([m for m, _ in rpc.llamadas], ["getTransaction"])
+
+    def test_logs_truncados_no_se_filtran(self):
+        self.assertTrue(only_transfers(_LOGS_TRANSFERENCIA))
+        self.assertFalse(only_transfers(_LOGS_SWAP))
+        self.assertFalse(only_transfers(_LOGS_TRANSFERENCIA + ["Log truncated"]))
+        self.assertFalse(only_transfers(None))
+        self.assertFalse(only_transfers([]))
+
     async def test_si_el_rpc_va_por_detras_reintenta_unas_vueltas(self):
         rpc = _FakeRpc(firmas=["VIEJA"])
         watcher, _ = await self._conectado(rpc)
-        watcher._handle(_aviso(77))
-        # El aviso llegó pero getSignaturesForAddress aún no tiene la firma.
-        for _ in range(DIRTY_RETRIES):
+        watcher._handle(_aviso(77, "NUEVA"))
+        # El aviso llegó pero getTransaction aún no tiene la transacción.
+        for _ in range(MAX_TX_ATTEMPTS - 1):
+            self.assertEqual(await watcher.poll(), [])
+        rpc.txs["NUEVA"] = _tx(post_tokens=[_saldo(TOKEN, 1)], sol_gastado=1)
+        self.assertEqual(len(await watcher.poll()), 1)
+
+    async def test_si_el_rpc_nunca_la_tiene_se_salta(self):
+        rpc = _FakeRpc(firmas=["VIEJA"])
+        watcher, _ = await self._conectado(rpc)
+        watcher._handle(_aviso(77, "NUEVA"))
+        for _ in range(MAX_TX_ATTEMPTS + 2):
             await watcher.poll()
-        self.assertEqual(len(rpc.llamadas), DIRTY_RETRIES)
-        await watcher.poll()
-        self.assertEqual(len(rpc.llamadas), DIRTY_RETRIES)
+        self.assertEqual(len(rpc.llamadas), MAX_TX_ATTEMPTS)
 
     async def test_desconectado_consulta_todas(self):
         rpc = _FakeRpc(firmas=["VIEJA"])
@@ -412,7 +487,7 @@ class TestWebSocket(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ws.enviados[-1]["method"], "logsUnsubscribe")
         self.assertEqual(ws.enviados[-1]["params"], [77])
         watcher._handle(_aviso(77))
-        self.assertEqual(watcher._dirty, {})
+        self.assertEqual(watcher._pending, {})
 
 class TestTransaccionesQueFallan(unittest.IsolatedAsyncioTestCase):
     setUp = TestWalletWatcher.setUp
@@ -642,10 +717,10 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         [(_, signal)] = alerter.wallet
         self.assertEqual((signal.buy.wallet, signal.others), (OTRA, ()))
 
-    async def test_wallet_hiperactiva_va_a_la_lista_negra_una_hora(self):
+    async def test_wallet_hiperactiva_va_a_la_lista_negra(self):
         tmp = self.path.parent
         wallets_txt, negra = tmp / "wallets.txt", tmp / "negra.txt"
-        wallets_txt.write_text(f"{WALLET}  # ballena\n", encoding="utf-8")
+        wallets_txt.write_text(f"{WALLET}  # ballena\n{OTRA}  # buena\n", encoding="utf-8")
         compras = [_buy(mint=f"T{i}") for i in range(4)]
         radar = self._radar(wallets_blacklist_file=str(negra), wallets_max_tokens_per_hour=3)
         watcher = WalletWatcher(None, "http://rpc", wallets_txt, 0.1, negra)
@@ -653,12 +728,64 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         watcher.poll = AsyncMock(return_value=compras)
         radar._wallet_watcher = watcher
         await radar._wallets_once(_FakeClient(pairs=[_pair(f"T{i}") for i in range(4)]), _FakeAlerter())
-        self.assertTrue(watcher.banned(WALLET))
-        self.assertAlmostEqual(load_temporary_blacklist(negra)[WALLET], time.time() + 3600, delta=5)
+        self.assertIn(WALLET, load_blacklist(negra))
         self.assertEqual(negra.read_text(encoding="utf-8").count(WALLET), 1)
-        self.assertIn("ballena: 4 tokens en 1h", negra.read_text(encoding="utf-8"))
+        self.assertIn("ballena: hiperactiva, 4 tokens en 1h", negra.read_text(encoding="utf-8"))
         watcher.reload()
-        self.assertEqual(list(watcher.wallets), [WALLET])
+        self.assertEqual(list(watcher.wallets), [OTRA])
+        self.assertEqual(wallets_txt.read_text(encoding="utf-8"), f"{OTRA}  # buena\n")
+
+    async def test_wallet_que_pierde_va_a_la_lista_negra(self):
+        tmp = self.path.parent
+        wallets_txt, negra = tmp / "wallets.txt", tmp / "negra.txt"
+        wallets_txt.write_text(f"{WALLET}  # ballena\n{OTRA}  # buena\n", encoding="utf-8")
+        compras = [_buy(mint=f"T{i}") for i in range(3)] + [_buy(wallet=OTRA, mint=f"T{i}") for i in range(3)]
+        radar = self._radar(
+            compras, wallets_blacklist_file=str(negra),
+            wallets_loser_min_signals=3, wallets_loser_max_median_ret_pct=-30,
+        )
+        await radar._wallets_once(_FakeClient(pairs=[_pair(f"T{i}") for i in range(3)]), _FakeAlerter())
+        rows = self._rows()
+        for row, ret in zip(rows, [-50, -40, 10, -50, 20, 30]):
+            radar._tracker.update_row(row["id"], {"ret_30m_pct": ret})
+        radar._wallet_watcher = WalletWatcher(None, "http://rpc", wallets_txt, 0.1, negra)
+        radar._wallet_watcher.reload()
+        radar._blacklist_losers()
+        self.assertEqual(list(radar._wallet_watcher.wallets), [OTRA])
+        self.assertIn("ballena: mediana -40% a 30 min en 3 tokens", negra.read_text(encoding="utf-8"))
+
+    async def test_wallet_con_pocas_senales_no_se_juzga(self):
+        tmp = self.path.parent
+        wallets_txt, negra = tmp / "wallets.txt", tmp / "negra.txt"
+        wallets_txt.write_text(f"{WALLET}  # ballena\n", encoding="utf-8")
+        radar = self._radar(
+            [_buy()], wallets_blacklist_file=str(negra),
+            wallets_loser_min_signals=3, wallets_loser_max_median_ret_pct=-30,
+        )
+        await radar._wallets_once(_FakeClient(pairs=[_pair("TOK")]), _FakeAlerter())
+        radar._tracker.update_row(self._rows()[0]["id"], {"ret_30m_pct": -90})
+        radar._wallet_watcher = WalletWatcher(None, "http://rpc", wallets_txt, 0.1, negra)
+        radar._wallet_watcher.reload()
+        radar._blacklist_losers()
+        self.assertEqual(list(radar._wallet_watcher.wallets), [WALLET])
+
+    async def test_filtros_del_par_para_wallets(self):
+        casos = [
+            (_pair("TOK", created_at=_hace_horas(0.5)), "par creado hace 30 min"),
+            (_pair("TOK", created_at=_hace_horas(5), change=80), "cambio 1h +80% > 50%"),
+            ({**_pair("TOK", created_at=_hace_horas(5)), "marketCap": 50_000}, "market cap $50,000 < $100,000"),
+            (_pair("TOK", created_at=_hace_horas(5), change=10), ""),
+        ]
+        for pair, motivo in casos:
+            with self.subTest(motivo=motivo):
+                radar = self._radar(
+                    [_buy()], wallets_min_pair_age_minutes=120,
+                    wallets_max_price_change_h1_pct=50, wallets_min_market_cap_usd=100_000,
+                )
+                alerter = _FakeAlerter()
+                await radar._wallets_once(_FakeClient(pairs=[pair]), alerter)
+                self.assertEqual(self._rows()[-1]["motivo_descarte"] or "", motivo)
+                self.assertEqual(len(alerter.wallet), 0 if motivo else 1)
 
     async def test_wallet_que_compra_un_rug_va_a_la_lista_negra(self):
         tmp = self.path.parent

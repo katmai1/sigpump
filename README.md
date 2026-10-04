@@ -140,12 +140,18 @@ un solo aviso por token en esa ventana; solo se vuelve a avisar, marcado como
 🔁 actualización, si se suman `realert_new_wallets` wallets más que en el
 último aviso. `max_tokens_per_hour` silencia las wallets que compran de todo
 (bots o degens): ni avisan ni cuentan para la confluencia de las demás, y
-con `blacklist_file` pasan 1 h en la lista negra sin consultarse (siguen en
-el fichero de wallets y vuelven a seguirse al acabar).
+con `blacklist_file` entran en la lista negra.
 
-Con `blacklist_file`, las wallets cuya compra cae `rug_drop_pct` (90% por
-defecto) en el seguimiento entran solas en la lista negra: se quitan del
-fichero de wallets y, si se vuelven a añadir, se quitan otra vez.
+Con `blacklist_file`, también entran solas en la lista negra las wallets cuya
+compra cae `rug_drop_pct` (90% por defecto) en el seguimiento, y las que con
+al menos `loser_min_signals` tokens medidos tienen una mediana a 30 min de
+`loser_max_median_ret_pct` o peor. Se quitan del fichero de wallets y, si se
+vuelven a añadir, se quitan otra vez.
+
+`min_pair_age_minutes`, `max_price_change_h1_pct` y `min_market_cap_usd`
+descartan las compras en pares recién creados, que ya subieron mucho en la
+última hora o de market cap pequeño: con los primeros datos eran las que
+casi siempre perdían. Quedan en el registro con su motivo.
 
 Para recibir solo los avisos de wallets, desactivá las alertas
 (`[radar].alerts_enabled = false`) y las prealertas (`[watch].enabled = false`).
@@ -260,7 +266,9 @@ Secciones disponibles:
   wallet y token, ventana de confluencia, `min_wallets` (cuántas wallets
   tienen que coincidir en un token para avisar), un aviso por token
   (`token_cooldown_minutes`, `realert_new_wallets`), tope de actividad
-  (`max_tokens_per_hour`) y lista negra (`blacklist_file`, `rug_drop_pct`).
+  (`max_tokens_per_hour`), lista negra (`blacklist_file`, `rug_drop_pct`,
+  `loser_min_signals`, `loser_max_median_ret_pct`) y filtros del par
+  (`min_pair_age_minutes`, `max_price_change_h1_pct`, `min_market_cap_usd`).
 - `[scoring]` — `late_penalty_start_h1_pct` y `late_penalty_end_h1_pct`:
   entre esos dos cambios de 1h el score se reduce linealmente hasta 0.
 - `[scoring_weights]` — pesos relativos (deben sumar ~1.0) de cada

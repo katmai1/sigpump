@@ -79,6 +79,11 @@ _KNOWN_KEYS: dict[str, set[str]] = {
         "max_tokens_per_hour",
         "blacklist_file",
         "rug_drop_pct",
+        "loser_min_signals",
+        "loser_max_median_ret_pct",
+        "min_pair_age_minutes",
+        "max_price_change_h1_pct",
+        "min_market_cap_usd",
         "websocket",
         "ws_url",
         "full_poll_minutes",
@@ -142,6 +147,11 @@ _FIELD_TYPES: dict[str, tuple[str, tuple[type, ...]]] = {
     "wallets_max_tokens_per_hour": ("[wallets].max_tokens_per_hour", (int,)),
     "wallets_blacklist_file": ("[wallets].blacklist_file", (str,)),
     "wallets_rug_drop_pct": ("[wallets].rug_drop_pct", _NUMBER),
+    "wallets_loser_min_signals": ("[wallets].loser_min_signals", (int,)),
+    "wallets_loser_max_median_ret_pct": ("[wallets].loser_max_median_ret_pct", _NUMBER),
+    "wallets_min_pair_age_minutes": ("[wallets].min_pair_age_minutes", _NUMBER),
+    "wallets_max_price_change_h1_pct": ("[wallets].max_price_change_h1_pct", _NUMBER),
+    "wallets_min_market_cap_usd": ("[wallets].min_market_cap_usd", _NUMBER),
     "wallets_websocket": ("[wallets].websocket", (bool,)),
     "wallets_ws_url": ("[wallets].ws_url", (str,)),
     "wallets_full_poll_minutes": ("[wallets].full_poll_minutes", _NUMBER),
@@ -295,7 +305,8 @@ class Config:
     wallets_token_cooldown_minutes: float = 0.0
     wallets_realert_new_wallets: int = 2
     # Una wallet que compra más tokens distintos que esto en una hora no
-    # avisa ni cuenta para la confluencia de otras. 0 = sin tope.
+    # avisa ni cuenta para la confluencia de otras, y con blacklist_file va a
+    # la lista negra. 0 = sin tope.
     wallets_max_tokens_per_hour: int = 0
     # Lista negra: sus wallets se quitan del fichero y no se vuelven a seguir.
     # Vacío = sin lista negra.
@@ -303,6 +314,17 @@ class Config:
     # Una wallet cuya compra cae este % (rug) en el seguimiento entra en la
     # lista negra sola. 0 = no hacerlo.
     wallets_rug_drop_pct: float = 90.0
+    # Una wallet con al menos loser_min_signals tokens registrados cuya
+    # mediana a 30 min es loser_max_median_ret_pct o peor entra en la lista
+    # negra sola. 0 = no hacerlo.
+    wallets_loser_min_signals: int = 0
+    wallets_loser_max_median_ret_pct: float = -30.0
+    # Filtros del par para los avisos de wallets (0 = sin filtro): los pares
+    # recién creados, los que ya subieron mucho en 1h y los de market cap
+    # pequeño daban casi siempre pérdidas.
+    wallets_min_pair_age_minutes: float = 0.0
+    wallets_max_price_change_h1_pct: float = 0.0
+    wallets_min_market_cap_usd: float = 0.0
     # Avisos de actividad por el WebSocket del RPC: solo se consultan las
     # wallets que hicieron algo. ws_url vacío = el de rpc_url con wss://.
     wallets_websocket: bool = True
@@ -357,6 +379,13 @@ class Config:
             raise ValueError(
                 f"[wallets].rug_drop_pct debe estar entre 0 y 100 ({self.wallets_rug_drop_pct})"
             )
+        if self.wallets_loser_min_signals < 0:
+            raise ValueError(
+                f"[wallets].loser_min_signals debe ser >= 0 ({self.wallets_loser_min_signals})"
+            )
+        for name in ("min_pair_age_minutes", "max_price_change_h1_pct", "min_market_cap_usd"):
+            if getattr(self, f"wallets_{name}") < 0:
+                raise ValueError(f"[wallets].{name} debe ser >= 0 ({getattr(self, f'wallets_{name}')})")
         if self.wallets_enabled and not self.wallets_file:
             raise ValueError("[wallets].file no puede estar vacío con [wallets].enabled")
         if self.wallets_full_poll_minutes <= 0:
@@ -535,6 +564,11 @@ class Config:
             wallets_max_tokens_per_hour=wallets.get("max_tokens_per_hour", 0),
             wallets_blacklist_file=wallets.get("blacklist_file", ""),
             wallets_rug_drop_pct=wallets.get("rug_drop_pct", 90.0),
+            wallets_loser_min_signals=wallets.get("loser_min_signals", 0),
+            wallets_loser_max_median_ret_pct=wallets.get("loser_max_median_ret_pct", -30.0),
+            wallets_min_pair_age_minutes=wallets.get("min_pair_age_minutes", 0.0),
+            wallets_max_price_change_h1_pct=wallets.get("max_price_change_h1_pct", 0.0),
+            wallets_min_market_cap_usd=wallets.get("min_market_cap_usd", 0.0),
             wallets_websocket=wallets.get("websocket", True),
             wallets_ws_url=wallets.get("ws_url", ""),
             wallets_full_poll_minutes=wallets.get("full_poll_minutes", 10.0),

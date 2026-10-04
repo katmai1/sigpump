@@ -10,6 +10,7 @@ import time
 import asyncio
 import dataclasses
 import logging
+import statistics
 from pathlib import Path
 
 import aiohttp  # type: ignore[import-not-found]
@@ -58,8 +59,6 @@ CANDLE_FEATURES_TIMEOUT_SECONDS = 10.0
 BONDING_CURVE_DEX_IDS = {"pumpfun", "meteoradbc", "launchlab", "moonshot"}
 # Ventana del tope [wallets].max_tokens_per_hour.
 WALLET_ACTIVITY_SECONDS = 3600
-# Tiempo que pasa en la lista negra una wallet que supera ese tope.
-HYPERACTIVE_BLACKLIST_SECONDS = 3600
 
 
 def _liquidity_usd(pair: dict) -> float:
@@ -844,21 +843,63 @@ class MemecoinRadar:
                 continue
             log.warning("Wallet %s a la lista negra: %s", info.label, reason)
 
+    def _blacklist_losers(self) -> None:
+        """Mete en la lista negra las wallets seguidas cuyas compras, con al
+        menos [wallets].loser_min_signals tokens medidos, tienen una mediana a
+        30 min de loser_max_median_ret_pct o peor: copiarlas hace perder."""
+        watcher = self._wallet_watcher
+        cfg = self._config
+        if not (self._tracker and watcher and cfg.wallets_loser_min_signals and cfg.wallets_blacklist_file):
+            return
+        for wallet, returns in self._tracker.wallet_returns().items():
+            info = watcher.wallets.get(wallet)
+            if info is None or len(returns) < cfg.wallets_loser_min_signals:
+                continue
+            median = statistics.median(returns)
+            if median > cfg.wallets_loser_max_median_ret_pct:
+                continue
+            reason = f"mediana {median:+.0f}% a 30 min en {len(returns)} tokens"
+            try:
+                watcher.blacklist(wallet, f"{info.label}: {reason}")
+            except OSError as exc:
+                log.warning("No se pudo añadir %s a la lista negra: %s", info.label, exc)
+                continue
+            log.warning("Wallet %s a la lista negra: %s", info.label, reason)
+
+    def _wallet_pair_rejection(self, pair: dict) -> str | None:
+        """Motivo para no avisar de una compra de wallet por cómo está el par
+        ([wallets].min_pair_age_minutes, max_price_change_h1_pct y
+        min_market_cap_usd), o None si pasa."""
+        cfg = self._config
+        created_at = to_float(pair.get("pairCreatedAt"))
+        # Sin pairCreatedAt no se puede evaluar la edad: no se descarta por ella.
+        if cfg.wallets_min_pair_age_minutes and created_at > 0:
+            age_minutes = (time.time() - created_at / 1000) / 60
+            if age_minutes < cfg.wallets_min_pair_age_minutes:
+                return f"par creado hace {age_minutes:.0f} min"
+        change_h1 = to_float((pair.get("priceChange") or {}).get("h1"))
+        if cfg.wallets_max_price_change_h1_pct and change_h1 > cfg.wallets_max_price_change_h1_pct:
+            return f"cambio 1h {change_h1:+,.0f}% > {cfg.wallets_max_price_change_h1_pct:,.0f}%"
+        market_cap_usd = to_float(pair.get("marketCap")) or to_float(pair.get("fdv"))
+        if market_cap_usd < cfg.wallets_min_market_cap_usd:
+            return f"market cap ${market_cap_usd:,.0f} < ${cfg.wallets_min_market_cap_usd:,.0f}"
+        return None
+
     def _blacklist_hyperactive(self, buy: WalletBuy) -> None:
-        """Mete en la lista negra durante HYPERACTIVE_BLACKLIST_SECONDS la
-        wallet de `buy` si pasó de [wallets].max_tokens_per_hour."""
+        """Mete en la lista negra la wallet de `buy` si pasó de
+        [wallets].max_tokens_per_hour: compra de todo y no sirve copiarla."""
         watcher = self._wallet_watcher
         if not (watcher and self._config.wallets_blacklist_file and self._hyperactive(buy.wallet)):
             return
-        if watcher.banned(buy.wallet):
+        if buy.wallet not in watcher.wallets:
             return
-        reason = f"{self._tokens_last_hour(buy.wallet)} tokens en 1h"
+        reason = f"hiperactiva, {self._tokens_last_hour(buy.wallet)} tokens en 1h"
         try:
-            watcher.blacklist(buy.wallet, f"{buy.label}: {reason}", seconds=HYPERACTIVE_BLACKLIST_SECONDS)
+            watcher.blacklist(buy.wallet, f"{buy.label}: {reason}")
         except OSError as exc:
             log.warning("No se pudo añadir %s a la lista negra: %s", buy.label, exc)
             return
-        log.warning("Wallet %s a la lista negra durante 1h: %s", buy.label, reason)
+        log.warning("Wallet %s a la lista negra: %s", buy.label, reason)
 
     def _confluence(self, buy: WalletBuy) -> tuple[str, ...]:
         """Anota la compra y devuelve las etiquetas de las otras wallets
@@ -896,6 +937,7 @@ class MemecoinRadar:
             except Exception:
                 log.exception("Error actualizando el registro de alertas")
         self._blacklist_ruggers()
+        self._blacklist_losers()
         buys = await self._wallet_watcher.poll()
         if not buys:
             return
@@ -934,7 +976,7 @@ class MemecoinRadar:
             # cada compra repetida del mismo token peligroso.
             self._wallet_alerted[key] = time.time()
             score = self._score(pair, self._boosted)
-            reason = unsafe.get(buy.mint)
+            reason = unsafe.get(buy.mint) or self._wallet_pair_rejection(pair)
             wallets = 1 + len(signal.others)
             if not reason and self._hyperactive(buy.wallet):
                 reason = f"wallet hiperactiva ({self._tokens_last_hour(buy.wallet)} tokens en 1h)"

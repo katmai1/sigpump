@@ -138,8 +138,8 @@ min_wallets = 1
 token_cooldown_minutes = 0
 realert_new_wallets = 2
 # Una wallet que compra más tokens distintos que esto en una hora (un bot o un
-# degen que entra en todo) no avisa ni cuenta para la confluencia. 0 = sin tope.
-# Con blacklist_file, además pasa 1h en la lista negra sin consultarse.
+# degen que entra en todo) no avisa ni cuenta para la confluencia y, con
+# blacklist_file, va a la lista negra. 0 = sin tope.
 max_tokens_per_hour = 0
 # Lista negra: sus wallets se quitan de `file` y no se vuelven a seguir.
 # Mismo formato que `file`. Las entradas cuyo motivo empieza por
@@ -149,9 +149,23 @@ blacklist_file = ""
 # Una wallet con una compra que cae este % en el seguimiento (rug) entra sola
 # en la lista negra. 0 = no hacerlo.
 rug_drop_pct = 90
-# Avisos de actividad por el WebSocket del RPC (logsSubscribe): solo se
-# consultan las wallets que acaban de hacer algo, en vez de todas en cada
-# vuelta. Si se cae, se vuelve a consultar todas hasta que reconecta.
+# Lista negra automática por resultados: una wallet con al menos
+# loser_min_signals tokens medidos cuya mediana a 30 min es
+# loser_max_median_ret_pct o peor entra sola en la lista negra (requiere
+# blacklist_file y alert_log_path). 0 = no hacerlo.
+loser_min_signals = 5
+loser_max_median_ret_pct = -30
+# Filtros del par para avisar de una compra de wallet (0 = sin filtro). Con
+# los primeros datos, los pares de menos de 2 h daban una mediana de -67% a
+# 30 min, los que ya subían más de 50% en 1h -25% y los de market cap por
+# debajo de 100k -21%. Lo descartado queda en el registro con su motivo.
+min_pair_age_minutes = 120
+max_price_change_h1_pct = 50
+min_market_cap_usd = 100000
+# Avisos de actividad por el WebSocket del RPC (logsSubscribe): solo se leen
+# las transacciones que avisa (sin las transferencias simples), en vez de
+# consultar todas las wallets en cada vuelta. Si se cae, se vuelve a
+# consultar todas hasta que reconecta.
 websocket = true
 # Vacío = el de [solana].rpc_url cambiando https:// por wss://.
 ws_url = ""

@@ -442,6 +442,7 @@ class MemecoinRadar:
                 Path(self._config.wallets_blacklist_file) if self._config.wallets_blacklist_file else None,
                 self._config.wallets_full_poll_minutes * 60,
                 self._config.wallets_max_txs_per_hour,
+                self._config.wallets_max_inactive_days * 86400,
             )
             loops = [
                 self._loop(

@@ -72,6 +72,12 @@ leerlas) entra en la lista negra con `blacklist_file`. Cada transacción
 leída es una consulta al RPC, y un bot de trading con cientos por minuto
 agota los créditos de Helius en horas.
 
+`max_inactive_days` (30 por defecto) manda a la lista negra, con
+`blacklist_file`, las wallets abandonadas: las que llevan más de esos días
+sin ninguna transacción. Se mira al empezar a seguirlas (por la hora de su
+última transacción) y en cada pasada completa; una sin historial cuenta
+desde que se empieza a seguir.
+
 Con `blacklist_file`, también entran solas en la lista negra las wallets cuya
 compra cae `rug_drop_pct` (90% por defecto) en el seguimiento, y las que con
 al menos `loser_min_signals` tokens medidos tienen una mediana a 30 min de
@@ -165,7 +171,7 @@ Secciones disponibles:
   wallet y token, ventana de confluencia, `min_wallets` (cuántas wallets
   tienen que coincidir en un token para avisar), un aviso por token
   (`token_cooldown_minutes`, `realert_new_wallets`), tope de actividad
-  (`max_tokens_per_hour`), bots (`max_txs_per_hour`), lista negra (`blacklist_file`, `rug_drop_pct`,
+  (`max_tokens_per_hour`), bots (`max_txs_per_hour`), abandonadas (`max_inactive_days`), lista negra (`blacklist_file`, `rug_drop_pct`,
   `loser_min_signals`, `loser_max_median_ret_pct`) y filtros del par
   (`min_pair_age_minutes`, `max_price_change_h1_pct`, `min_market_cap_usd`).
 - `[telegram]` — `bot_token`, `chat_id` y opcionalmente `message_thread_id`

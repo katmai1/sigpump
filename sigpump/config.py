@@ -31,6 +31,7 @@ _KNOWN_KEYS: dict[str, set[str]] = {
         "realert_new_wallets",
         "max_tokens_per_hour",
         "max_txs_per_hour",
+        "max_inactive_days",
         "blacklist_file",
         "rug_drop_pct",
         "loser_min_signals",
@@ -65,6 +66,7 @@ _FIELD_TYPES: dict[str, tuple[str, tuple[type, ...]]] = {
     "wallets_realert_new_wallets": ("[wallets].realert_new_wallets", (int,)),
     "wallets_max_tokens_per_hour": ("[wallets].max_tokens_per_hour", (int,)),
     "wallets_max_txs_per_hour": ("[wallets].max_txs_per_hour", (int,)),
+    "wallets_max_inactive_days": ("[wallets].max_inactive_days", _NUMBER),
     "wallets_blacklist_file": ("[wallets].blacklist_file", (str,)),
     "wallets_rug_drop_pct": ("[wallets].rug_drop_pct", _NUMBER),
     "wallets_loser_min_signals": ("[wallets].loser_min_signals", (int,)),
@@ -135,6 +137,9 @@ class Config:
     # Una wallet con más transacciones que esto en una hora es un bot: con
     # blacklist_file va a la lista negra antes de leerlas. 0 = sin tope.
     wallets_max_txs_per_hour: int = 0
+    # Una wallet sin ninguna transacción en estos días está abandonada: con
+    # blacklist_file va a la lista negra. 0 = no hacerlo.
+    wallets_max_inactive_days: float = 30.0
     # Lista negra: sus wallets se quitan del fichero y no se vuelven a seguir.
     # Vacío = sin lista negra.
     wallets_blacklist_file: str = ""
@@ -201,6 +206,10 @@ class Config:
         if self.wallets_max_txs_per_hour < 0:
             raise ValueError(
                 f"[wallets].max_txs_per_hour debe ser >= 0 ({self.wallets_max_txs_per_hour})"
+            )
+        if self.wallets_max_inactive_days < 0:
+            raise ValueError(
+                f"[wallets].max_inactive_days debe ser >= 0 ({self.wallets_max_inactive_days})"
             )
         if not 0 <= self.wallets_rug_drop_pct <= 100:
             raise ValueError(
@@ -277,6 +286,7 @@ class Config:
             wallets_realert_new_wallets=wallets.get("realert_new_wallets", 2),
             wallets_max_tokens_per_hour=wallets.get("max_tokens_per_hour", 0),
             wallets_max_txs_per_hour=wallets.get("max_txs_per_hour", 0),
+            wallets_max_inactive_days=wallets.get("max_inactive_days", 30.0),
             wallets_blacklist_file=wallets.get("blacklist_file", ""),
             wallets_rug_drop_pct=wallets.get("rug_drop_pct", 90.0),
             wallets_loser_min_signals=wallets.get("loser_min_signals", 0),

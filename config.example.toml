@@ -66,6 +66,9 @@ max_tokens_per_hour = 0
 # trading hacen cientos por minuto): con blacklist_file va a la lista negra
 # antes de leerlas, porque cada una cuesta una consulta al RPC. 0 = sin tope.
 max_txs_per_hour = 300
+# Una wallet sin ninguna transacción en estos días está abandonada: con
+# blacklist_file va a la lista negra. 0 = no hacerlo.
+max_inactive_days = 30
 # Lista negra: sus wallets se quitan de `file` y no se vuelven a seguir.
 # Mismo formato que `file`. Las entradas cuyo motivo empieza por
 # "hasta <fecha ISO>" son temporales: la wallet se deja de consultar hasta

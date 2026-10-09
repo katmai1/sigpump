@@ -209,11 +209,13 @@ class _FakeResponse:
 
 class _FakeRpc:
     """Responde getSignaturesForAddress con `firmas` (de la más nueva a la más
-    vieja, cortadas en `until`) y getTransaction con `txs`."""
+    vieja, cortadas en `until`, con su hora de `horas` si la tienen) y
+    getTransaction con `txs`."""
 
-    def __init__(self, firmas=(), txs=None):
+    def __init__(self, firmas=(), txs=None, horas=None):
         self.firmas = list(firmas)
         self.txs = txs or {}
+        self.horas = horas or {}
         self.llamadas: list[tuple[str, list]] = []
 
     def post(self, url, json=None, timeout=None):
@@ -224,7 +226,10 @@ class _FakeRpc:
             firmas = self.firmas
             if "until" in options:
                 firmas = firmas[: firmas.index(options["until"])]
-            result = [{"signature": f, "err": None} for f in firmas[: options["limit"]]]
+            result = [
+                {"signature": f, "err": None, "blockTime": self.horas.get(f)}
+                for f in firmas[: options["limit"]]
+            ]
         else:
             result = self.txs.get(params[0])
         return _FakeResponse({"jsonrpc": "2.0", "result": result})
@@ -407,6 +412,48 @@ class TestWebSocket(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await watcher.poll(), [])
         self.assertEqual([m for m, _ in rpc.llamadas], ["getSignaturesForAddress"])
         self.assertIn(WALLET, load_blacklist(negra))
+
+    async def test_abandonada_a_la_lista_negra(self):
+        negra = self.path.with_name("negra.txt")
+        rpc = _FakeRpc(firmas=["VIEJA"], horas={"VIEJA": time.time() - 31 * 86400})
+        watcher = WalletWatcher(rpc, "http://rpc", self.path, 0.1, negra, max_inactive_seconds=30 * 86400)
+        await watcher.poll()
+        self.assertEqual(watcher.wallets, {})
+        self.assertIn(WALLET, load_blacklist(negra))
+        self.assertIn("abandonada, 31 días sin actividad", negra.read_text(encoding="utf-8"))
+
+    async def test_activa_hace_poco_se_sigue(self):
+        negra = self.path.with_name("negra.txt")
+        rpc = _FakeRpc(firmas=["VIEJA"], horas={"VIEJA": time.time() - 29 * 86400})
+        watcher = WalletWatcher(rpc, "http://rpc", self.path, 0.1, negra, max_inactive_seconds=30 * 86400)
+        await watcher.poll()
+        self.assertIn(WALLET, watcher.wallets)
+
+    async def test_se_abandona_mientras_se_sigue(self):
+        negra = self.path.with_name("negra.txt")
+        rpc = _FakeRpc(firmas=["VIEJA"])
+        watcher = WalletWatcher(rpc, "http://rpc", self.path, 0.1, negra, max_inactive_seconds=30 * 86400)
+        await watcher.poll()
+        self.assertIn(WALLET, watcher.wallets)
+        watcher._last_active[WALLET] = time.time() - 31 * 86400
+        await watcher.poll()
+        self.assertIn(WALLET, load_blacklist(negra))
+
+    async def test_un_aviso_del_websocket_cuenta_como_actividad(self):
+        negra = self.path.with_name("negra.txt")
+        rpc = _FakeRpc(firmas=["VIEJA"])
+        watcher, _ = await self._conectado(rpc, blacklist_path=negra, max_inactive_seconds=30 * 86400)
+        watcher._last_active[WALLET] = time.time() - 31 * 86400
+        watcher._handle(_aviso(77, "SPAM", logs=_LOGS_TRANSFERENCIA))
+        watcher._next_full_poll = 0.0
+        await watcher.poll()
+        self.assertIn(WALLET, watcher.wallets)
+
+    async def test_abandonada_sin_lista_negra_se_sigue(self):
+        rpc = _FakeRpc(firmas=["VIEJA"], horas={"VIEJA": time.time() - 365 * 86400})
+        watcher = WalletWatcher(rpc, "http://rpc", self.path, 0.1, max_inactive_seconds=30 * 86400)
+        await watcher.poll()
+        self.assertIn(WALLET, watcher.wallets)
 
     def test_url_del_websocket(self):
         self.assertEqual(ws_url("https://mainnet.helius-rpc.com/?api-key=K"), "wss://mainnet.helius-rpc.com/?api-key=K")

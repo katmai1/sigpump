@@ -353,6 +353,7 @@ class WalletWatcher:
         blacklist_path: Path | None = None,
         full_poll_seconds: float = 600.0,
         max_txs_per_hour: int = 0,
+        max_inactive_seconds: float = 0.0,
     ):
         self._session = session
         self._rpc_url = rpc_url
@@ -386,6 +387,10 @@ class WalletWatcher:
         # detectar los bots antes de gastar una consulta en cada una. 0 = sin tope.
         self._max_txs_per_hour = max_txs_per_hour
         self._activity: dict[str, dict[str, float]] = {}
+        # Wallet -> hora de su última transacción conocida, para mandar a la
+        # lista negra las abandonadas. 0 = no hacerlo.
+        self._max_inactive_seconds = max_inactive_seconds
+        self._last_active: dict[str, float] = {}
         # Estado de la conexión actual: wallet -> id de su suscripción (None
         # mientras no llega la respuesta), id de suscripción -> wallet, e id
         # de petición -> wallet de las suscripciones pedidas.
@@ -425,6 +430,7 @@ class WalletWatcher:
             self._banned_until[address] = until
         self._last_signature.pop(address, None)
         self._activity.pop(address, None)
+        self._last_active.pop(address, None)
         # Fuerza la relectura, que la quita también del fichero de wallets.
         self._mtime = None
 
@@ -445,6 +451,27 @@ class WalletWatcher:
             return False
         label = self._wallets[wallet].label
         reason = f"bot, {len(recent)} tx en 1h"
+        try:
+            self.blacklist(wallet, f"{label}: {reason}")
+        except OSError as exc:
+            log.warning("No se pudo añadir %s a la lista negra: %s", label, exc)
+            return False
+        self._pending.pop(wallet, None)
+        log.warning("Wallet %s a la lista negra: %s", label, reason)
+        return True
+
+    def _blacklist_abandoned(self, wallet: str) -> bool:
+        """Mete `wallet` en la lista negra si lleva más de max_inactive_seconds
+        sin ninguna transacción: está abandonada y solo gasta consultas.
+        True si la quitó."""
+        last = self._last_active.get(wallet)
+        if not self._max_inactive_seconds or self._blacklist_path is None or last is None:
+            return False
+        idle = time.time() - last
+        if idle <= self._max_inactive_seconds or wallet not in self._wallets:
+            return False
+        label = self._wallets[wallet].label
+        reason = f"abandonada, {idle / 86400:.0f} días sin actividad"
         try:
             self.blacklist(wallet, f"{label}: {reason}")
         except OSError as exc:
@@ -478,6 +505,8 @@ class WalletWatcher:
         self._wallets = wallets
         for gone in set(self._last_signature) - set(wallets):
             del self._last_signature[gone]
+        for gone in set(self._last_active) - set(wallets):
+            del self._last_active[gone]
 
     async def _rpc(self, method: str, params: list) -> object:
         """Resultado de una llamada al RPC. Lanza ValueError si el RPC
@@ -598,14 +627,20 @@ class WalletWatcher:
             return []
         if not isinstance(entries, list):
             return []
-        if first:
-            self._last_signature[wallet] = entries[0].get("signature") if entries else None
-            return []
         now = time.time()
         activity = [
             (entry["signature"], entry.get("blockTime") or now)
             for entry in entries if isinstance(entry.get("signature"), str)
         ]
+        # Una wallet sin historial cuenta desde que se empieza a seguir.
+        self._last_active[wallet] = max(
+            [ts for _, ts in activity] + [self._last_active.get(wallet, 0.0 if activity else now)]
+        )
+        if self._blacklist_abandoned(wallet):
+            return []
+        if first:
+            self._last_signature[wallet] = entries[0].get("signature") if entries else None
+            return []
         if self._blacklist_bot(wallet, activity):
             return []
         if len(entries) == MAX_SIGNATURES_PER_POLL:
@@ -715,6 +750,7 @@ class WalletWatcher:
         signature = value.get("signature")
         if wallet is None or not isinstance(signature, str) or signature in self._seen:
             return
+        self._last_active[wallet] = time.time()
         # Se cuentan todas, también las que no se van a leer: un bot se nota
         # por lo que opera, y cuanto antes se corte menos créditos gasta.
         if self._blacklist_bot(wallet, [(signature, time.time())]):

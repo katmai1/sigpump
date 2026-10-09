@@ -145,6 +145,10 @@ realert_new_wallets = 2
 # degen que entra en todo) no avisa ni cuenta para la confluencia y, con
 # blacklist_file, va a la lista negra. 0 = sin tope.
 max_tokens_per_hour = 0
+# Una wallet con más transacciones que esto en una hora es un bot (los de
+# trading hacen cientos por minuto): con blacklist_file va a la lista negra
+# antes de leerlas, porque cada una cuesta una consulta al RPC. 0 = sin tope.
+max_txs_per_hour = 300
 # Lista negra: sus wallets se quitan de `file` y no se vuelven a seguir.
 # Mismo formato que `file`. Las entradas cuyo motivo empieza por
 # "hasta <fecha ISO>" son temporales: la wallet se deja de consultar hasta

@@ -346,9 +346,9 @@ _LOGS_SWAP = [
 class TestWebSocket(unittest.IsolatedAsyncioTestCase):
     setUp = TestWalletWatcher.setUp
 
-    async def _conectado(self, rpc):
+    async def _conectado(self, rpc, **kwargs):
         """Watcher con la wallet ya suscrita (suscripción 77) y su punto de partida fijado."""
-        watcher = WalletWatcher(rpc, "http://rpc", self.path, min_sol=0.1)
+        watcher = WalletWatcher(rpc, "http://rpc", self.path, min_sol=0.1, **kwargs)
         await watcher.poll()
         watcher._connected = True
         watcher._next_full_poll = time.monotonic() + 600
@@ -360,6 +360,53 @@ class TestWebSocket(unittest.IsolatedAsyncioTestCase):
         watcher._handle({"jsonrpc": "2.0", "id": pedida["id"], "result": 77})
         rpc.llamadas.clear()
         return watcher, ws
+
+    async def test_bot_a_la_lista_negra_sin_leer_sus_transacciones(self):
+        negra = self.path.with_name("negra.txt")
+        rpc = _FakeRpc(firmas=["VIEJA"])
+        watcher, ws = await self._conectado(rpc, blacklist_path=negra, max_txs_per_hour=3)
+        for i in range(3):
+            watcher._handle(_aviso(77, f"TX{i}", logs=_LOGS_SWAP))
+        self.assertIn(WALLET, watcher.wallets)
+        # Las transferencias y las fallidas también cuentan.
+        watcher._handle(_aviso(77, "SPAM", logs=_LOGS_TRANSFERENCIA))
+        self.assertEqual(watcher.wallets, {})
+        self.assertIn(WALLET, load_blacklist(negra))
+        self.assertIn("bot, 4 tx en 1h", negra.read_text(encoding="utf-8"))
+        # Los avisos que siguen llegando hasta darse de baja no la apuntan otra vez.
+        watcher._handle(_aviso(77, "TX9", logs=_LOGS_SWAP))
+        self.assertEqual(negra.read_text(encoding="utf-8").count(WALLET), 1)
+        self.assertEqual(await watcher.poll(), [])
+        self.assertEqual(rpc.llamadas, [])
+        await watcher._sync_subscriptions(ws)
+        self.assertEqual(ws.enviados[-1]["method"], "logsUnsubscribe")
+
+    async def test_bot_sin_tope_se_sigue(self):
+        negra = self.path.with_name("negra.txt")
+        rpc = _FakeRpc(firmas=["VIEJA"])
+        watcher, _ = await self._conectado(rpc, blacklist_path=negra)
+        for i in range(50):
+            watcher._handle(_aviso(77, f"TX{i}", logs=_LOGS_SWAP))
+        self.assertIn(WALLET, watcher.wallets)
+
+    async def test_bot_cuenta_solo_la_ultima_hora(self):
+        negra = self.path.with_name("negra.txt")
+        rpc = _FakeRpc(firmas=["VIEJA"])
+        watcher, _ = await self._conectado(rpc, blacklist_path=negra, max_txs_per_hour=3)
+        watcher._activity[WALLET] = {f"VIEJA{i}": time.time() - 3700 for i in range(10)}
+        watcher._handle(_aviso(77, "NUEVA", logs=_LOGS_SWAP))
+        self.assertIn(WALLET, watcher.wallets)
+
+    async def test_bot_detectado_en_la_pasada_completa(self):
+        negra = self.path.with_name("negra.txt")
+        rpc = _FakeRpc(firmas=["VIEJA"])
+        watcher = WalletWatcher(rpc, "http://rpc", self.path, 0.1, negra, max_txs_per_hour=3)
+        await watcher.poll()
+        rpc.firmas = ["D", "C", "B", "A", "VIEJA"]
+        rpc.llamadas.clear()
+        self.assertEqual(await watcher.poll(), [])
+        self.assertEqual([m for m, _ in rpc.llamadas], ["getSignaturesForAddress"])
+        self.assertIn(WALLET, load_blacklist(negra))
 
     def test_url_del_websocket(self):
         self.assertEqual(ws_url("https://mainnet.helius-rpc.com/?api-key=K"), "wss://mainnet.helius-rpc.com/?api-key=K")

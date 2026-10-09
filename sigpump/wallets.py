@@ -81,6 +81,8 @@ _ADDRESS_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 TRUSTED_MARK = "*"
 # Entrada temporal de la lista negra: el motivo empieza por "hasta <fecha ISO>".
 UNTIL_PREFIX = "hasta "
+# Ventana del tope [wallets].max_txs_per_hour.
+ACTIVITY_WINDOW_SECONDS = 3600
 
 
 @dataclass(frozen=True)
@@ -350,6 +352,7 @@ class WalletWatcher:
         min_sol: float,
         blacklist_path: Path | None = None,
         full_poll_seconds: float = 600.0,
+        max_txs_per_hour: int = 0,
     ):
         self._session = session
         self._rpc_url = rpc_url
@@ -379,6 +382,10 @@ class WalletWatcher:
         self._connected = False
         self._full_poll_seconds = full_poll_seconds
         self._next_full_poll = 0.0
+        # Wallet -> firma -> hora de sus transacciones de la última hora, para
+        # detectar los bots antes de gastar una consulta en cada una. 0 = sin tope.
+        self._max_txs_per_hour = max_txs_per_hour
+        self._activity: dict[str, dict[str, float]] = {}
         # Estado de la conexión actual: wallet -> id de su suscripción (None
         # mientras no llega la respuesta), id de suscripción -> wallet, e id
         # de petición -> wallet de las suscripciones pedidas.
@@ -417,8 +424,35 @@ class WalletWatcher:
         else:
             self._banned_until[address] = until
         self._last_signature.pop(address, None)
+        self._activity.pop(address, None)
         # Fuerza la relectura, que la quita también del fichero de wallets.
         self._mtime = None
+
+    def _blacklist_bot(self, wallet: str, signatures: list[tuple[str, float]]) -> bool:
+        """Apunta las transacciones (firma, hora) de `wallet` y, si en la
+        última hora pasa de max_txs_per_hour, la mete en la lista negra: es un
+        bot, y leer cada una de sus transacciones agota los créditos del RPC.
+        True si la quitó."""
+        if not self._max_txs_per_hour or self._blacklist_path is None or wallet not in self._wallets:
+            return False
+        recent = self._activity.setdefault(wallet, {})
+        for signature, ts in signatures:
+            recent.setdefault(signature, ts)
+        cutoff = time.time() - ACTIVITY_WINDOW_SECONDS
+        for signature in [s for s, ts in recent.items() if ts < cutoff]:
+            del recent[signature]
+        if len(recent) <= self._max_txs_per_hour:
+            return False
+        label = self._wallets[wallet].label
+        reason = f"bot, {len(recent)} tx en 1h"
+        try:
+            self.blacklist(wallet, f"{label}: {reason}")
+        except OSError as exc:
+            log.warning("No se pudo añadir %s a la lista negra: %s", label, exc)
+            return False
+        self._pending.pop(wallet, None)
+        log.warning("Wallet %s a la lista negra: %s", label, reason)
+        return True
 
     def reload(self) -> None:
         """Relee el fichero si cambió (él o la lista negra) desde la última
@@ -567,6 +601,13 @@ class WalletWatcher:
         if first:
             self._last_signature[wallet] = entries[0].get("signature") if entries else None
             return []
+        now = time.time()
+        activity = [
+            (entry["signature"], entry.get("blockTime") or now)
+            for entry in entries if isinstance(entry.get("signature"), str)
+        ]
+        if self._blacklist_bot(wallet, activity):
+            return []
         if len(entries) == MAX_SIGNATURES_PER_POLL:
             log.debug("%s hizo más de %d transacciones desde la última vuelta", label, len(entries))
 
@@ -673,6 +714,10 @@ class WalletWatcher:
         value = (params.get("result") or {}).get("value") or {}
         signature = value.get("signature")
         if wallet is None or not isinstance(signature, str) or signature in self._seen:
+            return
+        # Se cuentan todas, también las que no se van a leer: un bot se nota
+        # por lo que opera, y cuanto antes se corte menos créditos gasta.
+        if self._blacklist_bot(wallet, [(signature, time.time())]):
             return
         # Una transacción fallida o una simple transferencia no compra nada:
         # no merece la consulta, ni ahora ni en la pasada completa.

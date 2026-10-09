@@ -143,6 +143,12 @@ un solo aviso por token en esa ventana; solo se vuelve a avisar, marcado como
 (bots o degens): ni avisan ni cuentan para la confluencia de las demás, y
 con `blacklist_file` entran en la lista negra.
 
+`max_txs_per_hour` detecta los bots: una wallet con más transacciones que
+eso en la última hora (de cualquier tipo, contadas por su firma antes de
+leerlas) entra en la lista negra con `blacklist_file`. Cada transacción
+leída es una consulta al RPC, y un bot de trading con cientos por minuto
+agota los créditos de Helius en horas.
+
 Con `blacklist_file`, también entran solas en la lista negra las wallets cuya
 compra cae `rug_drop_pct` (90% por defecto) en el seguimiento, y las que con
 al menos `loser_min_signals` tokens medidos tienen una mediana a 30 min de
@@ -269,7 +275,7 @@ Secciones disponibles:
   wallet y token, ventana de confluencia, `min_wallets` (cuántas wallets
   tienen que coincidir en un token para avisar), un aviso por token
   (`token_cooldown_minutes`, `realert_new_wallets`), tope de actividad
-  (`max_tokens_per_hour`), lista negra (`blacklist_file`, `rug_drop_pct`,
+  (`max_tokens_per_hour`), bots (`max_txs_per_hour`), lista negra (`blacklist_file`, `rug_drop_pct`,
   `loser_min_signals`, `loser_max_median_ret_pct`) y filtros del par
   (`min_pair_age_minutes`, `max_price_change_h1_pct`, `min_market_cap_usd`).
 - `[scoring]` — `late_penalty_start_h1_pct` y `late_penalty_end_h1_pct`:

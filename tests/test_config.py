@@ -1,289 +1,73 @@
-"""Tests de carga/validación de config.toml y de la función de scoring."""
+"""Tests de la configuración: validación de rangos y tipos, y lectura del TOML."""
 
 import logging
 import tempfile
 import unittest
 from pathlib import Path
 
-from sigpump.config import Config, ScoringWeights, score_pair
-
-
-def _pair(
-    volume_h1=0, change_h1=0, change_h6=0, liquidity=0, address="TOK",
-    volume_m5=0, buys_m5=0, sells_m5=0, change_m5=1,
-):
-    return {
-        "baseToken": {"address": address},
-        "volume": {"h1": volume_h1, "m5": volume_m5},
-        "txns": {"m5": {"buys": buys_m5, "sells": sells_m5}},
-        "priceChange": {"m5": change_m5, "h1": change_h1, "h6": change_h6},
-        "liquidity": {"usd": liquidity},
-    }
-
-
-class TestScorePair(unittest.TestCase):
-    def setUp(self):
-        self.weights = ScoringWeights()
-
-    def test_todo_al_tope_da_100(self):
-        pair = _pair(
-            volume_h1=50_000, change_h1=50, change_h6=100, liquidity=100_000,
-            volume_m5=12_500, buys_m5=30, sells_m5=10,
-        )
-        self.assertEqual(score_pair(pair, self.weights, {"TOK"}), 100.0)
-
-    def test_aceleracion_de_volumen(self):
-        # x1 (mismo ritmo que la hora) no suma; x2 da la mitad; x3 o más, el tope.
-        for volume_m5, esperado in ((1_000, 0.0), (2_000, 12.5), (3_000, 25.0), (12_000, 25.0)):
-            with self.subTest(volume_m5=volume_m5):
-                pair = _pair(volume_h1=12_000, volume_m5=volume_m5)
-                # volume_h1 12k -> 24/100 * 0.20 = 4.8 fijos
-                self.assertEqual(score_pair(pair, self.weights, set()), round(4.8 + esperado, 1))
-
-    def test_aceleracion_con_precio_bajando_no_suma(self):
-        """Visto en datos reales: EMBERCAT sumaba x2.7 de aceleración con el
-        precio cayendo 4.75% en 5 min. El volumen también se acelera en un dump."""
-        for change_m5 in (-4.75, 0):
-            with self.subTest(change_m5=change_m5):
-                pair = _pair(volume_h1=12_000, volume_m5=3_000, change_m5=change_m5)
-                self.assertEqual(score_pair(pair, self.weights, set()), 4.8)
-
-    def test_presion_compradora(self):
-        for buys, sells, esperado in ((20, 20, 0.0), (25, 15, 5.0), (30, 10, 10.0), (10, 30, 0.0)):
-            with self.subTest(buys=buys, sells=sells):
-                pair = _pair(buys_m5=buys, sells_m5=sells)
-                self.assertEqual(score_pair(pair, self.weights, set()), esperado)
-
-    def test_presion_compradora_con_pocas_txns_no_suma(self):
-        self.assertEqual(score_pair(_pair(buys_m5=4, sells_m5=0), self.weights, set()), 0.0)
-
-    def test_penalizacion_por_subida_ya_hecha(self):
-        """Un +150% en 1h con todo al tope daba 100: la señal salía cuando la
-        subida ya se había hecho y poco después caía."""
-        base = dict(
-            volume_h1=50_000, change_h6=100, liquidity=100_000,
-            volume_m5=12_500, buys_m5=30, sells_m5=10,
-        )
-        casos = ((60, 100.0), (155, 50.0), (250, 0.0), (400, 0.0))
-        for change_h1, esperado in casos:
-            with self.subTest(change_h1=change_h1):
-                pair = _pair(change_h1=change_h1, **base)
-                self.assertEqual(score_pair(pair, self.weights, {"TOK"}, 60.0, 250.0), esperado)
-
-    def test_penalizacion_desactivada_por_defecto(self):
-        pair = _pair(change_h1=400)
-        self.assertEqual(
-            score_pair(pair, self.weights, set()), score_pair(pair, self.weights, set(), 0.0, 250.0)
-        )
-        self.assertEqual(score_pair(pair, self.weights, set()), 20.0)
-
-    def test_pair_vacio_no_rompe(self):
-        self.assertIsInstance(score_pair({}, self.weights, set()), float)
-
-    def test_campos_null_se_tratan_como_cero(self):
-        pair = {"volume": {"h1": None}, "liquidity": None, "priceChange": None}
-        self.assertEqual(score_pair(pair, self.weights, set()), 0.0)
-
-    def test_campos_numericos_como_string(self):
-        # DexScreener devuelve varios de estos campos como string.
-        pair = _pair(volume_h1="50000", change_h1="50", liquidity="100000")
-        texto = score_pair(pair, self.weights, set())
-        numero = score_pair(_pair(50_000, 50, 0, 100_000), self.weights, set())
-        self.assertEqual(texto, numero)
-
-    def test_boost_solo_suma_si_la_direccion_esta_en_el_set(self):
-        pair = _pair(address="TOK")
-        self.assertEqual(
-            score_pair(pair, self.weights, {"TOK"}) - score_pair(pair, self.weights, set()),
-            10.0,
-        )
-
-    def test_momentum_neutro_no_aporta_puntos(self):
-        """Regresión: 0% de cambio puntuaba 50/100 en ambos sub-scores de
-        momentum (20 puntos regalados), y un token cayendo 20% con buen
-        volumen, liquidez y boost llegaba a 73.5 y disparaba alerta."""
-        self.assertEqual(score_pair(_pair(), self.weights, set()), 0.0)
-
-        cayendo = _pair(volume_h1=50_000, change_h1=-20, change_h6=-20, liquidity=100_000)
-        score = score_pair(cayendo, self.weights, {"TOK"})
-        self.assertEqual(score, 40.0)
-        self.assertLess(score, Config().score_alert_threshold)
-
-    def test_momentum_es_lineal_hasta_el_tope(self):
-        # +25% h1 -> 50/100 * 0.20 = 10; +50% h6 -> 50/100 * 0.05 = 2.5
-        self.assertEqual(score_pair(_pair(change_h1=25), self.weights, set()), 10.0)
-        self.assertEqual(score_pair(_pair(change_h6=50), self.weights, set()), 2.5)
-
-    def test_subida_vieja_sin_aceleracion_no_llega_al_umbral(self):
-        """Un token con buen volumen que subió +45% en la hora pero ya no se
-        mueve daba 97.5 y alertaba justo cuando la subida había terminado."""
-        quieto = _pair(
-            volume_h1=80_000, change_h1=45, change_h6=100, liquidity=100_000,
-            volume_m5=3_000, buys_m5=20, sells_m5=20,
-        )
-        self.assertLess(score_pair(quieto, self.weights, {"TOK"}), 65.0)
-
-
-class TestScoringWeights(unittest.TestCase):
-    def test_clave_desconocida_da_error_explicativo(self):
-        with self.assertRaises(ValueError) as ctx:
-            ScoringWeights.from_raw({"volumen_h1": 0.5})
-        self.assertIn("volumen_h1", str(ctx.exception))
-        self.assertIn("scoring_weights", str(ctx.exception))
-
-    def test_valor_no_numerico_da_error(self):
-        with self.assertRaises(ValueError):
-            ScoringWeights.from_raw({"volume_h1": "mucho"})
-
-    def test_peso_negativo_da_error(self):
-        with self.assertRaises(ValueError):
-            ScoringWeights.from_raw({"volume_h1": -0.5})
-
-    def test_claves_ausentes_toman_el_default(self):
-        # Suman 1.0 con el resto de los defaults, para no disparar el aviso.
-        w = ScoringWeights.from_raw({"volume_h1": 0.25, "liquidity": 0.05})
-        self.assertEqual(w.volume_h1, 0.25)
-        self.assertEqual(w.price_change_h1, ScoringWeights().price_change_h1)
-
-    def test_suma_distinta_de_uno_avisa(self):
-        # Suman 0.5 -> el score máximo es 50 y un umbral de 70 no dispara nunca.
-        with self.assertLogs(level=logging.WARNING) as logs:
-            ScoringWeights.from_raw(
-                {
-                    "volume_h1": 0.2,
-                    "volume_acceleration": 0.0,
-                    "buy_pressure": 0.0,
-                    "price_change_h1": 0.1,
-                    "price_change_h6": 0.1,
-                    "liquidity": 0.05,
-                    "boosted": 0.05,
-                }
-            )
-        self.assertIn("0.50", "".join(logs.output))
-
-    def test_suma_uno_no_avisa(self):
-        with self.assertNoLogs(level=logging.WARNING):
-            ScoringWeights.from_raw({})
+from sigpump.config import Config
 
 
 class TestConfigValidation(unittest.TestCase):
-    def test_poll_interval_cero_da_error(self):
-        with self.assertRaises(ValueError):
-            Config(poll_interval_seconds=0)
-
-    def test_top_n_cero_da_error(self):
-        with self.assertRaises(ValueError):
-            Config(top_n_candidates=0)
-
-    def test_paginas_de_geckoterminal_fuera_de_rango_da_error(self):
-        for pages in (-1, 11):
-            with self.subTest(pages=pages), self.assertRaises(ValueError):
-                Config(geckoterminal_pages=pages)
-
-    def test_umbral_fuera_de_rango_da_error(self):
-        with self.assertRaises(ValueError):
-            Config(score_alert_threshold=150.0)
-
-    def test_minimo_negativo_da_error(self):
-        with self.assertRaises(ValueError):
-            Config(min_liquidity_usd=-1.0)
-
     def test_chain_vacia_da_error(self):
         with self.assertRaises(ValueError):
             Config(chain_id="")
 
     def test_tipo_invalido_da_error_de_config(self):
-        """`poll_interval_seconds = "90"` tiraba un TypeError crudo que run.py
-        no captura, en vez de un error de configuración."""
+        """`interval_seconds = "15"` tiraba un TypeError crudo que run.py no
+        captura, en vez de un error de configuración."""
         casos = {
-            "poll_interval_seconds": "90",
-            "top_n_candidates": 1.5,
-            "geckoterminal_pages": True,
+            "wallets_interval_seconds": "15",
+            "wallets_min_wallets": 1.5,
+            "wallets_max_tokens_per_hour": True,
             "verbose": "si",
             "telegram_message_thread_id": "123",
+            "alert_log_path": None,
+            "check_token_authorities": "si",
         }
         for campo, valor in casos.items():
             with self.subTest(campo=campo), self.assertRaises(ValueError):
                 Config(**{campo: valor})
 
     def test_float_en_campos_numericos_es_valido(self):
-        Config(poll_interval_seconds=30.5, alert_cooldown_minutes=0.5)
+        Config(wallets_interval_seconds=7.5, wallets_cooldown_minutes=0.5)
 
-    def test_filtros_anti_manipulacion_fuera_de_rango_dan_error(self):
-        casos = {
-            "min_sell_ratio_h1": 1.5,
-            "max_candle_drop_pct": 150.0,
-            "max_avg_trade_usd": -1.0,
-            "max_price_change_h1_pct": -1.0,
-            "max_price_deviation_pct": -1.0,
-            "min_txns_h1": -1,
-            "verify_before_alert": "si",
-            "max_rise_from_low_pct": -1.0,
-            "max_drop_from_recent_high_pct": 120.0,
-            "late_penalty_start_h1_pct": -5.0,
-            "alert_log_path": None,
-        }
-        for campo, valor in casos.items():
-            with self.subTest(campo=campo), self.assertRaises(ValueError):
-                Config(**{campo: valor})
-
-    def test_penalizacion_con_fin_antes_del_inicio_da_error(self):
-        with self.assertRaises(ValueError):
-            Config(late_penalty_start_h1_pct=100.0, late_penalty_end_h1_pct=50.0)
-
-    def test_filtros_de_par_y_seguridad_fuera_de_rango_dan_error(self):
+    def test_filtros_de_par_fuera_de_rango_dan_error(self):
         casos = [
             dict(quote_tokens="SOL"),          # tiene que ser una lista
             dict(quote_tokens=["SOL", ""]),    # ni textos vacíos
             dict(quote_tokens=["SOL", 3]),
             dict(dex_ids="pumpswap"),
             dict(dex_ids=["pumpswap", ""]),
-            dict(min_txns_m5=-1.0),
-            dict(min_volume_m5_usd=-1.0),
-            dict(early_require_sustained_seconds=-1.0),
-            dict(check_token_authorities="si"),
-            dict(solana_rpc_url=""),           # hace falta con la comprobación activa
+            dict(solana_rpc_url=""),
         ]
         for caso in casos:
             with self.subTest(caso=caso), self.assertRaises(ValueError):
                 Config(**caso)
 
-    def test_sin_comprobar_autoridades_no_hace_falta_rpc(self):
-        Config(check_token_authorities=False, solana_rpc_url="")
-
-    def test_prealertas_por_defecto_una_cada_6_horas_y_silencian_la_alerta(self):
-        config = Config()
-        self.assertEqual(config.early_cooldown_minutes, 360)
-        self.assertEqual(config.early_suppress_alert_minutes, 360)
-
-    def test_vigilancia_fuera_de_rango_da_error(self):
+    def test_wallets_fuera_de_rango_dan_error(self):
         casos = [
-            dict(watch_interval_seconds=0),
-            dict(watch_max_tokens=0),
-            dict(watch_max_tokens=10.5),
-            dict(watch_enabled="si"),
-            dict(alerts_enabled="si"),
+            dict(wallets_enabled=False),       # sin wallets no hay nada que avisar
+            dict(wallets_enabled="si"),
+            dict(wallets_file=""),
+            dict(wallets_interval_seconds=0),
+            dict(wallets_full_poll_minutes=0),
+            dict(wallets_min_sol=-1),
             dict(wallets_min_wallets=0),
             dict(wallets_min_wallets=1.5),
             dict(wallets_realert_new_wallets=0),
             dict(wallets_max_tokens_per_hour=-1),
             dict(wallets_max_txs_per_hour=-1),
             dict(wallets_rug_drop_pct=150),
+            dict(wallets_loser_min_signals=-1),
             dict(wallets_token_cooldown_minutes=-1),
-            dict(early_min_price_move_pct=-1.0),
-            dict(early_min_price_move_pct=40.0, early_max_price_move_pct=30.0),
-            dict(early_min_buy_ratio=1.5),
-            dict(early_min_volume_ratio=-1.0),
-            dict(early_min_txns_ratio=-1.0),
-            dict(early_cooldown_minutes=-1.0),
-            dict(early_suppress_alert_minutes=-1.0),
+            dict(wallets_min_pair_age_minutes=-1),
+            dict(wallets_max_price_change_h1_pct=-1),
+            dict(wallets_min_market_cap_usd=-1),
         ]
         for caso in casos:
             with self.subTest(caso=caso), self.assertRaises(ValueError):
                 Config(**caso)
-
-    def test_penalizacion_desactivada_no_valida_el_fin(self):
-        Config(late_penalty_start_h1_pct=0.0, late_penalty_end_h1_pct=0.0)
 
 
 class TestFromToml(unittest.TestCase):
@@ -301,6 +85,7 @@ class TestFromToml(unittest.TestCase):
     def test_toml_vacio_usa_defaults(self):
         config = Config.from_toml(self._write(""))
         self.assertEqual(config, Config())
+        self.assertTrue(config.wallets_enabled)
 
     def test_secciones_parciales(self):
         config = Config.from_toml(
@@ -309,121 +94,84 @@ class TestFromToml(unittest.TestCase):
         self.assertEqual(config.telegram_bot_token, "t")
         self.assertTrue(config.verbose)
         self.assertIsNone(config.telegram_message_thread_id)
-        self.assertEqual(config.poll_interval_seconds, 90)
+        self.assertEqual(config.wallets_interval_seconds, 15)
 
     def test_clave_desconocida_avisa(self):
         # Un typo se ignoraba en silencio y se usaba el default.
         with self.assertLogs(level=logging.WARNING) as logs:
-            config = Config.from_toml(self._write("[dexscreener]\nmin_liquidty_usd = 1\n"))
-        self.assertIn("min_liquidty_usd", "".join(logs.output))
-        self.assertEqual(config.min_liquidity_usd, Config().min_liquidity_usd)
+            config = Config.from_toml(self._write("[wallets]\nmin_sool = 1\n"))
+        self.assertIn("min_sool", "".join(logs.output))
+        self.assertEqual(config.wallets_min_sol, Config().wallets_min_sol)
 
     def test_seccion_desconocida_avisa(self):
         with self.assertLogs(level=logging.WARNING) as logs:
             Config.from_toml(self._write("[telegrm]\nbot_token = 't'\n"))
         self.assertIn("telegrm", "".join(logs.output))
 
+    def test_secciones_del_radar_viejo_avisan_sin_romper(self):
+        """Un config.toml de antes de quitar el radar de trending sigue
+        arrancando: lo que ya no existe solo se avisa en el log."""
+        with self.assertLogs(level=logging.WARNING) as logs:
+            config = Config.from_toml(
+                self._write(
+                    "[radar]\nalerts_enabled = false\nalert_log_path = 'x.db'\n"
+                    "[dexscreener]\nmin_liquidity_usd = 5000\n[watch]\nenabled = false\n"
+                )
+            )
+        salida = "".join(logs.output)
+        for clave in ("alerts_enabled", "min_liquidity_usd", "watch"):
+            self.assertIn(clave, salida)
+        self.assertEqual(config.alert_log_path, "x.db")
+
     def test_seccion_que_no_es_tabla_da_error(self):
         with self.assertRaises(ValueError):
             Config.from_toml(self._write("radar = 5\n"))
 
-    def test_lee_los_filtros_anti_manipulacion(self):
-        config = Config.from_toml(
-            self._write(
-                "[dexscreener]\nmin_txns_h1 = 100\nmax_avg_trade_usd = 0\n"
-                "[geckoterminal]\nverify_before_alert = false\nmax_candle_drop_pct = 20.0\n"
-            )
-        )
-        self.assertEqual(config.min_txns_h1, 100)
-        self.assertEqual(config.max_avg_trade_usd, 0)
-        self.assertFalse(config.verify_before_alert)
-        self.assertEqual(config.max_candle_drop_pct, 20.0)
-        self.assertEqual(config.max_price_deviation_pct, Config().max_price_deviation_pct)
-
-    def test_lee_los_parametros_de_llegar_tarde_y_el_registro(self):
-        config = Config.from_toml(
-            self._write(
-                "[geckoterminal]\nmax_rise_from_low_pct = 90\nmax_drop_from_recent_high_pct = 10\n"
-                "[scoring]\nlate_penalty_start_h1_pct = 40\nlate_penalty_end_h1_pct = 120\n"
-                '[radar]\nalert_log_path = ""\n'
-            )
-        )
-        self.assertEqual(config.max_rise_from_low_pct, 90)
-        self.assertEqual(config.max_drop_from_recent_high_pct, 10)
-        self.assertEqual(config.late_penalty_start_h1_pct, 40)
-        self.assertEqual(config.late_penalty_end_h1_pct, 120)
-        self.assertEqual(config.alert_log_path, "")
-
     def test_lee_los_filtros_de_par_y_la_seccion_solana(self):
         config = Config.from_toml(
             self._write(
-                '[dexscreener]\nquote_tokens = ["SOL", "USDC"]\nmin_txns_m5 = 12\n'
+                '[dexscreener]\nquote_tokens = ["SOL", "USDC"]\n'
                 'dex_ids = ["pumpswap", "raydium"]\n'
-                "min_volume_m5_usd = 750\n"
                 '[solana]\ncheck_token_authorities = false\nrpc_url = "https://rpc.ejemplo"\n'
-                "[watch]\nrequire_sustained_seconds = 45\n"
+                '[radar]\nalert_log_path = ""\n'
             )
         )
         self.assertEqual(config.quote_tokens, ["SOL", "USDC"])
         self.assertEqual(config.dex_ids, ["pumpswap", "raydium"])
-        self.assertEqual(config.min_txns_m5, 12)
-        self.assertEqual(config.min_volume_m5_usd, 750)
         self.assertFalse(config.check_token_authorities)
         self.assertEqual(config.solana_rpc_url, "https://rpc.ejemplo")
-        self.assertEqual(config.early_require_sustained_seconds, 45)
+        self.assertEqual(config.alert_log_path, "")
+
+    def test_lee_las_wallets(self):
+        config = Config.from_toml(
+            self._write(
+                '[wallets]\nfile = "w.txt"\ninterval_seconds = 30\nmin_sol = 0.5\n'
+                "min_wallets = 2\nmax_txs_per_hour = 100\nwebsocket = false\n"
+                "min_market_cap_usd = 50000\n"
+            )
+        )
+        self.assertEqual(config.wallets_file, "w.txt")
+        self.assertEqual(config.wallets_interval_seconds, 30)
+        self.assertEqual(config.wallets_min_sol, 0.5)
+        self.assertEqual(config.wallets_min_wallets, 2)
+        self.assertEqual(config.wallets_max_txs_per_hour, 100)
+        self.assertFalse(config.wallets_websocket)
+        self.assertEqual(config.wallets_min_market_cap_usd, 50_000)
 
     def test_clave_desconocida_en_solana_avisa(self):
         with self.assertLogs(level=logging.WARNING) as logs:
             Config.from_toml(self._write("[solana]\nrcp_url = 'x'\n"))
         self.assertIn("rcp_url", "".join(logs.output))
 
-    def test_alertas_activadas_por_defecto(self):
-        self.assertTrue(Config().alerts_enabled)
-
-    def test_lee_alerts_enabled(self):
-        config = Config.from_toml(self._write("[radar]\nalerts_enabled = false\n"))
-        self.assertFalse(config.alerts_enabled)
-
-    def test_todo_desactivado_da_error(self):
-        with self.assertRaises(ValueError):
-            Config(alerts_enabled=False, watch_enabled=False, wallets_enabled=False)
-        # Solo wallets es válido.
-        Config(alerts_enabled=False, watch_enabled=False, wallets_enabled=True)
-
-    def test_lee_la_vigilancia(self):
-        config = Config.from_toml(
-            self._write(
-                "[watch]\nenabled = false\ninterval_seconds = 45\nmax_tokens = 30\n"
-                "min_price_move_pct = 3\nmax_price_move_pct = 20\nmin_volume_ratio = 3\n"
-                "min_txns_ratio = 1.5\nmin_buy_ratio = 0.6\ncooldown_minutes = 20\n"
-                "suppress_alert_minutes = 90\n"
-            )
-        )
-        self.assertFalse(config.watch_enabled)
-        self.assertEqual(config.watch_interval_seconds, 45)
-        self.assertEqual(config.watch_max_tokens, 30)
-        self.assertEqual(config.early_min_price_move_pct, 3)
-        self.assertEqual(config.early_max_price_move_pct, 20)
-        self.assertEqual(config.early_min_volume_ratio, 3)
-        self.assertEqual(config.early_min_txns_ratio, 1.5)
-        self.assertEqual(config.early_min_buy_ratio, 0.6)
-        self.assertEqual(config.early_cooldown_minutes, 20)
-        self.assertEqual(config.early_suppress_alert_minutes, 90)
-
-    def test_clave_desconocida_en_scoring_avisa(self):
-        with self.assertLogs(level=logging.WARNING) as logs:
-            Config.from_toml(self._write("[scoring]\nlate_penalty_h1 = 1\n"))
-        self.assertIn("late_penalty_h1", "".join(logs.output))
-
     def test_chat_id_numerico_se_acepta_como_str(self):
         config = Config.from_toml(self._write("[telegram]\nchat_id = -100123\n"))
         self.assertEqual(config.telegram_chat_id, "-100123")
 
-    def test_ejemplo_del_repo_es_valido(self):
-        # config.example.toml es lo que copia el usuario: tiene que parsear.
-        config = Config.from_toml(Path("config.example.toml"))
+    def test_ejemplo_del_repo_es_valido_y_sin_claves_desconocidas(self):
+        # config.example.toml es lo que copia el usuario: tiene que parsear limpio.
+        with self.assertNoLogs(level=logging.WARNING):
+            config = Config.from_toml(Path("config.example.toml"))
         self.assertEqual(config.chain_id, "solana")
-        self.assertAlmostEqual(config.weights.total, 1.0)
 
 
 if __name__ == "__main__":

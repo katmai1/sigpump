@@ -1,7 +1,7 @@
 """
-Radar de solo-lectura para memecoins trending en DexScreener.
-No ejecuta trades: descubre candidatos, los puntúa y avisa por Telegram
-cuando cruzan el umbral configurado.
+Seguimiento de wallets de Solana, de solo lectura.
+No ejecuta trades: avisa por Telegram cuando una de las wallets seguidas
+compra un token.
 """
 
 from __future__ import annotations
@@ -64,8 +64,8 @@ async def _run_until_sigterm(radar: MemecoinRadar) -> None:
 
 def main() -> None:
     """Punto de entrada del CLI: parsea --config, valida credenciales de
-    Telegram y arranca el loop infinito del radar."""
-    parser = argparse.ArgumentParser(description="Radar de memecoins trending (DexScreener)")
+    Telegram y arranca el seguimiento de wallets."""
+    parser = argparse.ArgumentParser(description="Seguimiento de wallets de Solana con avisos por Telegram")
     parser.add_argument("--config", type=Path, default=Path("config.toml"))
     args = parser.parse_args()
 
@@ -79,7 +79,7 @@ def main() -> None:
     _setup_logging(config.verbose)
 
     # Sin estas dos claves no hay forma de notificar, así que fallamos rápido
-    # en vez de arrancar un radar que nunca podrá avisar nada.
+    # en vez de arrancar un seguimiento que nunca podrá avisar nada.
     if not config.telegram_bot_token or not config.telegram_chat_id:
         raise SystemExit("Falta telegram.bot_token o telegram.chat_id en config.toml")
 

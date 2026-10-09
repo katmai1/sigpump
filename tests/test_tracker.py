@@ -8,7 +8,6 @@ import time
 import unittest
 from pathlib import Path
 
-from sigpump.signals import CandleStats, EarlySignal
 from sigpump.tracker import CHECKPOINT_TOLERANCE_MINUTES, COLUMNS, AlertTracker
 
 
@@ -67,44 +66,41 @@ class TestAlertTracker(unittest.IsolatedAsyncioTestCase):
         conn.close()
 
     def test_record_escribe_la_fila_con_los_datos_del_momento(self):
-        self._tracker().record(_pair(), 72.5, CandleStats(40.0, 3.0), sent=True)
+        self._tracker().record(_pair(), sent=True)
         rows = self._rows()
         self.assertEqual(len(rows), 1)
         self.assertEqual(list(rows[0]), ["id", *COLUMNS])
         row = rows[0]
         self.assertEqual(row["enviada"], 1)
         self.assertIsNone(row["motivo_descarte"])
-        self.assertEqual(row["score"], 72.5)
+        self.assertEqual(row["tipo"], "wallet")
         self.assertEqual(row["precio_usd"], 1.0)
         self.assertEqual(row["aceleracion_volumen"], 3.0)
         self.assertEqual(row["compras_m5_pct"], 75.0)
-        self.assertEqual(row["sobre_minimo_1h_pct"], 40.0)
-        self.assertEqual(row["bajo_maximo_15m_pct"], 3.0)
         self.assertIsNone(row["ret_5m_pct"])
 
     def test_guarda_actividad_de_5m_moneda_y_edad_del_par(self):
         par = _pair()
         par["quoteToken"] = {"symbol": "SOL"}
         par["pairCreatedAt"] = (time.time() - 3 * 3600) * 1000
-        self._tracker().record(par, 70.0, None, sent=True)
+        self._tracker().record(par, sent=True)
         row = self._rows()[0]
         self.assertEqual(row["txns_m5"], 40)
         self.assertEqual(row["moneda_par"], "SOL")
         self.assertAlmostEqual(row["edad_par_min"], 180, delta=1)
 
     def test_sin_fecha_de_creacion_la_edad_queda_vacia(self):
-        self._tracker().record(_pair(), 70.0, None, sent=True)
+        self._tracker().record(_pair(), sent=True)
         self.assertIsNone(self._rows()[0]["edad_par_min"])
 
     def test_descarte_guarda_el_motivo(self):
-        self._tracker().record(_pair(), 70.0, None, sent=False, reason="llega tarde")
+        self._tracker().record(_pair(), sent=False, reason="llega tarde")
         row = self._rows()[0]
         self.assertEqual((row["enviada"], row["motivo_descarte"]), (0, "llega tarde"))
-        self.assertIsNone(row["sobre_minimo_1h_pct"])
 
     async def test_anota_checkpoints_y_mejor_peor(self):
         tracker = self._tracker()
-        tracker.record(_pair(), 70.0, None, sent=True)
+        tracker.record(_pair(), sent=True)
         client = _FakeClient({"POOL": 1.2})
 
         self._age(5)
@@ -128,7 +124,7 @@ class TestAlertTracker(unittest.IsolatedAsyncioTestCase):
 
     async def test_antes_del_primer_checkpoint_solo_actualiza_mejor_peor(self):
         tracker = self._tracker()
-        tracker.record(_pair(), 70.0, None, sent=True)
+        tracker.record(_pair(), sent=True)
         self._age(2)
         await tracker.update(_FakeClient({"POOL": 1.5}), "solana")
         row = self._rows()[0]
@@ -139,7 +135,7 @@ class TestAlertTracker(unittest.IsolatedAsyncioTestCase):
         """Tras un reinicio la primera muestra puede llegar a los 21 min: no
         se anota como retorno a +5m ni a +15m."""
         tracker = self._tracker()
-        tracker.record(_pair(), 70.0, None, sent=True)
+        tracker.record(_pair(), sent=True)
         self._age(15 + CHECKPOINT_TOLERANCE_MINUTES + 1)
         await tracker.update(_FakeClient({"POOL": 2.0}), "solana")
         row = self._rows()[0]
@@ -147,14 +143,14 @@ class TestAlertTracker(unittest.IsolatedAsyncioTestCase):
 
     async def test_usa_el_pool_de_la_alerta_y_no_otro_del_mismo_token(self):
         tracker = self._tracker()
-        tracker.record(_pair(), 70.0, None, sent=True)
+        tracker.record(_pair(), sent=True)
         self._age(5)
         await tracker.update(_FakeClient({"OTRO_POOL": 3.0}), "solana")
         self.assertIsNone(self._rows()[0]["ret_5m_pct"])
 
     async def test_pasado_el_margen_deja_de_seguir(self):
         tracker = self._tracker()
-        tracker.record(_pair(), 70.0, None, sent=True)
+        tracker.record(_pair(), sent=True)
         self._age(30 + CHECKPOINT_TOLERANCE_MINUTES)
         client = _FakeClient({"POOL": 1.0})
         await tracker.update(client, "solana")
@@ -162,99 +158,24 @@ class TestAlertTracker(unittest.IsolatedAsyncioTestCase):
 
     async def test_sin_precio_en_la_alerta_no_se_sigue(self):
         tracker = self._tracker()
-        tracker.record(_pair(price=None), 70.0, None, sent=True)
+        tracker.record(_pair(price=None), sent=True)
         client = _FakeClient({"POOL": 1.0})
         self._age(5)
         await tracker.update(client, "solana")
         self.assertEqual(client.requested, [])
 
-    def test_record_devuelve_el_id_y_guarda_los_rasgos_de_velas(self):
-        tracker = self._tracker()
-        stats = CandleStats(
-            40.0, 3.0, rise_15m_pct=12.5, green_streak=2, volume_trend=1.8, upper_wick=0.25
-        )
-        row_id = tracker.record(_pair(), 72.5, stats, sent=True)
-        row = self._rows()[0]
-        self.assertEqual(row_id, row["id"])
-        self.assertEqual(
-            (row["sube_15m_pct"], row["velas_verdes_seguidas"], row["tendencia_volumen"], row["mecha_superior"]),
-            (12.5, 2, 1.8, 0.25),
-        )
-
     def test_update_row_solo_acepta_columnas_conocidas(self):
         tracker = self._tracker()
-        row_id = tracker.record(_pair(), 70.0, None, sent=True, kind="prealerta")
-        tracker.update_row(row_id, {"sostenido_30s": 1})
-        self.assertEqual(self._rows()[0]["sostenido_30s"], 1)
+        row_id = tracker.record(_pair(), sent=True)
+        self.assertEqual(row_id, self._rows()[0]["id"])
+        tracker.update_row(row_id, {"wallet": "W"})
+        self.assertEqual(self._rows()[0]["wallet"], "W")
         with self.assertRaises(ValueError):
             tracker.update_row(row_id, {"no_existe": 1})
 
-    def test_siguiente_sin_velas_por_antiguedad_e_intentos(self):
-        tracker = self._tracker()
-        vieja = tracker.record(_pair("VIEJA", pool="P1"), 70.0, None, sent=True)
-        nueva = tracker.record(_pair("NUEVA", pool="P2"), 70.0, None, sent=True)
-        tracker.record(_pair("VELAS", pool="P3"), 70.0, CandleStats(1.0, 1.0), sent=True)
-        conn = sqlite3.connect(self.path)
-        with conn:
-            conn.execute("UPDATE alertas SET timestamp = timestamp - 3600 WHERE id = ?", (vieja,))
-        conn.close()
-        for _ in range(3):
-            self.assertEqual(tracker.next_without_candles(45 * 60)["id"], nueva)
-        # Tras 3 intentos sin velas se abandona.
-        self.assertIsNone(tracker.next_without_candles(45 * 60))
-        tracker.set_candle_stats(nueva, CandleStats(5.0, 1.0, rise_15m_pct=4.0, green_streak=1))
-        fila = next(r for r in self._rows() if r["id"] == nueva)
-        self.assertEqual((fila["sube_15m_pct"], fila["velas_verdes_seguidas"], fila["velas_intentos"]), (4.0, 1, 3))
-
-    def test_last_sent_por_tipo_y_ventana(self):
-        tracker = self._tracker()
-        tracker.record(_pair("A"), 70.0, None, sent=True, kind="prealerta")
-        tracker.record(_pair("B"), 70.0, None, sent=True)
-        tracker.record(_pair("C"), 70.0, None, sent=False, reason="tarde")
-        desde = time.time() - 60
-        self.assertEqual(set(tracker.last_sent("prealerta", desde)), {"A"})
-        self.assertEqual(set(tracker.last_sent("alerta", desde)), {"B"})
-        self.assertEqual(tracker.last_sent("alerta", time.time() + 60), {})
-
-    def test_prealerta_guarda_tipo_y_arranque(self):
-        tracker = self._tracker()
-        early = EarlySignal(10.0, 5.0, 3.3, 0.76, 12.0)
-        tracker.record(_pair(), 55.0, None, sent=True, kind="prealerta", early=early)
-        row = self._rows()[0]
-        self.assertEqual(row["tipo"], "prealerta")
-        self.assertEqual(
-            (row["arranque_pct"], row["ratio_volumen_5m"], row["ratio_txns_5m"]), (10.0, 5.0, 3.3)
-        )
-        self.assertTrue(tracker.is_tracking("TOK", sent=True, kind="prealerta"))
-        self.assertFalse(tracker.is_tracking("TOK", sent=True))
-
-    def test_alerta_normal_sin_datos_de_arranque(self):
-        self._tracker().record(_pair(), 70.0, None, sent=True)
-        row = self._rows()[0]
-        self.assertEqual(row["tipo"], "alerta")
-        self.assertIsNone(row["arranque_pct"])
-
-    def test_filas_sin_tipo_cuentan_como_alerta(self):
-        # Bases creadas antes de las prealertas: la columna tipo se agrega vacía.
-        tracker = self._tracker()
-        tracker.record(_pair(), 70.0, None, sent=True)
-        conn = sqlite3.connect(self.path)
-        with conn:
-            conn.execute("UPDATE alertas SET tipo = NULL")
-        conn.close()
-        self.assertTrue(tracker.is_tracking("TOK", sent=True))
-        self.assertFalse(tracker.is_tracking("TOK", sent=True, kind="prealerta"))
-
-    def test_is_tracking_distingue_enviadas_de_descartadas(self):
-        tracker = self._tracker()
-        tracker.record(_pair(), 70.0, None, sent=False, reason="tarde")
-        self.assertTrue(tracker.is_tracking("TOK", sent=False))
-        self.assertFalse(tracker.is_tracking("TOK", sent=True))
-        self.assertFalse(tracker.is_tracking("OTRO", sent=False))
-
     async def test_continua_las_pendientes_tras_reiniciar(self):
         anterior = self._tracker()
-        anterior.record(_pair(), 70.0, None, sent=True)
+        anterior.record(_pair(), sent=True)
         anterior.close()
         tracker = self._tracker()
         with self.assertLogs(level=logging.INFO) as logs:
@@ -272,27 +193,42 @@ class TestAlertTracker(unittest.IsolatedAsyncioTestCase):
             conn.execute("CREATE TABLE alertas (id INTEGER PRIMARY KEY, fecha TEXT, token TEXT)")
             conn.execute("INSERT INTO alertas (fecha, token) VALUES ('ayer', 'VIEJO')")
         conn.close()
-        self._tracker().record(_pair(), 70.0, None, sent=True)
+        self._tracker().record(_pair(), sent=True)
         rows = self._rows()
         self.assertEqual([r["token"] for r in rows], ["VIEJO", "TOK"])
-        self.assertEqual(rows[1]["score"], 70.0)
+        self.assertEqual(rows[1]["precio_usd"], 1.0)
+
+    def test_base_con_columnas_que_ya_no_se_usan_sigue_funcionando(self):
+        """Las bases de antes tienen columnas del radar viejo (score, velas,
+        prealertas): se quedan como están y las filas nuevas las dejan vacías."""
+        conn = sqlite3.connect(self.path)
+        with conn:
+            conn.execute(
+                "CREATE TABLE alertas (id INTEGER PRIMARY KEY, token TEXT, tipo TEXT, "
+                "score REAL, sobre_minimo_1h_pct REAL, arranque_pct REAL)"
+            )
+            conn.execute("INSERT INTO alertas (token, tipo, score) VALUES ('VIEJO', 'alerta', 80)")
+        conn.close()
+        self._tracker().record(_pair(), sent=True)
+        viejo, nuevo = self._rows()
+        self.assertEqual(viejo["score"], 80)
+        self.assertEqual((nuevo["tipo"], nuevo["score"], nuevo["arranque_pct"]), ("wallet", None, None))
 
     def test_archivo_que_no_es_una_base_desactiva_el_registro_sin_tocarlo(self):
         self.path.write_bytes(b"esto no es sqlite" * 10)
         tracker = self._tracker()
         with self.assertLogs(level=logging.ERROR):
             tracker.open()
-        tracker.record(_pair(), 70.0, None, sent=True)
-        self.assertFalse(tracker.is_tracking("TOK", sent=True))
+        self.assertIsNone(tracker.record(_pair(), sent=True))
         self.assertEqual(self.path.read_bytes(), b"esto no es sqlite" * 10)
 
     def test_ruta_invalida_no_propaga(self):
         tracker = AlertTracker(self.path / "no_existe" / "alertas.db")
         with self.assertLogs(level=logging.ERROR):
-            tracker.record(_pair(), 70.0, None, sent=True)
-        # Desactivado: no vuelve a intentarlo (ni a loguearlo) en cada pasada.
+            tracker.record(_pair(), sent=True)
+        # Desactivado: no vuelve a intentarlo (ni a loguearlo) en cada vuelta.
         with self.assertNoLogs(level=logging.ERROR):
-            tracker.record(_pair(), 70.0, None, sent=True)
+            tracker.record(_pair(), sent=True)
 
 
 if __name__ == "__main__":

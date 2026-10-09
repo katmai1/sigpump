@@ -1,8 +1,8 @@
 """
 sigpump/telegram.py
 
-Formatea y envía la alerta de un par de mercado como mensaje de Telegram
-(HTML) usando python-telegram-bot.
+Formatea y envía el aviso de compra de una wallet seguida, con los datos de
+mercado del par, como mensaje de Telegram (HTML) usando python-telegram-bot.
 """
 
 import asyncio
@@ -15,18 +15,11 @@ from telegram.constants import ParseMode  # type: ignore[import-not-found]
 from telegram.error import RetryAfter  # type: ignore[import-not-found]
 from telegram.warnings import PTBDeprecationWarning  # type: ignore[import-not-found]
 
-from sigpump.signals import (
-    RECENT_HIGH_MINUTES,
-    CandleStats,
-    EarlySignal,
-    buy_ratio_m5,
-    volume_acceleration,
-)
-from sigpump.util import to_float
+from sigpump.util import buy_ratio_m5, to_float, volume_acceleration
 from sigpump.wallets import WalletSignal
 
 # Espera máxima aceptable ante flood control. Más que esto bloquearía el
-# loop del radar demasiado tiempo: se deja fallar y se reintenta la próxima pasada.
+# bucle de wallets demasiado tiempo: se deja fallar y se loguea.
 MAX_RETRY_AFTER_SECONDS = 60.0
 
 
@@ -55,17 +48,8 @@ class TelegramAlerter:
     async def __aexit__(self, *exc_info: object) -> None:
         await self._bot.shutdown()
 
-    def format_message(
-        self,
-        pair: dict,
-        score: float,
-        candles: CandleStats | None = None,
-        early: EarlySignal | None = None,
-        wallet: WalletSignal | None = None,
-    ) -> str:
-        """Arma el HTML del mensaje de alerta para `pair` con su `score` y,
-        si la verificación pidió velas, su posición respecto del mínimo y
-        del máximo reciente.
+    def format_message(self, pair: dict, wallet: WalletSignal) -> str:
+        """Arma el HTML del aviso de la compra `wallet` en el token de `pair`.
 
         Todo lo que viene de la API pasa por html.escape() o por to_float():
         symbol/name/url los controla quien crea el token, y los campos
@@ -79,17 +63,11 @@ class TelegramAlerter:
         volume_h1 = to_float((pair.get("volume") or {}).get("h1"))
         change_m5 = to_float((pair.get("priceChange") or {}).get("m5"))
         change_h1 = to_float((pair.get("priceChange") or {}).get("h1"))
-        # Datos de "¿llego a tiempo?": aceleración y compras de 5 min y, si hay
-        # velas, cuánto subió ya y si cae desde el pico reciente.
+        # Datos de "¿llego a tiempo?": aceleración y compras de 5 min.
         momentum = f"Aceleración vol. 5m: x{volume_acceleration(pair):.1f}\n"
         buy_ratio = buy_ratio_m5(pair)
         if buy_ratio is not None:
             momentum += f"Compras 5m: {buy_ratio * 100:.0f}%\n"
-        if candles is not None:
-            momentum += (
-                f"Sobre mínimo 1h: +{candles.rise_from_low_pct:.0f}%\n"
-                f"Bajo máximo {RECENT_HIGH_MINUTES}m: -{candles.drop_from_recent_high_pct:.0f}%\n"
-            )
         # marketCap suele venir ausente en tokens nuevos; fdv es el fallback de DexScreener.
         market_cap_usd = to_float(pair.get("marketCap")) or to_float(pair.get("fdv"))
         pool = html.escape(str(pair.get("dexId", "?")))
@@ -109,40 +87,27 @@ class TelegramAlerter:
             )
             links += f" | <a href=\"{photon_url}\">Ver en Photon</a>"
 
-        if wallet is not None:
-            # Aviso de wallet: lo primero es quién entró y cuánto metió.
-            buy = wallet.buy
-            spent = []
-            if buy.sol_spent > 0:
-                spent.append(f"{buy.sol_spent:,.2f} SOL")
-            if buy.stable_spent > 0:
-                spent.append(f"${buy.stable_spent:,.0f}")
-            tx_url = html.escape(f"https://solscan.io/tx/{buy.signature}", quote=True)
-            header = "🔁 <b>ACTUALIZACIÓN</b>: entran más wallets\n" if wallet.update else ""
-            star = "⭐ " if buy.trusted else ""
+        # Aviso de wallet: lo primero es quién entró y cuánto metió.
+        buy = wallet.buy
+        spent = []
+        if buy.sol_spent > 0:
+            spent.append(f"{buy.sol_spent:,.2f} SOL")
+        if buy.stable_spent > 0:
+            spent.append(f"${buy.stable_spent:,.0f}")
+        tx_url = html.escape(f"https://solscan.io/tx/{buy.signature}", quote=True)
+        header = "🔁 <b>ACTUALIZACIÓN</b>: entran más wallets\n" if wallet.update else ""
+        star = "⭐ " if buy.trusted else ""
+        header += (
+            f"👛 <b>{star}{html.escape(buy.label)} compró {name} ({symbol})</b>\n"
+            f"{'Entrada nueva' if buy.new_position else 'Amplía posición'}: "
+            f"<b>{' + '.join(spent) or '?'}</b> (<a href=\"{tx_url}\">tx</a>)\n"
+        )
+        if wallet.others:
             header += (
-                f"👛 <b>{star}{html.escape(buy.label)} compró {name} ({symbol})</b>\n"
-                f"{'Entrada nueva' if buy.new_position else 'Amplía posición'}: "
-                f"<b>{' + '.join(spent) or '?'}</b> (<a href=\"{tx_url}\">tx</a>)\n"
-            )
-            if wallet.others:
-                header += (
-                    f"👛 También entraron: <b>{html.escape(', '.join(wallet.others))}</b>\n"
-                )
-        elif early is None:
-            header = f"🎯 <b>{name} ({symbol})</b>\n"
-        else:
-            # Prealerta: lo primero que se lee es el arranque, que es lo que
-            # decide si todavía hay margen para entrar.
-            header = (
-                f"⚡ <b>PREALERTA {name} ({symbol})</b>\n"
-                f"Arranque: <b>{early.price_move_pct:+.1f}%</b> sobre la base de "
-                f"{early.baseline_minutes:.0f} min\n"
-                f"Vol. 5m x{early.volume_ratio:.1f} y txns 5m x{early.txns_ratio:.1f} sobre la base\n"
+                f"👛 También entraron: <b>{html.escape(', '.join(wallet.others))}</b>\n"
             )
         return (
             f"{header}"
-            f"Score: <b>{score}</b>/100\n"
             f"Precio: ${price_usd}\n"
             f"Cambio 5m: {change_m5:+.1f}%\n"
             f"Cambio 1h: {change_h1:+.1f}%\n"
@@ -155,20 +120,11 @@ class TelegramAlerter:
             f"{links}"
         )
 
-    async def send(
-        self,
-        pair: dict,
-        score: float,
-        candles: CandleStats | None = None,
-        early: EarlySignal | None = None,
-        wallet: WalletSignal | None = None,
-    ) -> None:
-        """Arma y envía el mensaje de alerta (o de prealerta, con `early`, o
-        de compra de una wallet seguida, con `wallet`) para `pair` con su
-        `score` ya calculado."""
+    async def send(self, pair: dict, wallet: WalletSignal) -> None:
+        """Arma y envía el aviso de la compra `wallet` en el token de `pair`."""
         kwargs = dict(
             chat_id=self._chat_id,
-            text=self.format_message(pair, score, candles, early, wallet),
+            text=self.format_message(pair, wallet),
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
             message_thread_id=self._message_thread_id,
@@ -177,9 +133,8 @@ class TelegramAlerter:
             await self._bot.send_message(**kwargs)
         except RetryAfter as exc:
             # Flood control (~20 mensajes/min en grupos), típico cuando salen
-            # varias alertas juntas al arrancar. Se espera lo que pide Telegram
-            # y se reintenta una vez; antes la alerta se perdía hasta la
-            # próxima pasada.
+            # varios avisos juntos. Se espera lo que pide Telegram y se
+            # reintenta una vez; antes el aviso se perdía.
             # PTB avisa que retry_after pasará de int a timedelta; se soportan
             # ambos, así que el aviso solo ensuciaría el log.
             with warnings.catch_warnings():

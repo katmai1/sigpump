@@ -1,25 +1,7 @@
 [dexscreener]
+# De DexScreener se saca el par del token comprado (precio, liquidez, market
+# cap, edad...) para los filtros, el aviso y el seguimiento del resultado.
 chain_id = "solana"
-min_liquidity_usd = 5000.0
-min_volume_h1_usd = 2000.0
-# Descarta pares con market cap (o fdv si no hay market cap) por debajo de esto.
-# 0 = sin filtro de capitalización.
-min_market_cap_usd = 0.0
-# Descarta pares recién creados (mayor riesgo de rug pull). Los de menos de
-# 2 h daban -5,3% a 15 min y -23,6% en el peor momento. 0 = sin filtro.
-min_pair_age_minutes = 120.0
-# Mínimo de transacciones (compras + ventas) en la última hora.
-min_txns_h1 = 50
-# Fracción mínima de ventas sobre el total de txns en 1h (0-1). Casi sin
-# ventas suele ser un honeypot o un pump coordinado. 0 = sin filtro.
-min_sell_ratio_h1 = 0.1
-# Tamaño medio máximo por trade (volumen 1h / txns 1h). Mucho volumen en
-# pocas operaciones delata wash trading o un precio mal calculado. 0 = sin filtro.
-max_avg_trade_usd = 5000.0
-# Subida máxima de precio en 1h, en %. Miles de % suele ser precio roto o
-# manipulado. 0 = sin filtro.
-max_price_change_h1_pct = 1000.0
-
 # Monedas contra las que debe cotizar el par, por símbolo o dirección del
 # quote (en Solana, casi todo cotiza contra SOL). Vacío = cualquiera.
 quote_tokens = ["SOL"]
@@ -27,80 +9,14 @@ quote_tokens = ["SOL"]
 # meteora, orca...). Si el token tiene varios pools, se usa el de más liquidez
 # entre los que cumplen esto y quote_tokens. Vacío = cualquiera.
 dex_ids = ["pumpswap", "raydium"]
-# Actividad mínima en los últimos 5 minutos: por debajo, el "arranque" son dos
-# operaciones sueltas. 0 = sin filtro.
-min_txns_m5 = 10
-min_volume_m5_usd = 500.0
-
-[geckoterminal]
-# Páginas del ranking de pools trending de GeckoTerminal a sumar como
-# candidatos (20 pools por página, máximo 10). 0 = no usar esta fuente.
-trending_pages = 5
-# Antes de alertar, contrasta el par con GeckoTerminal (precio, liquidez y
-# velas de 1 min). Si no se puede verificar, no se alerta en esa pasada.
-verify_before_alert = true
-# Diferencia máxima de precio entre DexScreener y GeckoTerminal, en %. 0 = sin filtro.
-max_price_deviation_pct = 50.0
-# Caída máxima dentro de una vela de 1 minuto en la última hora, en %. 0 = sin filtro.
-max_candle_drop_pct = 30.0
-# Filtros de "llega tarde" sobre las mismas velas (requieren verify_before_alert).
-# Descarta si el precio ya está más de este % por encima del mínimo de la
-# última hora: la subida ya se hizo. 0 = sin filtro.
-max_rise_from_low_pct = 150.0
-# Descarta si el precio ya cae más de este % desde el máximo de los últimos
-# 15 minutos: el pico ya pasó. 0 = sin filtro.
-max_drop_from_recent_high_pct = 20.0
 
 [radar]
-# Alertas completas (pasada con score, filtros y velas). false = no se mandan;
-# la pasada sigue corriendo si hace falta para elegir los tokens que vigilan
-# las prealertas. Las prealertas se activan/desactivan con [watch].enabled y
-# los avisos de wallets con [wallets].enabled.
-alerts_enabled = true
-poll_interval_seconds = 90
-alert_cooldown_minutes = 60
-score_alert_threshold = 70.0
-# Tope de direcciones a evaluar por pasada (boosted primero, luego trending).
-top_n_candidates = 200
-# Base SQLite donde se registra cada alerta (y cada descarte por llegar tarde)
-# con el precio a +5, +15 y +30 minutos, para medir si las señales dan margen.
-# Se crea sola. "" = no registrar.
+# Base SQLite donde se registra cada compra de las wallets seguidas (avisada o
+# descartada, con su motivo) y su precio a +5, +15 y +30 minutos. La usan la
+# lista negra automática ([wallets].rug_drop_pct y loser_*) y los cooldowns
+# tras un reinicio. Se crea sola. "" = no registrar.
 alert_log_path = "alertas.db"
 verbose = false
-
-[watch]
-# Vigilancia rápida y PREALERTAS. Cada pasada completa elige los tokens a
-# vigilar (los que pasan liquidez, market cap, edad y subida máxima; no se les
-# exige actividad) y un segundo bucle los consulta cada interval_seconds. Cada
-# pool se compara con sus propias fotos de hace 5-20 min: si estaba tranquilo
-# y arranca, manda una prealerta sin esperar a la pasada completa. Sin velas,
-# así que es menos fiable que la alerta completa, que se sigue mandando aparte.
-# false = sin prealertas.
-enabled = true
-# DexScreener refresca sus datos cada ~30 s: consultar más seguido no aporta.
-interval_seconds = 30
-# Tokens vigilados, de mayor a menor volumen 1h (un request cada 30).
-max_tokens = 90
-# Precio actual frente a la mediana de la base, en %. Por debajo del mínimo
-# todavía no arrancó; por encima del máximo ya subió y llega tarde.
-min_price_move_pct = 4.0
-max_price_move_pct = 30.0
-# Volumen y txns de los últimos 5 min frente a la mediana de la base.
-min_volume_ratio = 2.5
-min_txns_ratio = 2.0
-# Fracción mínima de compras en las txns de 5 min (0-1).
-min_buy_ratio = 0.55
-# Minutos sin repetir prealerta del mismo token. Las repetidas del mismo día
-# rendían mucho peor que la primera (tokens que suben y bajan sin tendencia).
-cooldown_minutes = 360
-# No mandar la alerta completa de un token con prealerta en estos últimos
-# minutos: llegaba con la subida ya hecha. 0 = mandarla igual.
-suppress_alert_minutes = 360
-
-# Segundos que el arranque tiene que seguir cumpliéndose, con datos nuevos de
-# DexScreener, antes de avisar. Cuesta ~30 s de margen pero quita los arranques
-# que se apagaban enseguida. 0 = avisar en cuanto se detecta.
-require_sustained_seconds = 30
 
 [solana]
 # Antes de avisar, comprueba en la blockchain que el token no se pueda acuñar
@@ -114,7 +30,8 @@ rpc_url = "https://api.mainnet-beta.solana.com"
 # Usa el rpc_url de [solana]; el RPC público corta enseguida, conviene uno con
 # API key (Helius, QuickNode...). Las compras en bonding curve (pump.fun antes
 # de graduarse, etc.) y las de tokens que se pueden acuñar o congelar se ignoran.
-enabled = false
+# false = no hay nada que avisar y el programa no arranca.
+enabled = true
 # Una dirección por línea; lo que va detrás de # es la etiqueta del aviso:
 #   5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1  # ballena 1
 # Un * detrás de la dirección la marca de confianza: avisa sola aunque no
@@ -180,26 +97,6 @@ websocket = true
 ws_url = ""
 # Con el WebSocket, cada cuánto se consultan todas por si se perdió un aviso.
 full_poll_minutes = 10
-
-[scoring]
-# Penalización por subida ya hecha: si el cambio de 1h supera start, el score
-# se multiplica por un factor que baja linealmente de 1 (en start) a 0 (en end).
-# Con 60/250, un +100% en 1h conserva el 79% del score y un +150%, el 53%.
-# start = 0 desactiva la penalización.
-late_penalty_start_h1_pct = 60.0
-late_penalty_end_h1_pct = 250.0
-
-[scoring_weights]
-volume_h1 = 0.20
-# Volumen de 5 min × 12 frente al de 1h: x1 = 0 puntos, x3 o más = tope.
-# Solo puntúa si el precio de 5 min sube (en un dump el volumen también se acelera).
-volume_acceleration = 0.25
-# % de compras en las txns de 5 min: 50% = 0 puntos, 75% o más = tope.
-buy_pressure = 0.10
-price_change_h1 = 0.20
-price_change_h6 = 0.05
-liquidity = 0.10
-boosted = 0.10
 
 [telegram]
 # token del bot y chat_id del usuario o canal que debe recibir las alertas.

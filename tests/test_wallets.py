@@ -589,7 +589,7 @@ class _FakeAlerter:
     def __init__(self):
         self.wallet: list[tuple[dict, WalletSignal]] = []
 
-    async def send(self, pair, score, candles=None, early=None, wallet=None):
+    async def send(self, pair, wallet):
         await asyncio.sleep(0)
         self.wallet.append((pair, wallet))
 
@@ -634,7 +634,7 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         alerter = _FakeAlerter()
         await radar._wallets_once(_FakeClient(pairs=[{**_pair("TOK"), "dexId": "pumpfun"}]), alerter)
         self.assertEqual(alerter.wallet, [])
-        self.assertEqual(radar._tracker.last_sent("wallet", 0), {})
+        self.assertEqual(self._rows(), [])
 
     async def test_descarta_compras_fuera_de_los_dex_y_quote_pedidos(self):
         sol = {"symbol": "SOL", "address": "So11111111111111111111111111111111111111112"}
@@ -866,35 +866,29 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         radar._wallet_watcher.reload()
         self.assertEqual(wallets_txt.read_text(encoding="utf-8"), f"{OTRA}  # buena\n")
 
-    async def test_solo_wallets_muestrea_el_precio_de_las_senales(self):
-        """Sin alertas ni prealertas no corre otro bucle que actualice el registro."""
-        radar = self._radar(alerts_enabled=False, watch_enabled=False, wallets_enabled=True)
-        radar._tracker.update = AsyncMock()
-        await radar._wallets_once(_FakeClient(pairs=[]), _FakeAlerter())
-        radar._tracker.update.assert_awaited_once()
-
-    async def test_con_alertas_el_precio_lo_muestrea_la_pasada(self):
+    async def test_cada_vuelta_muestrea_el_precio_de_las_senales(self):
         radar = self._radar()
         radar._tracker.update = AsyncMock()
         await radar._wallets_once(_FakeClient(pairs=[]), _FakeAlerter())
-        radar._tracker.update.assert_not_awaited()
+        radar._tracker.update.assert_awaited_once()
 
 
 class TestMensajeDeWallet(unittest.TestCase):
     def test_encabezado_con_compra_y_confluencia(self):
         alerter = TelegramAlerter("123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11", "-100123")
         signal = WalletSignal(_buy(label="<ballena>", new=False), others=("otra",))
-        text = alerter.format_message(_pair("TOK", symbol="PEPE"), 50.0, wallet=signal)
+        text = alerter.format_message(_pair("TOK", symbol="PEPE"), signal)
         self.assertIn("&lt;ballena&gt; compró PEPE", text)
         self.assertIn("Amplía posición", text)
         self.assertIn("1.50 SOL", text)
         self.assertIn("https://solscan.io/tx/SIG", text)
         self.assertIn("También entraron: <b>otra</b>", text)
         self.assertNotIn("ACTUALIZACIÓN", text)
+        self.assertNotIn("Score", text)
 
     def test_encabezado_de_actualizacion_y_confianza(self):
         alerter = TelegramAlerter("123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11", "-100123")
         signal = WalletSignal(_buy(trusted=True), others=("a", "b"), update=True)
-        text = alerter.format_message(_pair("TOK", symbol="PEPE"), 50.0, wallet=signal)
+        text = alerter.format_message(_pair("TOK", symbol="PEPE"), signal)
         self.assertTrue(text.startswith("🔁 <b>ACTUALIZACIÓN</b>"))
         self.assertIn("⭐ ballena compró", text)

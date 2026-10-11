@@ -43,7 +43,7 @@ from sigpump.wallets import COMMITMENT, MAX_REQUESTS_PER_SECOND, MAX_TRANSACTION
 
 log = logging.getLogger()
 
-DEFAULT_MINUTES = 10.0
+DEFAULT_MINUTES = 20.0
 DEFAULT_MIN_SOL = 2.0
 # Transacciones leídas como máximo: un token con mucho volumen hace miles en
 # 10 minutos, y cada una cuesta 0.1 créditos con "helius" o 1 con "rpc".

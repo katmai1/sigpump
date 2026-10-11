@@ -4,10 +4,19 @@ peligroso, el cacheo y la tolerancia a fallos del RPC."""
 import logging
 import time
 import unittest
+from unittest.mock import patch
 
 import aiohttp
 
-from sigpump.solana import MAX_ACCOUNTS_PER_CALL, UNSAFE_TTL_SECONDS, TokenAuthorities
+from sigpump.solana import (
+    MAX_ACCOUNTS_PER_CALL,
+    RPC_MAX_RETRIES,
+    UNSAFE_TTL_SECONDS,
+    RateLimiter,
+    TokenAuthorities,
+    redact,
+    rpc_call,
+)
 
 
 def _cuenta(mint=None, freeze=None):
@@ -124,6 +133,51 @@ class TestTokenAuthorities(unittest.IsolatedAsyncioTestCase):
         session = _FakeSession(_respuesta(_cuenta()))
         await TokenAuthorities(session, "https://rpc.ejemplo").unsafe_reasons(["TOK", "TOK"])
         self.assertEqual(session.peticiones, [["TOK"]])
+
+
+class TestRpcCall(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        patcher = patch("sigpump.solana.asyncio.sleep")
+        self.sleep = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def _llamar(self, session):
+        return await rpc_call(session, "https://rpc/?api-key=SECRETO", "getX", ["a"], RateLimiter(1000), 15)
+
+    async def test_429_se_reintenta_y_devuelve_el_resultado(self):
+        session = _FakeSession(_FakeResponse({}, 429), _FakeResponse({}, 503), _FakeResponse({"result": 7}))
+        self.assertEqual(await self._llamar(session), 7)
+        self.assertEqual(len(session.peticiones), 3)
+
+    async def test_agotados_los_reintentos_lanza_valueerror_sin_la_key(self):
+        session = _FakeSession(*[_FakeResponse({}, 429)] * (RPC_MAX_RETRIES + 1))
+        with self.assertRaises(ValueError) as ctx:
+            await self._llamar(session)
+        self.assertIn("429", str(ctx.exception))
+        self.assertNotIn("SECRETO", str(ctx.exception))
+        self.assertEqual(len(session.peticiones), RPC_MAX_RETRIES + 1)
+
+    async def test_4xx_no_se_reintenta(self):
+        session = _FakeSession(_FakeResponse({}, 401))
+        with self.assertRaises(ValueError):
+            await self._llamar(session)
+        self.assertEqual(len(session.peticiones), 1)
+
+    async def test_error_del_rpc(self):
+        session = _FakeSession(_FakeResponse({"error": {"code": -32602}}))
+        with self.assertRaises(ValueError):
+            await self._llamar(session)
+
+
+class TestRedact(unittest.TestCase):
+    def test_quita_la_api_key(self):
+        texto = "429, message='Too Many Requests', url='https://mainnet.helius-rpc.com/?api-key=5836-abc'"
+        self.assertEqual(
+            redact(texto), "429, message='Too Many Requests', url='https://mainnet.helius-rpc.com/?api-key=***'"
+        )
+
+    def test_sin_key_no_cambia(self):
+        self.assertEqual(redact("https://api.mainnet-beta.solana.com"), "https://api.mainnet-beta.solana.com")
 
 
 if __name__ == "__main__":

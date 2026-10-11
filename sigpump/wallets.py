@@ -26,6 +26,8 @@ from pathlib import Path
 
 import aiohttp  # type: ignore[import-not-found]
 
+from sigpump.solana import RateLimiter, redact, rpc_call
+
 log = logging.getLogger()
 
 LAMPORTS_PER_SOL = 1_000_000_000
@@ -40,9 +42,10 @@ QUOTE_MINTS = STABLE_MINTS | {WSOL_MINT}
 # dos vueltas solo se miran las últimas: es un bot, no alguien a quien copiar.
 MAX_SIGNATURES_PER_POLL = 25
 REQUEST_TIMEOUT_SECONDS = 15
-# Ritmo máximo de peticiones al RPC. El plan gratuito de Helius corta a 10
-# por segundo; se deja margen para la comprobación de autoridades.
-MAX_REQUESTS_PER_SECOND = 8
+# Ritmo máximo de peticiones al RPC, por proceso. El plan gratuito de Helius
+# corta a 10 por segundo: con el radar y buyers.py a la vez son 5 + 5, y los
+# 429 sueltos (p. ej. por la comprobación de autoridades) se reintentan.
+MAX_REQUESTS_PER_SECOND = 5
 # Versión de transacción más alta que se acepta. Si llega una más nueva, el
 # RPC da error y esa transacción se salta tras MAX_TX_ATTEMPTS intentos.
 MAX_TRANSACTION_VERSION = 1
@@ -371,8 +374,7 @@ class WalletWatcher:
         self._last_signature: dict[str, str | None] = {}
         # Firma -> intentos fallidos de leerla.
         self._attempts: dict[str, int] = {}
-        self._rate_lock = asyncio.Lock()
-        self._next_request = 0.0
+        self._limiter = RateLimiter(MAX_REQUESTS_PER_SECOND)
         # Wallet -> firmas avisadas por el WebSocket pendientes de leer.
         self._pending: dict[str, list[str]] = {}
         # Firmas ya leídas o descartadas, por orden de llegada (las más
@@ -511,19 +513,9 @@ class WalletWatcher:
     async def _rpc(self, method: str, params: list) -> object:
         """Resultado de una llamada al RPC. Lanza ValueError si el RPC
         devuelve un error, y los de red de aiohttp tal cual."""
-        body = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-        timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
-        async with self._rate_lock:
-            wait = self._next_request - time.monotonic()
-            if wait > 0:
-                await asyncio.sleep(wait)
-            self._next_request = time.monotonic() + 1 / MAX_REQUESTS_PER_SECOND
-        async with self._session.post(self._rpc_url, json=body, timeout=timeout) as resp:
-            resp.raise_for_status()
-            data = await resp.json(content_type=None)
-        if not isinstance(data, dict) or data.get("error"):
-            raise ValueError(f"error del RPC en {method}: {(data or {}).get('error')}")
-        return data.get("result")
+        return await rpc_call(
+            self._session, self._rpc_url, method, params, self._limiter, REQUEST_TIMEOUT_SECONDS
+        )
 
     async def poll(self) -> list[WalletBuy]:
         """Compras nuevas desde la vuelta anterior: las de las transacciones
@@ -677,7 +669,7 @@ class WalletWatcher:
                 log.warning("El WebSocket de wallets se cerró")
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError) as exc:
                 # La URL lleva la API key: no se escribe en el log.
-                log.warning("WebSocket de wallets caído: %s", exc or type(exc).__name__)
+                log.warning("WebSocket de wallets caído: %s", redact(exc) or type(exc).__name__)
             finally:
                 self._connected = False
             if time.monotonic() - started > WS_RECONNECT_MAX_SECONDS:

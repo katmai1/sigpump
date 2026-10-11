@@ -191,6 +191,8 @@ class TestParseBuys(unittest.TestCase):
 
 
 class _FakeResponse:
+    status = 200
+
     def __init__(self, payload):
         self._payload = payload
 

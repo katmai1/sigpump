@@ -41,6 +41,7 @@ import aiohttp  # type: ignore[import-not-found]
 
 from sigpump.config import Config
 from sigpump.screener import DexScreenerClient
+from sigpump.solana import RateLimiter, rpc_call
 from sigpump.wallets import COMMITMENT, MAX_REQUESTS_PER_SECOND, MAX_TRANSACTION_VERSION, parse_buys
 
 log = logging.getLogger()
@@ -118,28 +119,15 @@ class Rpc:
     def __init__(self, session: aiohttp.ClientSession, url: str):
         self._session = session
         self._url = url
-        self._lock = asyncio.Lock()
-        self._next_request = 0.0
+        self._limiter = RateLimiter(MAX_REQUESTS_PER_SECOND)
         self.calls = 0
         self.credits = 0
 
     async def call(self, method: str, params: list) -> object:
         """Resultado de la llamada. Lanza ValueError si el RPC devuelve un
         error, y los de red de aiohttp tal cual."""
-        async with self._lock:
-            wait = self._next_request - time.monotonic()
-            if wait > 0:
-                await asyncio.sleep(wait)
-            self._next_request = time.monotonic() + 1 / MAX_REQUESTS_PER_SECOND
         self.calls += 1
-        body = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-        timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
-        async with self._session.post(self._url, json=body, timeout=timeout) as resp:
-            resp.raise_for_status()
-            data = await resp.json(content_type=None)
-        if not isinstance(data, dict) or data.get("error"):
-            raise ValueError(f"error del RPC en {method}: {(data or {}).get('error')}")
-        result = data.get("result")
+        result = await rpc_call(self._session, self._url, method, params, self._limiter, REQUEST_TIMEOUT_SECONDS)
         self.credits += self._credits(method, result)
         return result
 

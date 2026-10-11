@@ -7,13 +7,19 @@ compraron) o freezeAuthority (pueden congelar tus tokens y dejarte sin poder
 vender). Las autoridades solo se pueden renunciar, nunca volver a poner, así
 que un token limpio se recuerda para siempre y uno con autoridades se vuelve
 a mirar cada tanto por si las renunció.
+
+También tiene lo común a todas las llamadas al RPC: el ritmo máximo, los
+reintentos ante 429/5xx y quitar la API key de lo que se escribe en el log.
 """
 
 import asyncio
 import logging
+import re
 import time
 
 import aiohttp  # type: ignore[import-not-found]
+
+from sigpump.screener import RETRYABLE_STATUSES
 
 log = logging.getLogger()
 
@@ -24,6 +30,62 @@ REQUEST_TIMEOUT_SECONDS = 15
 # Un token con autoridades puede renunciarlas después: se vuelve a consultar
 # pasado este tiempo. Uno limpio ya no puede volver atrás y no caduca.
 UNSAFE_TTL_SECONDS = 30 * 60
+# Reintentos ante 429/5xx del RPC, esperando 1 s, 2 s, 4 s...
+RPC_MAX_RETRIES = 3
+RPC_RETRY_BACKOFF_SECONDS = 1.0
+_API_KEY_RE = re.compile(r"(api[-_]key=)[^&\s'\"]+", re.IGNORECASE)
+
+
+def redact(text: object) -> str:
+    """`text` sin la API key que lleve la URL del RPC (Helius la pone en la
+    query y aiohttp copia la URL entera en sus errores)."""
+    return _API_KEY_RE.sub(r"\1***", str(text))
+
+
+class RateLimiter:
+    """Deja pasar como mucho `per_second` peticiones por segundo."""
+
+    def __init__(self, per_second: float):
+        self._interval = 1 / per_second
+        self._lock = asyncio.Lock()
+        self._next = 0.0
+
+    async def wait(self) -> None:
+        async with self._lock:
+            wait = self._next - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._next = time.monotonic() + self._interval
+
+
+async def rpc_call(
+    session: aiohttp.ClientSession,
+    url: str,
+    method: str,
+    params: list,
+    limiter: RateLimiter,
+    timeout_seconds: float,
+) -> object:
+    """Resultado de una llamada JSON-RPC. Reintenta los 429 y 5xx, cada vez
+    pasando por `limiter`. Lanza ValueError si el RPC devuelve un error o un
+    HTTP de error (sin la URL, que lleva la API key), y los de red de aiohttp
+    tal cual."""
+    body = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+    for attempt in range(RPC_MAX_RETRIES + 1):
+        await limiter.wait()
+        async with session.post(url, json=body, timeout=timeout) as resp:
+            if resp.status not in RETRYABLE_STATUSES or attempt == RPC_MAX_RETRIES:
+                if resp.status >= 400:
+                    raise ValueError(f"HTTP {resp.status} en {method}")
+                data = await resp.json(content_type=None)
+                break
+        wait = RPC_RETRY_BACKOFF_SECONDS * (2**attempt)
+        log.debug("RPC HTTP %s en %s, reintentando en %.1fs", resp.status, method, wait)
+        await asyncio.sleep(wait)
+    if not isinstance(data, dict) or data.get("error"):
+        raise ValueError(f"error del RPC en {method}: {(data or {}).get('error')}")
+    return data.get("result")
 
 
 class TokenAuthorities:
@@ -77,7 +139,7 @@ class TokenAuthorities:
                 resp.raise_for_status()
                 data = await resp.json(content_type=None)
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
-            log.warning("No se pudieron consultar las autoridades en %s: %s", self._rpc_url, exc)
+            log.warning("No se pudieron consultar las autoridades en %s: %s", redact(self._rpc_url), redact(exc))
             return
         if not isinstance(data, dict) or data.get("error"):
             log.warning("El RPC de Solana devolvió un error: %s", (data or {}).get("error"))

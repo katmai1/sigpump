@@ -239,7 +239,8 @@ class MemecoinRadar:
     def _wallet_pair_rejection(self, pair: dict) -> str | None:
         """Motivo para no avisar de una compra de wallet por cómo está el par
         ([dexscreener].dex_ids y quote_tokens; [wallets].min_pair_age_minutes,
-        max_price_change_h1_pct y min_market_cap_usd), o None si pasa."""
+        max_price_change_h1_pct, min_market_cap_usd, min_txns_m5 y
+        min_volume_h1_usd), o None si pasa."""
         cfg = self._config
         venue_reason = self._venue_reason(pair)
         if venue_reason:
@@ -256,6 +257,16 @@ class MemecoinRadar:
         market_cap_usd = to_float(pair.get("marketCap")) or to_float(pair.get("fdv"))
         if market_cap_usd < cfg.wallets_min_market_cap_usd:
             return f"market cap ${market_cap_usd:,.0f} < ${cfg.wallets_min_market_cap_usd:,.0f}"
+        # Sin txns o volume no se puede evaluar la actividad: no se descarta por ella.
+        txns_m5 = (pair.get("txns") or {}).get("m5")
+        if cfg.wallets_min_txns_m5 and isinstance(txns_m5, dict):
+            count = int(to_float(txns_m5.get("buys")) + to_float(txns_m5.get("sells")))
+            if count < cfg.wallets_min_txns_m5:
+                return f"{count} txns en 5 min < {cfg.wallets_min_txns_m5}"
+        volume_h1 = (pair.get("volume") or {}).get("h1")
+        if cfg.wallets_min_volume_h1_usd and volume_h1 is not None:
+            if to_float(volume_h1) < cfg.wallets_min_volume_h1_usd:
+                return f"volumen 1h ${to_float(volume_h1):,.0f} < ${cfg.wallets_min_volume_h1_usd:,.0f}"
         return None
 
     def _blacklist_hyperactive(self, buy: WalletBuy) -> None:

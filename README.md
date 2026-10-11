@@ -87,7 +87,10 @@ vuelven a añadir, se quitan otra vez.
 `min_pair_age_minutes`, `max_price_change_h1_pct` y `min_market_cap_usd`
 descartan las compras en pares recién creados, que ya subieron mucho en la
 última hora o de market cap pequeño: con los primeros datos eran las que
-casi siempre perdían. Quedan en el registro con su motivo.
+casi siempre perdían. `min_txns_m5` y `min_volume_h1_usd` descartan los
+tokens muertos, con pocas transacciones en los últimos 5 minutos o poco
+volumen en la última hora: no se mueven y el aviso no sirve. Quedan en el
+registro con su motivo.
 
 ## Registro de compras
 
@@ -173,7 +176,8 @@ Secciones disponibles:
   (`token_cooldown_minutes`, `realert_new_wallets`), tope de actividad
   (`max_tokens_per_hour`), bots (`max_txs_per_hour`), abandonadas (`max_inactive_days`), lista negra (`blacklist_file`, `rug_drop_pct`,
   `loser_min_signals`, `loser_max_median_ret_pct`) y filtros del par
-  (`min_pair_age_minutes`, `max_price_change_h1_pct`, `min_market_cap_usd`).
+  (`min_pair_age_minutes`, `max_price_change_h1_pct`, `min_market_cap_usd`,
+  `min_txns_m5`, `min_volume_h1_usd`).
 - `[telegram]` — `bot_token`, `chat_id` y opcionalmente `message_thread_id`
   si querés mandar los avisos a un tema (topic) concreto dentro de un
   grupo con "Temas" activados.

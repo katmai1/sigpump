@@ -3,9 +3,18 @@
 import asyncio
 import time
 import unittest
+from datetime import datetime
 from unittest.mock import patch
 
-from sigpump.buyers import SIGNATURES_PAGE, Buyer, BuyerFinder, HistoryFilter, TransactionReader
+from sigpump.buyers import (
+    SIGNATURES_PAGE,
+    Buyer,
+    BuyerFinder,
+    HistoryFilter,
+    TransactionReader,
+    parse_time,
+    time_window,
+)
 from sigpump.wallets import LAMPORTS_PER_SOL
 
 MINT = "TokenMint1111111111111111111111111111111pump"
@@ -31,9 +40,9 @@ def _compra(wallet, sol, ts, firma="x"):
     }
 
 
-def _find(rpc, addresses, since, max_txs=100, method="helius"):
+def _find(rpc, addresses, since, max_txs=100, method="helius", until=None):
     finder = BuyerFinder(TransactionReader(rpc, max_txs, method), min_sol=2.0)
-    return asyncio.run(finder.find(MINT, addresses, since))
+    return asyncio.run(finder.find(MINT, addresses, since, until))
 
 
 class _FakeRpc:
@@ -113,6 +122,71 @@ class FindBuyersTest(unittest.TestCase):
         )
         buyers = _find(rpc, [MINT], now - 600, max_txs=1, method="rpc")
         self.assertEqual([b.wallet for b in buyers], [BALLENA])
+
+
+class RangoTest(unittest.TestCase):
+    def test_rpc_salta_las_posteriores_al_rango(self):
+        now = time.time()
+        rpc = _FakeRpc(
+            signatures={MINT: [
+                {"signature": "despues", "blockTime": now - 60, "err": None},
+                {"signature": "dentro", "blockTime": now - 400, "err": None},
+                {"signature": "antes", "blockTime": now - 900, "err": None},
+            ]},
+            transactions={
+                "despues": _compra(PEZ, 3, now - 60, "despues"),
+                "dentro": _compra(BALLENA, 3, now - 400, "dentro"),
+                "antes": _compra(PEZ, 3, now - 900, "antes"),
+            },
+        )
+        buyers = _find(rpc, [MINT], now - 600, method="rpc", until=now - 300)
+        self.assertEqual([b.wallet for b in buyers], [BALLENA])
+        self.assertEqual([p for m, p in rpc.calls if m == "getTransaction"], ["dentro"])
+
+    def test_helius_filtra_el_rango_en_el_servidor(self):
+        rpc = _HeliusRpc({})
+        _find(rpc, [MINT], 1000.0, until=1300.0)
+        filtros = rpc.calls[0][2]["filters"]
+        self.assertEqual(filtros["blockTime"], {"gte": 1000, "lte": 1300})
+
+
+class VentanaTest(unittest.TestCase):
+    NOW = datetime(2026, 10, 11, 17, 0, 0)
+
+    def test_hora_de_hoy(self):
+        self.assertEqual(parse_time("16:30", self.NOW), datetime(2026, 10, 11, 16, 30))
+
+    def test_hora_futura_es_de_ayer(self):
+        self.assertEqual(parse_time("23:50", self.NOW), datetime(2026, 10, 10, 23, 50))
+
+    def test_con_fecha(self):
+        self.assertEqual(parse_time("2026-10-01 09:15:30", self.NOW), datetime(2026, 10, 1, 9, 15, 30))
+
+    def test_hora_invalida(self):
+        with self.assertRaises(ValueError):
+            parse_time("16h30", self.NOW)
+
+    def test_rango(self):
+        since, until, texto = time_window(10, "16:30", "16:35", self.NOW)
+        self.assertEqual(until - since, 300)
+        self.assertEqual(texto, "entre 16:30 y 16:35")
+
+    def test_sin_from_son_los_ultimos_minutos(self):
+        since, until, texto = time_window(10, None, None, self.NOW)
+        self.assertEqual(since, self.NOW.timestamp() - 600)
+        self.assertIsNone(until)
+        self.assertEqual(texto, "en los últimos 10 min")
+
+    def test_from_sin_to_es_hasta_ahora(self):
+        _, until, texto = time_window(10, "16:30", None, self.NOW)
+        self.assertIsNone(until)
+        self.assertEqual(texto, "entre 16:30 y ahora")
+
+    def test_rango_invertido_o_to_sin_from(self):
+        with self.assertRaises(ValueError):
+            time_window(10, "16:35", "16:30", self.NOW)
+        with self.assertRaises(ValueError):
+            time_window(10, None, "16:30", self.NOW)
 
 
 class _HistoryRpc:

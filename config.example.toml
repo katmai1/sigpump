@@ -89,6 +89,12 @@ loser_max_median_ret_pct = -30
 min_pair_age_minutes = 120
 max_price_change_h1_pct = 50
 min_market_cap_usd = 100000
+# Actividad mínima del par (0 = sin filtro): transacciones (compras + ventas)
+# en los últimos 5 min y volumen en USD de la última hora. Los tokens muertos
+# (una o dos transacciones en los últimos minutos) no se mueven: el aviso no
+# hace perder, pero tampoco sirve.
+min_txns_m5 = 5
+min_volume_h1_usd = 5000
 # Avisos de actividad por el WebSocket del RPC (logsSubscribe): solo se leen
 # las transacciones que avisa (sin las transferencias simples), en vez de
 # consultar todas las wallets en cada vuelta. Si se cae, se vuelve a

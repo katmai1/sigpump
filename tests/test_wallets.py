@@ -898,6 +898,21 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self._rows()[-1]["motivo_descarte"] or "", motivo)
                 self.assertEqual(len(alerter.wallet), 0 if motivo else 1)
 
+    async def test_filtros_de_actividad_del_par_para_wallets(self):
+        casos = [
+            ({**_pair("TOK"), "txns": {"m5": {"buys": 1, "sells": 0}}}, "1 txns en 5 min < 5"),
+            (_pair("TOK", volume=300), "volumen 1h $300 < $5,000"),
+            ({k: v for k, v in _pair("TOK").items() if k not in ("txns", "volume")}, ""),
+            (_pair("TOK"), ""),
+        ]
+        for pair, motivo in casos:
+            with self.subTest(motivo=motivo):
+                radar = self._radar([_buy()], wallets_min_txns_m5=5, wallets_min_volume_h1_usd=5_000)
+                alerter = _FakeAlerter()
+                await radar._wallets_once(_FakeClient(pairs=[pair]), alerter)
+                self.assertEqual(self._rows()[-1]["motivo_descarte"] or "", motivo)
+                self.assertEqual(len(alerter.wallet), 0 if motivo else 1)
+
     async def test_wallet_que_compra_un_rug_va_a_la_lista_negra(self):
         tmp = self.path.parent
         wallets_txt, negra = tmp / "wallets.txt", tmp / "negra.txt"

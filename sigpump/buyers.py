@@ -5,6 +5,7 @@ Wallets que compraron un token en los últimos minutos gastando al menos un
 mínimo de SOL por transacción. Se ejecuta a mano con el mint del token:
 
     python -m sigpump.buyers <MINT> [--minutes 10] [--min-sol 2]
+    python -m sigpump.buyers <MINT> --from 16:30 --to 16:35
 
 Usa el [solana].rpc_url de config.toml. Las transacciones se piden al mint y
 a sus pools de DexScreener (los swaps de Raydium AMM v4 no incluyen el mint
@@ -33,6 +34,7 @@ import logging
 import time
 import tomllib
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import aiohttp  # type: ignore[import-not-found]
@@ -175,17 +177,20 @@ class TransactionReader:
         self._max_txs = max_txs
         self._method = method
 
-    async def read(self, addresses: list[str], since: float) -> list[dict | None]:
-        """Las transacciones de la ventana de todas las direcciones, sin
-        repetir. None en las que no se pudieron leer."""
+    async def read(
+        self, addresses: list[str], since: float, until: float | None = None
+    ) -> list[dict | None]:
+        """Las transacciones de la ventana [since, until] de todas las
+        direcciones, sin repetir. None en las que no se pudieron leer.
+        until None = hasta ahora."""
         if self._method == "helius":
             try:
-                return await self._read_helius(addresses, since)
+                return await self._read_helius(addresses, since, until)
             except RPC_ERRORS as exc:
                 # Un RPC que no es de Helius, un plan sin el método o un fallo
                 # a mitad: se repite con los métodos estándar.
                 log.warning("getTransactionsForAddress falló (%s), se usa --method rpc", exc)
-        return await self._read_rpc(addresses, since)
+        return await self._read_rpc(addresses, since, until)
 
     def _warn_truncated(self, total: int | None = None) -> None:
         found = f"{total}" if total is not None else f"Más de {self._max_txs}"
@@ -196,11 +201,13 @@ class TransactionReader:
 
     # --- helius: getTransactionsForAddress ---
 
-    async def _read_helius(self, addresses: list[str], since: float) -> list[dict | None]:
+    async def _read_helius(
+        self, addresses: list[str], since: float, until: float | None
+    ) -> list[dict | None]:
         by_signature: dict[str, dict] = {}
         truncated = False
         for address in addresses:
-            txs, more = await self._helius_pages(address, since)
+            txs, more = await self._helius_pages(address, since, until)
             truncated |= more
             for tx in txs:
                 if (signature := tx_signature(tx)) is not None:
@@ -212,11 +219,18 @@ class TransactionReader:
         log.info("Leídas %d transacciones", len(newest))
         return list(newest)
 
-    async def _helius_pages(self, address: str, since: float) -> tuple[list[dict], bool]:
-        """Transacciones de `address` desde `since` y True si quedaron más
+    async def _helius_pages(
+        self, address: str, since: float, until: float | None
+    ) -> tuple[list[dict], bool]:
+        """Transacciones de `address` en la ventana y True si quedaron más
         allá de max_txs. Lanza ValueError si el RPC no tiene el método."""
         txs: list[dict] = []
         token = None
+        # Helius filtra por tiempo en el servidor: una ventana antigua no
+        # cuesta más que una reciente.
+        block_time = {"gte": int(since)}
+        if until is not None:
+            block_time["lte"] = int(until)
         while len(txs) < self._max_txs:
             options: dict = {
                 "transactionDetails": "full",
@@ -226,7 +240,7 @@ class TransactionReader:
                 "encoding": "jsonParsed",
                 "maxSupportedTransactionVersion": MAX_TRANSACTION_VERSION,
                 # Las fallidas las filtra Helius y no se pagan.
-                "filters": {"blockTime": {"gte": int(since)}, "status": "succeeded"},
+                "filters": {"blockTime": block_time, "status": "succeeded"},
             }
             if token:
                 options["paginationToken"] = token
@@ -244,11 +258,13 @@ class TransactionReader:
 
     # --- rpc: getSignaturesForAddress + getTransaction ---
 
-    async def _read_rpc(self, addresses: list[str], since: float) -> list[dict | None]:
+    async def _read_rpc(
+        self, addresses: list[str], since: float, until: float | None
+    ) -> list[dict | None]:
         signatures: dict[str, float] = {}
         for address in addresses:
             try:
-                signatures |= await self._recent_signatures(address, since)
+                signatures |= await self._recent_signatures(address, since, until)
             except RPC_ERRORS as exc:
                 log.warning("No se pudieron pedir las firmas de %s: %s", address, exc)
         newest = sorted(signatures, key=signatures.__getitem__, reverse=True)
@@ -258,10 +274,14 @@ class TransactionReader:
         log.info("Leyendo %d transacciones...", len(newest))
         return list(await asyncio.gather(*(self._transaction(s) for s in newest)))
 
-    async def _recent_signatures(self, address: str, since: float) -> dict[str, float]:
+    async def _recent_signatures(
+        self, address: str, since: float, until: float | None
+    ) -> dict[str, float]:
         """Firma -> blockTime de las transacciones correctas de `address`
-        desde `since`. Las fallidas se descartan aquí, sin gastar un
-        getTransaction."""
+        en la ventana. Las fallidas se descartan aquí, sin gastar un
+        getTransaction. Las firmas solo se piden de la más nueva hacia atrás:
+        en una ventana antigua se pagan también las páginas posteriores a
+        ella (1 crédito por cada 1000)."""
         found: dict[str, float] = {}
         before = None
         while True:
@@ -277,6 +297,8 @@ class TransactionReader:
                 # la ventana cierra la búsqueda.
                 if block_time is not None and block_time < since:
                     return found
+                if until is not None and block_time is not None and block_time > until:
+                    continue
                 if entry.get("err") is None:
                     found[entry["signature"]] = float(block_time or time.time())
             if len(entries) < SIGNATURES_PAGE:
@@ -307,11 +329,14 @@ class BuyerFinder:
         self._reader = reader
         self._min_sol = min_sol
 
-    async def find(self, mint: str, addresses: list[str], since: float) -> list[Buyer]:
-        """Compradores de `mint` desde `since`, de quien más SOL gastó a quien menos."""
+    async def find(
+        self, mint: str, addresses: list[str], since: float, until: float | None = None
+    ) -> list[Buyer]:
+        """Compradores de `mint` entre `since` y `until` (None = ahora), de
+        quien más SOL gastó a quien menos."""
         buyers: dict[str, Buyer] = {}
         failed = 0
-        for tx in await self._reader.read(addresses, since):
+        for tx in await self._reader.read(addresses, since, until):
             wallet = tx_fee_payer(tx) if tx else None
             signature = tx_signature(tx) if tx else None
             if wallet is None or signature is None:
@@ -416,14 +441,14 @@ class HistoryFilter:
 class Report:
     """Salida por pantalla del resultado."""
 
-    def __init__(self, minutes: float, min_sol: float):
-        self._minutes = minutes
+    def __init__(self, window: str, min_sol: float):
+        self._window = window
         self._min_sol = min_sol
 
     def print(self, kept: list[Buyer], discarded: list[tuple[Buyer, str]], rpc: Rpc) -> None:
         print(
             f"\n{len(kept)} wallets habituales compraron >= {self._min_sol:g} SOL"
-            f" en los últimos {self._minutes:g} min:\n"
+            f" {self._window}:\n"
         )
         for buyer in kept:
             last = time.strftime("%H:%M:%S", time.localtime(buyer.last_ts))
@@ -444,27 +469,77 @@ async def _pool_addresses(session: aiohttp.ClientSession, chain_id: str, mint: s
     return [p["pairAddress"] for p in pairs if isinstance(p.get("pairAddress"), str)]
 
 
-async def _run(config: Config, args: argparse.Namespace) -> None:
-    since = time.time() - args.minutes * 60
+TIME_FORMATS = ("%H:%M", "%H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S")
+
+
+def parse_time(text: str, now: datetime) -> datetime:
+    """Hora local de --from/--to: "16:30", "16:30:15" o con fecha
+    "2026-10-11 16:30". Sin fecha es hoy, o ayer si esa hora aún no ha
+    llegado (a las 00:10, "23:50" es la de anoche)."""
+    for fmt in TIME_FORMATS:
+        try:
+            parsed = datetime.strptime(text.strip(), fmt)
+        except ValueError:
+            continue
+        if "%Y" in fmt:
+            return parsed
+        moment = now.replace(hour=parsed.hour, minute=parsed.minute, second=parsed.second, microsecond=0)
+        return moment - timedelta(days=1) if moment > now else moment
+    raise ValueError(f"hora inválida {text!r}: usa HH:MM, HH:MM:SS o AAAA-MM-DD HH:MM")
+
+
+def _time_text(moment: datetime, now: datetime) -> str:
+    fmt = "%H:%M" if moment.second == 0 else "%H:%M:%S"
+    return moment.strftime(fmt if moment.date() == now.date() else f"%Y-%m-%d {fmt}")
+
+
+def time_window(
+    minutes: float, start: str | None, end: str | None, now: datetime
+) -> tuple[float, float | None, str]:
+    """(desde, hasta, texto) de la ventana a buscar. Con --from manda el
+    rango (--to vacío = hasta ahora); sin él, los últimos `minutes`.
+    hasta None = ahora."""
+    if start is None:
+        if end is not None:
+            raise ValueError("--to necesita --from")
+        return now.timestamp() - minutes * 60, None, f"en los últimos {minutes:g} min"
+    since = parse_time(start, now)
+    until = parse_time(end, now) if end is not None else None
+    if until is not None and until <= since:
+        raise ValueError(f"--to ({_time_text(until, now)}) debe ser posterior a --from ({_time_text(since, now)})")
+    end_text = _time_text(until, now) if until is not None else "ahora"
+    return (
+        since.timestamp(),
+        until.timestamp() if until is not None else None,
+        f"entre {_time_text(since, now)} y {end_text}",
+    )
+
+
+async def _run(config: Config, args: argparse.Namespace, since: float, until: float | None, window: str) -> None:
     async with aiohttp.ClientSession() as session:
         pools = await _pool_addresses(session, config.chain_id, args.mint)
         log.info("Pools del token: %d", len(pools))
         rpc = Rpc(session, config.solana_rpc_url)
         finder = BuyerFinder(TransactionReader(rpc, args.max_txs, args.method), args.min_sol)
-        buyers = await finder.find(args.mint, [args.mint, *pools], since)
+        buyers = await finder.find(args.mint, [args.mint, *pools], since, until)
         log.info("Revisando el historial de %d wallets...", len(buyers))
         history = HistoryFilter(
             rpc, args.min_history, args.max_txs_per_day, args.max_failed_pct, args.history_pages
         )
         kept, discarded = await history.split(buyers)
-    Report(args.minutes, args.min_sol).print(kept, discarded, rpc)
+    Report(window, args.min_sol).print(kept, discarded, rpc)
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Wallets que compraron un token en los últimos minutos")
     parser.add_argument("mint", help="dirección del mint del token")
     parser.add_argument("--config", type=Path, default=Path("config.toml"))
-    parser.add_argument("--minutes", type=float, default=DEFAULT_MINUTES)
+    parser.add_argument("--minutes", type=float, default=DEFAULT_MINUTES,
+                        help="ventana hasta ahora, si no se da --from")
+    parser.add_argument("--from", dest="start", metavar="HORA",
+                        help="inicio del rango en hora local: 16:30 o '2026-10-11 16:30'")
+    parser.add_argument("--to", dest="end", metavar="HORA",
+                        help="fin del rango (por defecto, ahora)")
     parser.add_argument("--min-sol", type=float, default=DEFAULT_MIN_SOL)
     parser.add_argument("--max-txs", type=int, default=DEFAULT_MAX_TXS)
     parser.add_argument("--method", choices=METHODS, default=DEFAULT_METHOD,
@@ -489,7 +564,11 @@ def main() -> None:
         config = Config.from_toml(args.config)
     except (OSError, ValueError, tomllib.TOMLDecodeError) as e:
         raise SystemExit(f"Configuración inválida: {e}") from e
-    asyncio.run(_run(config, args))
+    try:
+        since, until, window = time_window(args.minutes, args.start, args.end, datetime.now())
+    except ValueError as e:
+        raise SystemExit(str(e)) from e
+    asyncio.run(_run(config, args, since, until, window))
 
 
 if __name__ == "__main__":

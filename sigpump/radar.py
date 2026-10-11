@@ -157,19 +157,6 @@ class MemecoinRadar:
             return f"par contra {quote}, no contra {' o '.join(cfg.quote_tokens)}"
         return None
 
-    def _venue_reason(self, pair: dict) -> str | None:
-        """Motivo para descartar un par por dónde cotiza ([dexscreener].dex_ids
-        y quote_tokens), o None si pasa."""
-        cfg = self._config
-        if cfg.dex_ids:
-            dex_id = str(pair.get("dexId") or "")
-            if dex_id.lower() not in {d.lower() for d in cfg.dex_ids}:
-                return f"par en {dex_id or '?'}, no en {' o '.join(cfg.dex_ids)}"
-        if cfg.quote_tokens and not _matches_quote(pair, cfg.quote_tokens):
-            quote = (pair.get("quoteToken") or {}).get("symbol") or "?"
-            return f"par contra {quote}, no contra {' o '.join(cfg.quote_tokens)}"
-        return None
-
     async def _unsafe_reasons(self, pairs: list[dict]) -> dict[str, str]:
         """
         Motivo por token de los que se pueden acuñar o congelar. {} si la

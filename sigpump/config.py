@@ -20,7 +20,6 @@ _KNOWN_KEYS: dict[str, set[str]] = {
     "radar": {"alert_log_path", "verbose"},
     "solana": {"check_token_authorities", "rpc_url"},
     "wallets": {
-        "enabled",
         "file",
         "interval_seconds",
         "min_sol",
@@ -55,7 +54,6 @@ _FIELD_TYPES: dict[str, tuple[str, tuple[type, ...]]] = {
     "check_token_authorities": ("[solana].check_token_authorities", (bool,)),
     "solana_rpc_url": ("[solana].rpc_url", (str,)),
     "alert_log_path": ("[radar].alert_log_path", (str,)),
-    "wallets_enabled": ("[wallets].enabled", (bool,)),
     "wallets_file": ("[wallets].file", (str,)),
     "wallets_interval_seconds": ("[wallets].interval_seconds", _NUMBER),
     "wallets_min_sol": ("[wallets].min_sol", _NUMBER),
@@ -113,7 +111,6 @@ class Config:
     dex_ids: list[str] = field(default_factory=list)
     alert_log_path: str = "alertas.db"
     # Seguimiento de wallets: avisa cuando una de las del fichero entra en un token.
-    wallets_enabled: bool = True
     wallets_file: str = "wallets.txt"
     wallets_interval_seconds: float = 15.0
     # Mínimo de SOL gastado para considerar que una transacción es una compra.
@@ -189,8 +186,6 @@ class Config:
             )
         if not all(isinstance(dex, str) and dex for dex in self.dex_ids):
             raise ValueError(f"[dexscreener].dex_ids debe ser una lista de textos ({self.dex_ids!r})")
-        if not self.wallets_enabled:
-            raise ValueError("No hay nada que avisar: [wallets].enabled está desactivado")
         if not self.solana_rpc_url:
             raise ValueError("[solana].rpc_url no puede estar vacío")
         if self.wallets_min_wallets < 1:
@@ -275,7 +270,6 @@ class Config:
             check_token_authorities=solana.get("check_token_authorities", True),
             solana_rpc_url=solana.get("rpc_url", MAINNET_RPC_URL),
             alert_log_path=radar.get("alert_log_path", "alertas.db"),
-            wallets_enabled=wallets.get("enabled", True),
             wallets_file=wallets.get("file", "wallets.txt"),
             wallets_interval_seconds=wallets.get("interval_seconds", 15.0),
             wallets_min_sol=wallets.get("min_sol", 0.1),

@@ -47,8 +47,6 @@ class TestConfigValidation(unittest.TestCase):
 
     def test_wallets_fuera_de_rango_dan_error(self):
         casos = [
-            dict(wallets_enabled=False),       # sin wallets no hay nada que avisar
-            dict(wallets_enabled="si"),
             dict(wallets_file=""),
             dict(wallets_interval_seconds=0),
             dict(wallets_full_poll_minutes=0),
@@ -86,7 +84,6 @@ class TestFromToml(unittest.TestCase):
     def test_toml_vacio_usa_defaults(self):
         config = Config.from_toml(self._write(""))
         self.assertEqual(config, Config())
-        self.assertTrue(config.wallets_enabled)
 
     def test_secciones_parciales(self):
         config = Config.from_toml(

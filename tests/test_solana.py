@@ -1,7 +1,6 @@
 """Tests de la comprobación de autoridades del mint: qué se considera
 peligroso, el cacheo y la tolerancia a fallos del RPC."""
 
-import asyncio
 import logging
 import time
 import unittest

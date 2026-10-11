@@ -29,13 +29,13 @@ class DexScreenerClient:
     def __init__(self, session: aiohttp.ClientSession):
         self._session = session
 
-    async def _get(self, path: str, max_retries: int = MAX_RETRIES) -> Any:
+    async def _get(self, path: str) -> Any:
         """GET genérico con reintentos y backoff exponencial ante rate limit,
         errores 5xx y fallos de red/timeout. Devuelve None si se agotan los
         reintentos, para que el llamador pueda tratarlo como "sin datos esta
         vez" sin romper la vuelta."""
         url = f"{API_BASE}{path}"
-        for attempt in range(max_retries + 1):
+        for attempt in range(MAX_RETRIES + 1):
             try:
                 timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
                 async with self._session.get(url, timeout=timeout) as resp:
@@ -52,7 +52,7 @@ class DexScreenerClient:
                 # Corte de red, DNS, timeout: transitorios, se reintentan.
                 reason = f"{type(exc).__name__}: {exc}"
 
-            if attempt == max_retries:
+            if attempt == MAX_RETRIES:
                 log.warning("DexScreener %s en %s, sin más reintentos", reason, path)
                 return None
             wait = RETRY_BACKOFF_SECONDS * (2 ** attempt)
@@ -77,7 +77,7 @@ class DexScreenerClient:
                 data = await self._get(f"/tokens/v1/{chain_id}/{joined}")
             except (aiohttp.ClientResponseError, ValueError) as exc:
                 # 4xx (p. ej. un 403 de Cloudflare) o un cuerpo que no es JSON:
-                # se pierde solo este lote, no la pasada entera.
+                # se pierde solo este lote, no la vuelta entera.
                 log.warning("DexScreener falló para un lote de %d direcciones: %s", len(batch), exc)
                 continue
             if not data:

@@ -149,7 +149,7 @@ class TestGetPairsForTokens(ScreenerTestCase):
         self.assertTrue(session.urls[0].endswith("/tokens/v1/solana/A,B"))
 
     async def test_4xx_en_un_lote_no_corta_los_siguientes(self):
-        """Un 403 de Cloudflare subía hasta el loop y la pasada no alertaba nada."""
+        """Un 403 de Cloudflare subía hasta el loop y la vuelta no avisaba de nada."""
         addresses = [f"A{i}" for i in range(MAX_ADDRESSES_PER_CALL + 1)]
         session = _FakeSession(
             _FakeResponse(403), _FakeResponse(200, [{"chainId": "solana", "id": 9}])

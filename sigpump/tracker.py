@@ -87,7 +87,7 @@ class AlertTracker:
         self._path = path
         self._conn: sqlite3.Connection | None = None
         # Se apaga si la base no se pudo abrir, para no reintentarlo (y
-        # loguearlo) en cada pasada.
+        # loguearlo) en cada vuelta.
         self._enabled = True
 
     def open(self) -> None:
@@ -150,7 +150,6 @@ class AlertTracker:
         pair: dict,
         sent: bool,
         reason: str = "",
-        kind: str = "wallet",
     ) -> int | None:
         """Agrega una fila con los datos de `pair` en el momento del aviso
         (o del descarte, con sent=False y su motivo). Devuelve el id de la
@@ -166,7 +165,7 @@ class AlertTracker:
         values = {
             "fecha": datetime.fromtimestamp(now).astimezone().isoformat(timespec="seconds"),
             "enviada": int(sent),
-            "tipo": kind,
+            "tipo": "wallet",
             "motivo_descarte": reason or None,
             "simbolo": str(base.get("symbol") or ""),
             "token": str(normalize_address(base.get("address") or "")),

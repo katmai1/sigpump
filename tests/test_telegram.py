@@ -2,7 +2,6 @@
 a campos numéricos ausentes/null/string. No envía nada: format_message() es
 pura y el Bot nunca se inicializa."""
 
-import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 

@@ -47,7 +47,7 @@ DEFAULT_MINUTES = 20.0
 DEFAULT_MIN_SOL = 2.0
 # Transacciones leídas como máximo: un token con mucho volumen hace miles en
 # 10 minutos, y cada una cuesta 0.1 créditos con "helius" o 1 con "rpc".
-DEFAULT_MAX_TXS = 2000
+DEFAULT_MAX_TXS = 5000
 # Máximo que acepta getSignaturesForAddress por llamada.
 SIGNATURES_PAGE = 1000
 REQUEST_TIMEOUT_SECONDS = 30

@@ -39,6 +39,12 @@ COLUMNS: dict[str, str] = {
     # 'wallet'; las bases anteriores también tienen 'alerta', 'prealerta' o NULL.
     "tipo": "TEXT",
     "motivo_descarte": "TEXT",
+    # 1 = el par pasó los filtros de mercado y de seguridad (dex, moneda,
+    # edad, cambio 1h, market cap, actividad, autoridades): se avisó o se
+    # descartó solo por confluencia, cooldown o wallet hiperactiva. La lista
+    # negra por rug y por resultados solo cuenta estas: una compra que nunca
+    # iba a avisarse no dice nada de si vale la pena copiar a la wallet.
+    "pasa_filtros_par": "INTEGER",
     "simbolo": "TEXT",
     "token": "TEXT",
     "pool": "TEXT",
@@ -235,16 +241,48 @@ class AlertTracker:
             return []
         return [dict(row) for row in rows]
 
+    def unmarked_wallet_rows(self) -> list[dict]:
+        """Compras de wallets registradas sin pasa_filtros_par (de versiones
+        anteriores), con lo necesario para volver a pasarles los filtros."""
+        conn = self._db()
+        if conn is None:
+            return []
+        try:
+            rows = conn.execute(
+                "SELECT id, timestamp, enviada, motivo_descarte, moneda_par, edad_par_min, "
+                "cambio_h1_pct, market_cap_usd, txns_m5, volumen_h1_usd FROM alertas "
+                "WHERE tipo = 'wallet' AND pasa_filtros_par IS NULL"
+            ).fetchall()
+        except sqlite3.Error as exc:
+            log.warning("No se pudo leer %s: %s", self._path, exc)
+            return []
+        return [dict(row) for row in rows]
+
+    def mark_pair_filters(self, passed: dict[int, bool]) -> None:
+        """Anota pasa_filtros_par (id de fila -> si pasó) en una sola transacción."""
+        conn = self._db()
+        if conn is None or not passed:
+            return
+        try:
+            with conn:
+                conn.executemany(
+                    "UPDATE alertas SET pasa_filtros_par = ? WHERE id = ?",
+                    [(int(ok), row_id) for row_id, ok in passed.items()],
+                )
+        except sqlite3.Error as exc:
+            log.warning("No se pudo actualizar %s: %s", self._path, exc)
+
     def rug_wallets(self, drop_pct: float) -> dict[str, str]:
         """Wallet -> descripción del rug, de las wallets con alguna compra
-        (avisada o no) que cayó al menos `drop_pct` en su seguimiento."""
+        que pasó los filtros del par (avisada o no) y cayó al menos
+        `drop_pct` en su seguimiento."""
         conn = self._db()
         if conn is None:
             return {}
         try:
             rows = conn.execute(
                 f"SELECT wallet, simbolo, token, MIN({_WORST}) AS peor FROM alertas "
-                f"WHERE tipo = 'wallet' AND wallet IS NOT NULL AND {_WORST} <= :limit "
+                f"WHERE tipo = 'wallet' AND wallet IS NOT NULL AND pasa_filtros_par = 1 AND {_WORST} <= :limit "
                 "GROUP BY wallet",
                 {"limit": -drop_pct},
             ).fetchall()
@@ -258,8 +296,9 @@ class AlertTracker:
 
     def wallet_returns(self) -> dict[str, list[float]]:
         """Wallet -> rendimiento a 30 min de la primera compra registrada de
-        cada token (avisada o no), solo las ya medidas. Una por token: las
-        compras repetidas del mismo token no deben pesar más."""
+        cada token que pasó los filtros del par (avisada o no), solo las ya
+        medidas. Una por token: las compras repetidas del mismo token no
+        deben pesar más."""
         conn = self._db()
         if conn is None:
             return {}
@@ -267,7 +306,7 @@ class AlertTracker:
             rows = conn.execute(
                 "SELECT wallet, ret_30m_pct FROM alertas WHERE id IN ("
                 "SELECT MIN(id) FROM alertas WHERE tipo = 'wallet' AND wallet IS NOT NULL "
-                "GROUP BY wallet, token) AND ret_30m_pct IS NOT NULL"
+                "AND pasa_filtros_par = 1 GROUP BY wallet, token) AND ret_30m_pct IS NOT NULL"
             ).fetchall()
         except sqlite3.Error as exc:
             log.warning("No se pudo leer %s: %s", self._path, exc)

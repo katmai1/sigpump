@@ -82,7 +82,10 @@ Con `blacklist_file`, también entran solas en la lista negra las wallets cuya
 compra cae `rug_drop_pct` (90% por defecto) en el seguimiento, y las que con
 al menos `loser_min_signals` tokens medidos tienen una mediana a 30 min de
 `loser_max_median_ret_pct` o peor. Se quitan del fichero de wallets y, si se
-vuelven a añadir, se quitan otra vez.
+vuelven a añadir, se quitan otra vez. Las dos reglas solo cuentan las compras
+cuyo par pasó los filtros (dex, moneda, edad, cambio 1h, market cap,
+actividad y autoridades): un rug en un par de 3 minutos que nunca se iba a
+avisar no dice nada de la wallet.
 
 `min_pair_age_minutes`, `max_price_change_h1_pct` y `min_market_cap_usd`
 descartan las compras en pares recién creados, que ya subieron mucho en la
@@ -108,6 +111,9 @@ después:
   en esas muestras. De acá salen la lista negra por rug y por resultados.
 - `enviada = 0` son compras descartadas, con `motivo_descarte`: sirven para
   comprobar si los filtros tiran señales buenas.
+- `pasa_filtros_par = 1` si el par pasó los filtros: se avisó, o se descartó
+  solo por confluencia, cooldown o wallet hiperactiva. En las filas de
+  versiones anteriores se rellena al arrancar con los filtros de ese momento.
 - `wallet`, `wallet_etiqueta`, `sol_gastado`, `stable_gastado`,
   `entrada_nueva`, `wallets_confluencia` y `tx`: quién compró, cuánto, si ya
   tenía el token y cuántas otras wallets seguidas habían entrado antes.

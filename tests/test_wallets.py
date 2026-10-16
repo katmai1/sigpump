@@ -930,6 +930,64 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         radar._wallet_watcher.reload()
         self.assertEqual(wallets_txt.read_text(encoding="utf-8"), f"{OTRA}  # buena\n")
 
+    async def test_rug_o_perdidas_en_un_par_descartado_no_cuentan(self):
+        """Antes una sola compra en un par de 3 minutos que hacía rug echaba a
+        la wallet, aunque ese par nunca se iba a avisar."""
+        tmp = self.path.parent
+        wallets_txt, negra = tmp / "wallets.txt", tmp / "negra.txt"
+        wallets_txt.write_text(f"{WALLET}  # ballena\n", encoding="utf-8")
+        compras = [_buy(mint=f"T{i}") for i in range(3)]
+        radar = self._radar(
+            compras, wallets_blacklist_file=str(negra), wallets_rug_drop_pct=90,
+            wallets_loser_min_signals=3, wallets_loser_max_median_ret_pct=-30,
+            wallets_min_pair_age_minutes=120,
+        )
+        pairs = [_pair(f"T{i}", created_at=_hace_horas(0.05)) for i in range(3)]
+        await radar._wallets_once(_FakeClient(pairs=pairs), _FakeAlerter())
+        for row in self._rows():
+            self.assertEqual(row["pasa_filtros_par"], 0)
+            radar._tracker.update_row(row["id"], {"ret_30m_pct": -90, "peor_ret_30m_pct": -96.0})
+        radar._wallet_watcher = WalletWatcher(None, "http://rpc", wallets_txt, 0.1, negra)
+        radar._wallet_watcher.reload()
+        radar._blacklist_ruggers()
+        radar._blacklist_losers()
+        self.assertEqual(list(radar._wallet_watcher.wallets), [WALLET])
+        self.assertFalse(negra.exists())
+
+    async def test_descarte_por_confluencia_pasa_los_filtros_del_par(self):
+        radar = self._radar([_buy()], wallets_min_wallets=2)
+        await radar._wallets_once(_FakeClient(pairs=[_pair("TOK")]), _FakeAlerter())
+        [fila] = self._rows()
+        self.assertEqual((fila["motivo_descarte"], fila["pasa_filtros_par"]), ("1 de 2 wallets", 1))
+
+    async def test_filas_anteriores_se_marcan_con_los_filtros_de_ahora(self):
+        radar = self._radar()
+        casos = [
+            # (enviada, motivo, moneda, edad en min, pasa)
+            (1, None, "SOL", 300, True),
+            (1, None, "SOL", 4, False),  # enviada antes de que hubiera filtro de edad
+            (0, "1 de 2 wallets", "SOL", 300, True),
+            (0, "1 de 2 wallets", "SOL", 4, False),
+            (0, "token ya avisado con 2 wallets", "SOL", 300, True),
+            (0, "par creado hace 3 min", "SOL", 3, False),
+            (0, "par en meteora, no en pumpswap o raydium", "SOL", 300, False),
+            (0, "par contra USDC, no contra SOL", "USDC", 300, False),
+        ]
+        ids = []
+        for enviada, motivo, moneda, edad, _ in casos:
+            row_id = radar._tracker.record(_pair("TOK"), sent=bool(enviada), reason=motivo or "")
+            radar._tracker.update_row(row_id, {"moneda_par": moneda, "edad_par_min": edad, "wallet": WALLET})
+            ids.append(row_id)
+        radar._tracker.close()
+        radar = self._radar(
+            wallets_min_pair_age_minutes=120, quote_tokens=["SOL"], dex_ids=["pumpswap", "raydium"],
+        )
+        radar._mark_old_rows()
+        marcas = {r["id"]: r["pasa_filtros_par"] for r in self._rows()}
+        for row_id, (enviada, motivo, moneda, edad, pasa) in zip(ids, casos):
+            with self.subTest(motivo=motivo, edad=edad):
+                self.assertEqual(marcas[row_id], int(pasa))
+
     async def test_cada_vuelta_muestrea_el_precio_de_las_senales(self):
         radar = self._radar()
         radar._tracker.update = AsyncMock()

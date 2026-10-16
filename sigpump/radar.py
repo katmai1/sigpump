@@ -10,6 +10,7 @@ import time
 import asyncio
 import dataclasses
 import logging
+import re
 import statistics
 from pathlib import Path
 
@@ -30,6 +31,10 @@ log = logging.getLogger()
 BONDING_CURVE_DEX_IDS = {"pumpfun", "meteoradbc", "launchlab", "moonshot"}
 # Ventana del tope [wallets].max_tokens_per_hour.
 WALLET_ACTIVITY_SECONDS = 3600
+# Motivos de descarte que no dependen del par (confluencia, cooldown por
+# token, wallet hiperactiva): esas compras sí pasaron sus filtros. Solo se
+# usa para las filas registradas antes de que existiera pasa_filtros_par.
+_NOT_PAIR_REASON_RE = re.compile(r"\d+ de \d+ wallets$|token ya avisado|wallet hiperactiva")
 
 
 def _liquidity_usd(pair: dict) -> float:
@@ -93,6 +98,43 @@ class MemecoinRadar:
             if row["enviada"] and row["timestamp"] > token_since:
                 wallets = 1 + (row["wallets_confluencia"] or 0)
                 self._wallet_token_alerted[row["token"]] = (row["timestamp"], wallets)
+
+    def _mark_old_rows(self) -> None:
+        """Anota pasa_filtros_par en las filas de versiones anteriores, con los
+        filtros de ahora. Sin esto la lista negra por rug echaba wallets por
+        compras en pares recién creados que ya nunca se avisarían."""
+        if not self._tracker:
+            return
+        rows = self._tracker.unmarked_wallet_rows()
+        if not rows:
+            return
+        passed = {row["id"]: self._row_passes_pair_filters(row) for row in rows}
+        self._tracker.mark_pair_filters(passed)
+        log.info(
+            "Registro: %d de %d compras anteriores pasan los filtros del par actuales",
+            sum(passed.values()), len(passed),
+        )
+
+    def _row_passes_pair_filters(self, row: dict) -> bool:
+        """Si una compra registrada pasaría los filtros del par de ahora. El
+        dex y las autoridades no se guardan: se dan por buenos si no fue
+        descartada por el par (ni por eso ni por otro filtro de entonces)."""
+        reason = row["motivo_descarte"]
+        if not row["enviada"] and not (reason and _NOT_PAIR_REASON_RE.match(reason)):
+            return False
+        ts = row["timestamp"] or 0.0
+        age = row["edad_par_min"]
+        txns = row["txns_m5"]
+        pair = {
+            "dexId": self._config.dex_ids[0] if self._config.dex_ids else "",
+            "quoteToken": {"symbol": row["moneda_par"]},
+            "pairCreatedAt": (ts - age * 60) * 1000 if age is not None else 0,
+            "priceChange": {"h1": row["cambio_h1_pct"]},
+            "marketCap": row["market_cap_usd"],
+            "txns": {"m5": {"buys": txns, "sells": 0}} if txns is not None else {},
+            "volume": {"h1": row["volumen_h1_usd"]},
+        }
+        return self._wallet_pair_rejection(pair, now=ts) is None
 
     def _prune_alerted(self) -> None:
         """Elimina los cooldowns expirados, para que la memoria no crezca
@@ -236,11 +278,12 @@ class MemecoinRadar:
                 continue
             log.warning("Wallet %s a la lista negra: %s", info.label, reason)
 
-    def _wallet_pair_rejection(self, pair: dict) -> str | None:
+    def _wallet_pair_rejection(self, pair: dict, now: float | None = None) -> str | None:
         """Motivo para no avisar de una compra de wallet por cómo está el par
         ([dexscreener].dex_ids y quote_tokens; [wallets].min_pair_age_minutes,
         max_price_change_h1_pct, min_market_cap_usd, min_txns_m5 y
-        min_volume_h1_usd), o None si pasa."""
+        min_volume_h1_usd), o None si pasa. `now` es la hora contra la que se
+        mide la edad del par (ahora si no se da)."""
         cfg = self._config
         venue_reason = self._venue_reason(pair)
         if venue_reason:
@@ -248,7 +291,7 @@ class MemecoinRadar:
         created_at = to_float(pair.get("pairCreatedAt"))
         # Sin pairCreatedAt no se puede evaluar la edad: no se descarta por ella.
         if cfg.wallets_min_pair_age_minutes and created_at > 0:
-            age_minutes = (time.time() - created_at / 1000) / 60
+            age_minutes = ((time.time() if now is None else now) - created_at / 1000) / 60
             if age_minutes < cfg.wallets_min_pair_age_minutes:
                 return f"par creado hace {age_minutes:.0f} min"
         change_h1 = to_float((pair.get("priceChange") or {}).get("h1"))
@@ -357,7 +400,8 @@ class MemecoinRadar:
             # Se marca también al descartar, para no registrar una fila por
             # cada compra repetida del mismo token peligroso.
             self._wallet_alerted[key] = time.time()
-            reason = unsafe.get(buy.mint) or self._wallet_pair_rejection(pair)
+            pair_reason = unsafe.get(buy.mint) or self._wallet_pair_rejection(pair)
+            reason = pair_reason
             wallets = 1 + len(signal.others)
             if not reason and self._hyperactive(buy.wallet):
                 reason = f"wallet hiperactiva ({self._tokens_last_hour(buy.wallet)} tokens en 1h)"
@@ -370,7 +414,7 @@ class MemecoinRadar:
                 reason = f"token ya avisado con {previous} wallets"
             if reason:
                 log.info("Compra de %s en %s descartada: %s", buy.label, _symbol(pair), reason)
-                self._record_wallet(pair, signal, sent=False, reason=reason)
+                self._record_wallet(pair, signal, sent=False, reason=reason, pair_ok=not pair_reason)
                 continue
             if previous is not None:
                 signal = dataclasses.replace(signal, update=True)
@@ -390,10 +434,10 @@ class MemecoinRadar:
                 self._wallet_alerted.pop(key, None)
                 continue
             self._wallet_token_alerted[buy.mint] = (time.time(), wallets)
-            self._record_wallet(pair, signal, sent=True)
+            self._record_wallet(pair, signal, sent=True, pair_ok=True)
 
     def _record_wallet(
-        self, pair: dict, signal: WalletSignal, sent: bool, reason: str = ""
+        self, pair: dict, signal: WalletSignal, sent: bool, reason: str = "", pair_ok: bool = True
     ) -> None:
         if not self._tracker:
             return
@@ -409,6 +453,7 @@ class MemecoinRadar:
             "entrada_nueva": int(buy.new_position),
             "wallets_confluencia": len(signal.others),
             "tx": buy.signature,
+            "pasa_filtros_par": int(pair_ok),
         })
 
     async def run(self) -> None:
@@ -419,6 +464,7 @@ class MemecoinRadar:
             # Abre la base al arrancar (y no en el primer aviso) para que un
             # problema con el archivo se vea enseguida en el log.
             self._tracker.open()
+            self._mark_old_rows()
             self._restore_cooldowns()
         alerter = TelegramAlerter(
             self._config.telegram_bot_token,

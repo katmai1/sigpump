@@ -3,7 +3,8 @@ sigpump/tracker.py
 
 Registro de resultados: guarda en una base SQLite cada compra de una wallet
 seguida (avisada o descartada, con su motivo) con los datos del momento, y
-sigue su precio en DexScreener durante los 30 minutos siguientes. Sirve
+sigue su precio en DexScreener: en cada vuelta durante los 30 minutos
+siguientes y después a +1 h, +4 h y +24 h. Sirve
 para medir qué wallets dan margen, alimenta la lista negra automática y
 permite ajustar los filtros con datos en vez de a ojo.
 """
@@ -18,17 +19,37 @@ from sigpump.util import buy_ratio_m5, normalize_address, to_float, txns_m5, vol
 
 log = logging.getLogger()
 
-# Minutos después de la alerta en los que se anota el retorno.
-CHECKPOINTS_MINUTES = (5, 15, 30)
-# El precio se muestrea en cada vuelta del seguimiento de wallets, así que
-# cada checkpoint se anota con la primera muestra que cae dentro de este
+# Minutos después de la alerta en los que se anota el retorno. Muchas
+# compras que a 30 min iban bien se hundían horas o días después: sin los
+# checkpoints largos el registro (y la lista negra por resultados) no lo veía.
+CHECKPOINTS_MINUTES = (5, 15, 30, 60, 240, 1440)
+# Durante los primeros TRACKING_MINUTES el precio se muestrea en cada vuelta
+# del seguimiento de wallets (de ahí salen el mejor y el peor); después solo
+# cuando se abre la ventana de un checkpoint largo, para no pedir a
+# DexScreener el precio de cada fila en cada vuelta durante un día.
+TRACKING_MINUTES = 30
+# Cada checkpoint se anota con la primera muestra que cae dentro de su
 # margen. Pasado el margen queda en NULL: tras un reinicio, anotar como "+5m"
-# un precio de +25m falsearía los datos.
+# un precio de +25m falsearía los datos. Los largos admiten un margen
+# proporcional (+24 h acepta hasta +30 h).
 CHECKPOINT_TOLERANCE_MINUTES = 5
-TRACKING_MINUTES = CHECKPOINTS_MINUTES[-1]
 
 _CHECKPOINT_COLUMNS = tuple(f"ret_{m}m_pct" for m in CHECKPOINTS_MINUTES)
+_TRACKING_COLUMN = f"ret_{TRACKING_MINUTES}m_pct"
 _BEST, _WORST = f"mejor_ret_{TRACKING_MINUTES}m_pct", f"peor_ret_{TRACKING_MINUTES}m_pct"
+
+
+def checkpoint_tolerance(minutes: int) -> float:
+    """Margen en minutos para anotar el checkpoint de `minutes`."""
+    return max(CHECKPOINT_TOLERANCE_MINUTES, minutes / 4)
+
+
+def format_minutes(minutes: int) -> str:
+    """'30 min', '4 h'... para los logs y motivos."""
+    return f"{minutes // 60} h" if minutes >= 60 and minutes % 60 == 0 else f"{minutes} min"
+
+
+_LAST = CHECKPOINTS_MINUTES[-1]
 
 # Columnas de la tabla `alertas` (además de `id`) y su tipo. Al abrir una
 # base creada por una versión anterior se agregan las que falten; las que
@@ -79,8 +100,22 @@ COLUMNS: dict[str, str] = {
 }
 
 # Filas a las que todavía les falta el último checkpoint y siguen dentro de
-# su margen. Sin precio en la alerta no hay contra qué medir.
+# su margen. Sin precio en la alerta no hay contra qué medir. Cuáles toca
+# muestrear en cada vuelta lo decide _due().
 _PENDING = f"precio_usd > 0 AND {_CHECKPOINT_COLUMNS[-1]} IS NULL AND timestamp > :cutoff"
+
+
+def _due(row, elapsed_minutes: float) -> bool:
+    """Si hay que muestrear el precio de `row` ahora: en cada vuelta hasta
+    anotar el de TRACKING_MINUTES, y después solo dentro de la ventana de un
+    checkpoint largo que falte."""
+    if row[_TRACKING_COLUMN] is None and elapsed_minutes < TRACKING_MINUTES + CHECKPOINT_TOLERANCE_MINUTES:
+        return True
+    return any(
+        row[column] is None and minutes <= elapsed_minutes < minutes + checkpoint_tolerance(minutes)
+        for minutes, column in zip(CHECKPOINTS_MINUTES, _CHECKPOINT_COLUMNS)
+        if minutes > TRACKING_MINUTES
+    )
 
 
 def _round(value: float | None) -> float | None:
@@ -149,7 +184,7 @@ class AlertTracker:
     def _cutoff(now: float | None = None) -> float:
         """Timestamp a partir del cual una fila sigue en seguimiento."""
         now = time.time() if now is None else now
-        return now - (TRACKING_MINUTES + CHECKPOINT_TOLERANCE_MINUTES) * 60
+        return now - (_LAST + checkpoint_tolerance(_LAST)) * 60
 
     def record(
         self,
@@ -294,31 +329,35 @@ class AlertTracker:
             for row in rows
         }
 
-    def wallet_returns(self) -> dict[str, list[float]]:
-        """Wallet -> rendimiento a 30 min de la primera compra registrada de
-        cada token que pasó los filtros del par (avisada o no), solo las ya
-        medidas. Una por token: las compras repetidas del mismo token no
-        deben pesar más."""
+    def wallet_returns(self, minutes: int = TRACKING_MINUTES) -> dict[str, list[float]]:
+        """Wallet -> rendimiento a `minutes` (uno de CHECKPOINTS_MINUTES) de
+        la primera compra registrada de cada token que pasó los filtros del
+        par (avisada o no), solo las ya medidas. Una por token: las compras
+        repetidas del mismo token no deben pesar más."""
+        if minutes not in CHECKPOINTS_MINUTES:
+            raise ValueError(f"Sin checkpoint a {minutes} min: {CHECKPOINTS_MINUTES}")
+        column = f"ret_{minutes}m_pct"
         conn = self._db()
         if conn is None:
             return {}
         try:
             rows = conn.execute(
-                "SELECT wallet, ret_30m_pct FROM alertas WHERE id IN ("
+                f"SELECT wallet, {column} AS ret FROM alertas WHERE id IN ("
                 "SELECT MIN(id) FROM alertas WHERE tipo = 'wallet' AND wallet IS NOT NULL "
-                "AND pasa_filtros_par = 1 GROUP BY wallet, token) AND ret_30m_pct IS NOT NULL"
+                f"AND pasa_filtros_par = 1 GROUP BY wallet, token) AND {column} IS NOT NULL"
             ).fetchall()
         except sqlite3.Error as exc:
             log.warning("No se pudo leer %s: %s", self._path, exc)
             return {}
         returns: dict[str, list[float]] = {}
         for row in rows:
-            returns.setdefault(row["wallet"], []).append(row["ret_30m_pct"])
+            returns.setdefault(row["wallet"], []).append(row["ret"])
         return returns
 
     async def update(self, client, chain_id: str) -> None:
-        """Muestrea el precio actual de las filas pendientes (un request a
-        DexScreener cada 30 tokens) y anota los checkpoints alcanzados."""
+        """Muestrea el precio actual de las filas a las que les toca (un
+        request a DexScreener cada 30 tokens) y anota los checkpoints
+        alcanzados."""
         conn = self._db()
         if conn is None:
             return
@@ -330,6 +369,7 @@ class AlertTracker:
         except sqlite3.Error as exc:
             log.warning("No se pudo leer %s: %s", self._path, exc)
             return
+        pending = [row for row in pending if _due(row, (now - row["timestamp"]) / 60)]
         if not pending:
             return
         addresses = list(dict.fromkeys(row["token"] for row in pending))
@@ -346,31 +386,37 @@ class AlertTracker:
                 if not price:
                     continue
                 ret = round((price / row["precio_usd"] - 1) * 100, 2)
-                changes = {
-                    _BEST: ret if row[_BEST] is None else max(row[_BEST], ret),
-                    _WORST: ret if row[_WORST] is None else min(row[_WORST], ret),
-                }
                 elapsed_minutes = (now - row["timestamp"]) / 60
+                changes = {}
+                if row[_TRACKING_COLUMN] is None and elapsed_minutes < TRACKING_MINUTES + CHECKPOINT_TOLERANCE_MINUTES:
+                    changes[_BEST] = ret if row[_BEST] is None else max(row[_BEST], ret)
+                    changes[_WORST] = ret if row[_WORST] is None else min(row[_WORST], ret)
+                logged = None
                 for minutes, column in zip(CHECKPOINTS_MINUTES, _CHECKPOINT_COLUMNS):
-                    in_window = minutes <= elapsed_minutes < minutes + CHECKPOINT_TOLERANCE_MINUTES
+                    in_window = minutes <= elapsed_minutes < minutes + checkpoint_tolerance(minutes)
                     if in_window and row[column] is None:
                         changes[column] = ret
+                        if minutes >= TRACKING_MINUTES:
+                            logged = minutes
+                if not changes:
+                    continue
                 conn.execute(
                     f"UPDATE alertas SET {', '.join(f'{c} = :{c}' for c in changes)} WHERE id = :id",
                     {**changes, "id": row["id"]},
                 )
-                if _CHECKPOINT_COLUMNS[-1] in changes:
+                if logged is not None:
                     final = {**dict(row), **changes}
                     log.info(
-                        "Seguimiento de %s (%s): %s | mejor %+.1f%%, peor %+.1f%%",
+                        "Seguimiento de %s (%s): %s | mejor %s, peor %s",
                         row["simbolo"],
                         (row["tipo"] or "alerta") if row["enviada"] else "descartado",
                         ", ".join(
-                            f"+{m}m {final[c]:+.1f}%" if final[c] is not None else f"+{m}m s/d"
+                            f"+{format_minutes(m)} {final[c]:+.1f}%" if final[c] is not None
+                            else f"+{format_minutes(m)} s/d"
                             for m, c in zip(CHECKPOINTS_MINUTES, _CHECKPOINT_COLUMNS)
+                            if m <= logged
                         ),
-                        final[_BEST],
-                        final[_WORST],
+                        *(f"{final[c]:+.1f}%" if final[c] is not None else "s/d" for c in (_BEST, _WORST)),
                     )
             conn.commit()
         except sqlite3.Error as exc:

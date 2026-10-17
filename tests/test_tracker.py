@@ -156,6 +156,50 @@ class TestAlertTracker(unittest.IsolatedAsyncioTestCase):
         await tracker.update(client, "solana")
         self.assertEqual(client.requested, [])
 
+    async def test_checkpoints_largos_solo_en_su_ventana(self):
+        tracker = self._tracker()
+        tracker.record(_pair(), sent=True)
+        client = _FakeClient({"POOL": 1.1})
+        self._age(30)
+        await tracker.update(client, "solana")
+        # Entre +30 min y +1 h no se pide su precio.
+        self._age(10)
+        await tracker.update(client, "solana")
+        self.assertEqual(len(client.requested), 1)
+        for minutos, precio in ((20, 0.8), (180, 0.5), (1200, 0.1)):
+            self._age(minutos)
+            client.prices = {"POOL": precio}
+            await tracker.update(client, "solana")
+        self.assertEqual(len(client.requested), 4)
+        row = self._rows()[0]
+        self.assertEqual(
+            (row["ret_30m_pct"], row["ret_60m_pct"], row["ret_240m_pct"], row["ret_1440m_pct"]),
+            (10.0, -20.0, -50.0, -90.0),
+        )
+        # El mejor y el peor son de los primeros 30 min.
+        self.assertEqual((row["mejor_ret_30m_pct"], row["peor_ret_30m_pct"]), (10.0, 10.0))
+        await tracker.update(client, "solana")
+        self.assertEqual(len(client.requested), 4)
+
+    async def test_checkpoint_largo_admite_margen_proporcional(self):
+        """Tras un reinicio, una muestra a +27 h todavía vale como +24 h."""
+        tracker = self._tracker()
+        tracker.record(_pair(), sent=True)
+        self._age(27 * 60)
+        await tracker.update(_FakeClient({"POOL": 0.5}), "solana")
+        row = self._rows()[0]
+        self.assertEqual((row["ret_1440m_pct"], row["ret_240m_pct"]), (-50.0, None))
+        self.assertIsNone(row["mejor_ret_30m_pct"])
+
+    def test_wallet_returns_con_otro_checkpoint(self):
+        tracker = self._tracker()
+        row_id = tracker.record(_pair(), sent=True)
+        tracker.update_row(row_id, {"wallet": "W", "pasa_filtros_par": 1, "ret_30m_pct": 5, "ret_240m_pct": -70})
+        self.assertEqual(tracker.wallet_returns(), {"W": [5]})
+        self.assertEqual(tracker.wallet_returns(240), {"W": [-70]})
+        with self.assertRaises(ValueError):
+            tracker.wallet_returns(45)
+
     async def test_sin_precio_en_la_alerta_no_se_sigue(self):
         tracker = self._tracker()
         tracker.record(_pair(price=None), sent=True)

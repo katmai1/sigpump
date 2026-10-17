@@ -867,6 +867,26 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list(radar._wallet_watcher.wallets), [OTRA])
         self.assertIn("ballena: mediana -40% a 30 min en 3 tokens", negra.read_text(encoding="utf-8"))
 
+    async def test_wallet_que_pierde_se_mide_con_el_checkpoint_pedido(self):
+        """A 30 min la mediana es buena, pero a 24 h se hundieron: con
+        loser_checkpoint_minutes = 1440 cuenta la de 24 h."""
+        tmp = self.path.parent
+        wallets_txt, negra = tmp / "wallets.txt", tmp / "negra.txt"
+        wallets_txt.write_text(f"{WALLET}  # ballena\n", encoding="utf-8")
+        compras = [_buy(mint=f"T{i}") for i in range(3)]
+        radar = self._radar(
+            compras, wallets_blacklist_file=str(negra), wallets_loser_min_signals=3,
+            wallets_loser_max_median_ret_pct=-40, wallets_loser_checkpoint_minutes=1440,
+        )
+        await radar._wallets_once(_FakeClient(pairs=[_pair(f"T{i}") for i in range(3)]), _FakeAlerter())
+        for row, ret in zip(self._rows(), [-80, -60, 5]):
+            radar._tracker.update_row(row["id"], {"ret_30m_pct": 3, "ret_1440m_pct": ret})
+        radar._wallet_watcher = WalletWatcher(None, "http://rpc", wallets_txt, 0.1, negra)
+        radar._wallet_watcher.reload()
+        radar._blacklist_losers()
+        self.assertEqual(list(radar._wallet_watcher.wallets), [])
+        self.assertIn("ballena: mediana -60% a 24 h en 3 tokens", negra.read_text(encoding="utf-8"))
+
     async def test_wallet_con_pocas_senales_no_se_juzga(self):
         tmp = self.path.parent
         wallets_txt, negra = tmp / "wallets.txt", tmp / "negra.txt"
@@ -910,6 +930,20 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         for pair, motivo in casos:
             with self.subTest(motivo=motivo):
                 radar = self._radar([_buy()], wallets_min_txns_m5=5, wallets_min_volume_h1_usd=5_000)
+                alerter = _FakeAlerter()
+                await radar._wallets_once(_FakeClient(pairs=[pair]), alerter)
+                self.assertEqual(self._rows()[-1]["motivo_descarte"] or "", motivo)
+                self.assertEqual(len(alerter.wallet), 0 if motivo else 1)
+
+    async def test_filtro_de_volumen_sobre_market_cap(self):
+        casos = [
+            (_pair("TOK", volume=50_000), "volumen 1h 5% del market cap > 3%"),
+            (_pair("TOK", volume=20_000), ""),
+            ({**_pair("TOK", volume=50_000), "marketCap": 0, "fdv": 0}, ""),
+        ]
+        for pair, motivo in casos:
+            with self.subTest(motivo=motivo):
+                radar = self._radar([_buy()], wallets_max_turnover_h1=0.03)
                 alerter = _FakeAlerter()
                 await radar._wallets_once(_FakeClient(pairs=[pair]), alerter)
                 self.assertEqual(self._rows()[-1]["motivo_descarte"] or "", motivo)

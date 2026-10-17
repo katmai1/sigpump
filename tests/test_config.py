@@ -65,6 +65,8 @@ class TestConfigValidation(unittest.TestCase):
             dict(wallets_min_market_cap_usd=-1),
             dict(wallets_min_txns_m5=-1),
             dict(wallets_min_volume_h1_usd=-1),
+            dict(wallets_max_turnover_h1=-1),
+            dict(wallets_loser_checkpoint_minutes=45),
         ]
         for caso in casos:
             with self.subTest(caso=caso), self.assertRaises(ValueError):

@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from sigpump.solana import MAINNET_RPC_URL
+from sigpump.tracker import CHECKPOINTS_MINUTES
 
 log = logging.getLogger()
 
@@ -35,11 +36,13 @@ _KNOWN_KEYS: dict[str, set[str]] = {
         "rug_drop_pct",
         "loser_min_signals",
         "loser_max_median_ret_pct",
+        "loser_checkpoint_minutes",
         "min_pair_age_minutes",
         "max_price_change_h1_pct",
         "min_market_cap_usd",
         "min_txns_m5",
         "min_volume_h1_usd",
+        "max_turnover_h1",
         "websocket",
         "ws_url",
         "full_poll_minutes",
@@ -71,11 +74,13 @@ _FIELD_TYPES: dict[str, tuple[str, tuple[type, ...]]] = {
     "wallets_rug_drop_pct": ("[wallets].rug_drop_pct", _NUMBER),
     "wallets_loser_min_signals": ("[wallets].loser_min_signals", (int,)),
     "wallets_loser_max_median_ret_pct": ("[wallets].loser_max_median_ret_pct", _NUMBER),
+    "wallets_loser_checkpoint_minutes": ("[wallets].loser_checkpoint_minutes", (int,)),
     "wallets_min_pair_age_minutes": ("[wallets].min_pair_age_minutes", _NUMBER),
     "wallets_max_price_change_h1_pct": ("[wallets].max_price_change_h1_pct", _NUMBER),
     "wallets_min_market_cap_usd": ("[wallets].min_market_cap_usd", _NUMBER),
     "wallets_min_txns_m5": ("[wallets].min_txns_m5", (int,)),
     "wallets_min_volume_h1_usd": ("[wallets].min_volume_h1_usd", _NUMBER),
+    "wallets_max_turnover_h1": ("[wallets].max_turnover_h1", _NUMBER),
     "wallets_websocket": ("[wallets].websocket", (bool,)),
     "wallets_ws_url": ("[wallets].ws_url", (str,)),
     "wallets_full_poll_minutes": ("[wallets].full_poll_minutes", _NUMBER),
@@ -152,6 +157,10 @@ class Config:
     # negra sola. 0 = no hacerlo.
     wallets_loser_min_signals: int = 0
     wallets_loser_max_median_ret_pct: float = -30.0
+    # Checkpoint del registro (minutos, uno de tracker.CHECKPOINTS_MINUTES)
+    # con el que se mide esa mediana. A 30 min muchas parecían buenas y se
+    # hundían horas después.
+    wallets_loser_checkpoint_minutes: int = 30
     # Filtros del par para los avisos de wallets (0 = sin filtro): los pares
     # recién creados, los que ya subieron mucho en 1h y los de market cap
     # pequeño daban casi siempre pérdidas.
@@ -162,6 +171,10 @@ class Config:
     # en los últimos minutos) no se mueven y el aviso no sirve de nada.
     wallets_min_txns_m5: int = 0
     wallets_min_volume_h1_usd: float = 0.0
+    # Volumen de la última hora sobre el market cap: con mucho más volumen
+    # del que corresponde al tamaño del token lo están bombeando o ya están
+    # saliendo, y casi siempre se hundía después. 0 = sin filtro.
+    wallets_max_turnover_h1: float = 0.0
     # Avisos de actividad por el WebSocket del RPC: solo se consultan las
     # wallets que hicieron algo. ws_url vacío = el de rpc_url con wss://.
     wallets_websocket: bool = True
@@ -224,10 +237,15 @@ class Config:
             )
         for name in (
             "min_pair_age_minutes", "max_price_change_h1_pct", "min_market_cap_usd",
-            "min_txns_m5", "min_volume_h1_usd",
+            "min_txns_m5", "min_volume_h1_usd", "max_turnover_h1",
         ):
             if getattr(self, f"wallets_{name}") < 0:
                 raise ValueError(f"[wallets].{name} debe ser >= 0 ({getattr(self, f'wallets_{name}')})")
+        if self.wallets_loser_checkpoint_minutes not in CHECKPOINTS_MINUTES:
+            raise ValueError(
+                f"[wallets].loser_checkpoint_minutes debe ser uno de "
+                f"{', '.join(map(str, CHECKPOINTS_MINUTES))} ({self.wallets_loser_checkpoint_minutes})"
+            )
         if not self.wallets_file:
             raise ValueError("[wallets].file no puede estar vacío")
         if self.wallets_full_poll_minutes <= 0:
@@ -296,11 +314,13 @@ class Config:
             wallets_rug_drop_pct=wallets.get("rug_drop_pct", 90.0),
             wallets_loser_min_signals=wallets.get("loser_min_signals", 0),
             wallets_loser_max_median_ret_pct=wallets.get("loser_max_median_ret_pct", -30.0),
+            wallets_loser_checkpoint_minutes=wallets.get("loser_checkpoint_minutes", 30),
             wallets_min_pair_age_minutes=wallets.get("min_pair_age_minutes", 0.0),
             wallets_max_price_change_h1_pct=wallets.get("max_price_change_h1_pct", 0.0),
             wallets_min_market_cap_usd=wallets.get("min_market_cap_usd", 0.0),
             wallets_min_txns_m5=wallets.get("min_txns_m5", 0),
             wallets_min_volume_h1_usd=wallets.get("min_volume_h1_usd", 0.0),
+            wallets_max_turnover_h1=wallets.get("max_turnover_h1", 0.0),
             wallets_websocket=wallets.get("websocket", True),
             wallets_ws_url=wallets.get("ws_url", ""),
             wallets_full_poll_minutes=wallets.get("full_poll_minutes", 10.0),

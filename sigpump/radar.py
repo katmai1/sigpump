@@ -20,7 +20,7 @@ from sigpump.config import Config
 from sigpump.screener import DexScreenerClient
 from sigpump.solana import TokenAuthorities
 from sigpump.telegram import TelegramAlerter
-from sigpump.tracker import AlertTracker
+from sigpump.tracker import AlertTracker, format_minutes
 from sigpump.util import normalize_address, to_float
 from sigpump.wallets import WalletBuy, WalletSignal, WalletWatcher, ws_url
 
@@ -258,19 +258,21 @@ class MemecoinRadar:
     def _blacklist_losers(self) -> None:
         """Mete en la lista negra las wallets seguidas cuyas compras, con al
         menos [wallets].loser_min_signals tokens medidos, tienen una mediana a
-        30 min de loser_max_median_ret_pct o peor: copiarlas hace perder."""
+        loser_checkpoint_minutes de loser_max_median_ret_pct o peor: copiarlas
+        hace perder."""
         watcher = self._wallet_watcher
         cfg = self._config
         if not (self._tracker and watcher and cfg.wallets_loser_min_signals and cfg.wallets_blacklist_file):
             return
-        for wallet, returns in self._tracker.wallet_returns().items():
+        minutes = cfg.wallets_loser_checkpoint_minutes
+        for wallet, returns in self._tracker.wallet_returns(minutes).items():
             info = watcher.wallets.get(wallet)
             if info is None or len(returns) < cfg.wallets_loser_min_signals:
                 continue
             median = statistics.median(returns)
             if median > cfg.wallets_loser_max_median_ret_pct:
                 continue
-            reason = f"mediana {median:+.0f}% a 30 min en {len(returns)} tokens"
+            reason = f"mediana {median:+.0f}% a {format_minutes(minutes)} en {len(returns)} tokens"
             try:
                 watcher.blacklist(wallet, f"{info.label}: {reason}")
             except OSError as exc:
@@ -281,8 +283,8 @@ class MemecoinRadar:
     def _wallet_pair_rejection(self, pair: dict, now: float | None = None) -> str | None:
         """Motivo para no avisar de una compra de wallet por cómo está el par
         ([dexscreener].dex_ids y quote_tokens; [wallets].min_pair_age_minutes,
-        max_price_change_h1_pct, min_market_cap_usd, min_txns_m5 y
-        min_volume_h1_usd), o None si pasa. `now` es la hora contra la que se
+        max_price_change_h1_pct, min_market_cap_usd, min_txns_m5,
+        min_volume_h1_usd y max_turnover_h1), o None si pasa. `now` es la hora contra la que se
         mide la edad del par (ahora si no se da)."""
         cfg = self._config
         venue_reason = self._venue_reason(pair)
@@ -310,6 +312,10 @@ class MemecoinRadar:
         if cfg.wallets_min_volume_h1_usd and volume_h1 is not None:
             if to_float(volume_h1) < cfg.wallets_min_volume_h1_usd:
                 return f"volumen 1h ${to_float(volume_h1):,.0f} < ${cfg.wallets_min_volume_h1_usd:,.0f}"
+        if cfg.wallets_max_turnover_h1 and volume_h1 is not None and market_cap_usd > 0:
+            turnover = to_float(volume_h1) / market_cap_usd
+            if turnover > cfg.wallets_max_turnover_h1:
+                return f"volumen 1h {turnover:.0%} del market cap > {cfg.wallets_max_turnover_h1:.0%}"
         return None
 
     def _blacklist_hyperactive(self, buy: WalletBuy) -> None:

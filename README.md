@@ -25,7 +25,7 @@ Para cada compra:
 3. Se aplican los filtros y cooldowns de `[wallets]`.
 4. Si pasa, se avisa por Telegram ([sigpump/telegram.py](sigpump/telegram.py))
    y se registra en `alert_log_path` ([sigpump/tracker.py](sigpump/tracker.py))
-   con el retorno a +5, +15 y +30 minutos. Las descartadas también se
+   con el retorno a +5, +15 y +30 minutos y a +1, +4 y +24 horas. Las descartadas también se
    registran, con su motivo.
 
 ## Seguimiento de wallets
@@ -80,11 +80,13 @@ desde que se empieza a seguir.
 
 Con `blacklist_file`, también entran solas en la lista negra las wallets cuya
 compra cae `rug_drop_pct` (90% por defecto) en el seguimiento, y las que con
-al menos `loser_min_signals` tokens medidos tienen una mediana a 30 min de
-`loser_max_median_ret_pct` o peor. Se quitan del fichero de wallets y, si se
+al menos `loser_min_signals` tokens medidos tienen una mediana de
+`loser_max_median_ret_pct` o peor en el checkpoint `loser_checkpoint_minutes`
+(30 min por defecto; en 1440, a 24 h, se ven las que a 30 min parecían
+buenas y se hundían después). Se quitan del fichero de wallets y, si se
 vuelven a añadir, se quitan otra vez. Las dos reglas solo cuentan las compras
 cuyo par pasó los filtros (dex, moneda, edad, cambio 1h, market cap,
-actividad y autoridades): un rug en un par de 3 minutos que nunca se iba a
+actividad, volumen sobre market cap y autoridades): un rug en un par de 3 minutos que nunca se iba a
 avisar no dice nada de la wallet.
 
 `min_pair_age_minutes`, `max_price_change_h1_pct` y `min_market_cap_usd`
@@ -92,8 +94,12 @@ descartan las compras en pares recién creados, que ya subieron mucho en la
 última hora o de market cap pequeño: con los primeros datos eran las que
 casi siempre perdían. `min_txns_m5` y `min_volume_h1_usd` descartan los
 tokens muertos, con pocas transacciones en los últimos 5 minutos o poco
-volumen en la última hora: no se mueven y el aviso no sirve. Quedan en el
-registro con su motivo.
+volumen en la última hora: no se mueven y el aviso no sirve.
+`max_turnover_h1` descarta los que mueven en la última hora más de esa
+fracción de su market cap (0.05 = 5%): los están bombeando o ya están
+saliendo, y en octubre el 64% de los que pasaban del 5% cayó más de 50% en
+los días siguientes, frente al 28% del resto. Quedan en el registro con su
+motivo.
 
 ## Registro de compras
 
@@ -107,8 +113,13 @@ después:
   columna usa la primera muestra desde ese minuto (hasta 5 minutos más
   tarde; si no hay muestra en ese margen, por ejemplo tras un reinicio,
   queda en NULL).
+- `ret_60m_pct`, `ret_240m_pct`, `ret_1440m_pct`: lo mismo a +1, +4 y +24 h.
+  Pasados los 30 minutos el precio solo se consulta cuando se abre la
+  ventana de cada uno, con un margen de un cuarto del plazo (+24 h acepta
+  una muestra hasta +30 h).
 - `mejor_ret_30m_pct`, `peor_ret_30m_pct`: el mejor y el peor precio visto
-  en esas muestras. De acá salen la lista negra por rug y por resultados.
+  en las muestras de los primeros 30 minutos. De acá sale la lista negra
+  por rug; la de resultados usa el checkpoint de `loser_checkpoint_minutes`.
 - `enviada = 0` son compras descartadas, con `motivo_descarte`: sirven para
   comprobar si los filtros tiran señales buenas.
 - `pasa_filtros_par = 1` si el par pasó los filtros: se avisó, o se descartó
@@ -181,9 +192,9 @@ Secciones disponibles:
   tienen que coincidir en un token para avisar), un aviso por token
   (`token_cooldown_minutes`, `realert_new_wallets`), tope de actividad
   (`max_tokens_per_hour`), bots (`max_txs_per_hour`), abandonadas (`max_inactive_days`), lista negra (`blacklist_file`, `rug_drop_pct`,
-  `loser_min_signals`, `loser_max_median_ret_pct`) y filtros del par
+  `loser_min_signals`, `loser_max_median_ret_pct`, `loser_checkpoint_minutes`) y filtros del par
   (`min_pair_age_minutes`, `max_price_change_h1_pct`, `min_market_cap_usd`,
-  `min_txns_m5`, `min_volume_h1_usd`).
+  `min_txns_m5`, `min_volume_h1_usd`, `max_turnover_h1`).
 - `[telegram]` — `bot_token`, `chat_id` y opcionalmente `message_thread_id`
   si querés mandar los avisos a un tema (topic) concreto dentro de un
   grupo con "Temas" activados.

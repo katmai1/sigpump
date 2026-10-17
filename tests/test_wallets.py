@@ -685,6 +685,62 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(alerter.wallet, [])
         self.assertEqual(self._rows(), [])
 
+    async def test_con_bonding_curve_avisa_sin_los_filtros_de_amm(self):
+        """Un token sin graduar es joven, de market cap chico y no está en
+        pumpswap/raydium: esos filtros no se le aplican."""
+        radar = self._radar(
+            [_buy()], wallets_bonding_curve=True, dex_ids=["pumpswap", "raydium"],
+            wallets_min_pair_age_minutes=120, wallets_min_market_cap_usd=100_000,
+            wallets_max_turnover_h1=0.05,
+        )
+        alerter = _FakeAlerter()
+        pair = {**_pair("TOK", created_at=_hace_horas(0.2), change=10), "dexId": "pumpfun", "marketCap": 30_000}
+        await radar._wallets_once(_FakeClient(pairs=[pair]), alerter)
+        [(_, signal)] = alerter.wallet
+        self.assertTrue(signal.bonding_curve)
+        [fila] = self._rows()
+        self.assertEqual((fila["enviada"], fila["bonding_curve"], fila["pasa_filtros_par"]), (1, 1, 1))
+
+    async def test_con_bonding_curve_aplica_actividad_y_cambio_1h(self):
+        casos = [
+            ({"txns": {"m5": {"buys": 1, "sells": 0}}}, "1 txns en 5 min < 5"),
+            ({"priceChange": {"h1": 80}}, "cambio 1h +80% > 50%"),
+        ]
+        for extra, motivo in casos:
+            with self.subTest(motivo=motivo):
+                radar = self._radar(
+                    [_buy()], wallets_bonding_curve=True, wallets_min_txns_m5=5,
+                    wallets_max_price_change_h1_pct=50,
+                )
+                alerter = _FakeAlerter()
+                pair = {**_pair("TOK", change=10), "dexId": "pumpfun", **extra}
+                await radar._wallets_once(_FakeClient(pairs=[pair]), alerter)
+                self.assertEqual(alerter.wallet, [])
+                self.assertEqual(self._rows()[-1]["motivo_descarte"], motivo)
+
+    async def test_con_bonding_curve_prefiere_el_pool_del_amm(self):
+        radar = self._radar([_buy()], wallets_bonding_curve=True)
+        alerter = _FakeAlerter()
+        curva = {**_pair("TOK", liquidity=900_000), "dexId": "pumpfun"}
+        amm = {**_pair("TOK", liquidity=5_000), "dexId": "pumpswap"}
+        await radar._wallets_once(_FakeClient(pairs=[curva, amm]), alerter)
+        [(pair, signal)] = alerter.wallet
+        self.assertEqual((pair["dexId"], signal.bonding_curve), ("pumpswap", False))
+
+    async def test_rug_en_bonding_curve_no_echa_a_la_wallet(self):
+        tmp = self.path.parent
+        wallets_txt, negra = tmp / "wallets.txt", tmp / "negra.txt"
+        wallets_txt.write_text(f"{WALLET}  # ballena\n", encoding="utf-8")
+        radar = self._radar(
+            [_buy()], wallets_bonding_curve=True, wallets_blacklist_file=str(negra), wallets_rug_drop_pct=90,
+        )
+        await radar._wallets_once(_FakeClient(pairs=[{**_pair("TOK"), "dexId": "pumpfun"}]), _FakeAlerter())
+        radar._tracker.update_row(self._rows()[0]["id"], {"peor_ret_30m_pct": -97.0})
+        radar._wallet_watcher = WalletWatcher(None, "http://rpc", wallets_txt, 0.1, negra)
+        radar._wallet_watcher.reload()
+        radar._blacklist_ruggers()
+        self.assertEqual(list(radar._wallet_watcher.wallets), [WALLET])
+
     async def test_descarta_compras_fuera_de_los_dex_y_quote_pedidos(self):
         sol = {"symbol": "SOL", "address": "So11111111111111111111111111111111111111112"}
         usdc = {"symbol": "USDC", "address": "EPjF"}

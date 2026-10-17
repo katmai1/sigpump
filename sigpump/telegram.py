@@ -102,6 +102,8 @@ class TelegramAlerter:
             f"{'Entrada nueva' if buy.new_position else 'Amplía posición'}: "
             f"<b>{' + '.join(spent) or '?'}</b> (<a href=\"{tx_url}\">tx</a>)\n"
         )
+        if wallet.bonding_curve:
+            header += f"🧪 <b>En bonding curve</b> ({pool}): sin graduar, más riesgo\n"
         if wallet.others:
             header += (
                 f"👛 También entraron: <b>{html.escape(', '.join(wallet.others))}</b>\n"

@@ -280,19 +280,26 @@ class MemecoinRadar:
                 continue
             log.warning("Wallet %s a la lista negra: %s", info.label, reason)
 
-    def _wallet_pair_rejection(self, pair: dict, now: float | None = None) -> str | None:
+    def _wallet_pair_rejection(self, pair: dict, now: float | None = None, curve: bool = False) -> str | None:
         """Motivo para no avisar de una compra de wallet por cómo está el par
         ([dexscreener].dex_ids y quote_tokens; [wallets].min_pair_age_minutes,
         max_price_change_h1_pct, min_market_cap_usd, min_txns_m5,
         min_volume_h1_usd y max_turnover_h1), o None si pasa. `now` es la hora contra la que se
-        mide la edad del par (ahora si no se da)."""
+        mide la edad del par (ahora si no se da). Con `curve` (token en
+        bonding curve) no se miran el dex, la edad, el market cap ni el
+        turnover: un token sin graduar los incumple siempre."""
         cfg = self._config
-        venue_reason = self._venue_reason(pair)
-        if venue_reason:
-            return venue_reason
+        if curve:
+            if cfg.quote_tokens and not _matches_quote(pair, cfg.quote_tokens):
+                quote = (pair.get("quoteToken") or {}).get("symbol") or "?"
+                return f"par contra {quote}, no contra {' o '.join(cfg.quote_tokens)}"
+        else:
+            venue_reason = self._venue_reason(pair)
+            if venue_reason:
+                return venue_reason
         created_at = to_float(pair.get("pairCreatedAt"))
         # Sin pairCreatedAt no se puede evaluar la edad: no se descarta por ella.
-        if cfg.wallets_min_pair_age_minutes and created_at > 0:
+        if cfg.wallets_min_pair_age_minutes and created_at > 0 and not curve:
             age_minutes = ((time.time() if now is None else now) - created_at / 1000) / 60
             if age_minutes < cfg.wallets_min_pair_age_minutes:
                 return f"par creado hace {age_minutes:.0f} min"
@@ -300,7 +307,7 @@ class MemecoinRadar:
         if cfg.wallets_max_price_change_h1_pct and change_h1 > cfg.wallets_max_price_change_h1_pct:
             return f"cambio 1h {change_h1:+,.0f}% > {cfg.wallets_max_price_change_h1_pct:,.0f}%"
         market_cap_usd = to_float(pair.get("marketCap")) or to_float(pair.get("fdv"))
-        if market_cap_usd < cfg.wallets_min_market_cap_usd:
+        if market_cap_usd < cfg.wallets_min_market_cap_usd and not curve:
             return f"market cap ${market_cap_usd:,.0f} < ${cfg.wallets_min_market_cap_usd:,.0f}"
         # Sin txns o volume no se puede evaluar la actividad: no se descarta por ella.
         txns_m5 = (pair.get("txns") or {}).get("m5")
@@ -312,7 +319,7 @@ class MemecoinRadar:
         if cfg.wallets_min_volume_h1_usd and volume_h1 is not None:
             if to_float(volume_h1) < cfg.wallets_min_volume_h1_usd:
                 return f"volumen 1h ${to_float(volume_h1):,.0f} < ${cfg.wallets_min_volume_h1_usd:,.0f}"
-        if cfg.wallets_max_turnover_h1 and volume_h1 is not None and market_cap_usd > 0:
+        if cfg.wallets_max_turnover_h1 and volume_h1 is not None and market_cap_usd > 0 and not curve:
             turnover = to_float(volume_h1) / market_cap_usd
             if turnover > cfg.wallets_max_turnover_h1:
                 return f"volumen 1h {turnover:.0%} del market cap > {cfg.wallets_max_turnover_h1:.0%}"
@@ -351,7 +358,8 @@ class MemecoinRadar:
     async def _wallets_once(self, client: DexScreenerClient, alerter: TelegramAlerter) -> None:
         """
         Vuelta del seguimiento de wallets: busca sus compras nuevas y avisa
-        de cada una, salvo tokens en bonding curve (sin pool en un AMM),
+        de cada una, salvo tokens en bonding curve (sin pool en un AMM, si
+        no está [wallets].bonding_curve),
         tokens que se pueden acuñar o congelar, compras repetidas de la
         misma wallet en el mismo token dentro de su cooldown, wallets
         hiperactivas, tokens ya avisados sin wallets nuevas suficientes y,
@@ -390,6 +398,14 @@ class MemecoinRadar:
             normalize_address((p.get("baseToken") or {}).get("address", "")): p
             for p in self._best_pair_per_token(amm_pairs, mints)
         }
+        # Los que siguen en la bonding curve: solo si no tienen pool en un AMM.
+        curve_mints: set[str] = set()
+        if self._config.wallets_bonding_curve:
+            curve_pairs = [p for p in all_pairs if p.get("dexId") in BONDING_CURVE_DEX_IDS]
+            for pair in self._best_pair_per_token(curve_pairs, [m for m in mints if m not in pairs]):
+                mint = normalize_address((pair.get("baseToken") or {}).get("address", ""))
+                pairs[mint] = pair
+                curve_mints.add(mint)
         unsafe = await self._unsafe_reasons(list(pairs.values()))
 
         for signal in signals:
@@ -398,6 +414,9 @@ class MemecoinRadar:
             if pair is None:
                 log.info("Compra de %s en %s ignorada: sin pool fuera de bonding curve", buy.label, buy.mint)
                 continue
+            curve = buy.mint in curve_mints
+            if curve:
+                signal = dataclasses.replace(signal, bonding_curve=True)
             # Una wallet que compra en varias tx seguidas da una señal por tx
             # en la misma vuelta: solo cuenta la primera.
             if self._wallet_cooldown_active(buy):
@@ -406,7 +425,7 @@ class MemecoinRadar:
             # Se marca también al descartar, para no registrar una fila por
             # cada compra repetida del mismo token peligroso.
             self._wallet_alerted[key] = time.time()
-            pair_reason = unsafe.get(buy.mint) or self._wallet_pair_rejection(pair)
+            pair_reason = unsafe.get(buy.mint) or self._wallet_pair_rejection(pair, curve=curve)
             reason = pair_reason
             wallets = 1 + len(signal.others)
             if not reason and self._hyperactive(buy.wallet):
@@ -460,6 +479,7 @@ class MemecoinRadar:
             "wallets_confluencia": len(signal.others),
             "tx": buy.signature,
             "pasa_filtros_par": int(pair_ok),
+            "bonding_curve": int(signal.bonding_curve),
         })
 
     async def run(self) -> None:

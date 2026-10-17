@@ -50,6 +50,12 @@ class TestFormatMessage(unittest.TestCase):
         self.assertIn("Cap. mercado: $2,500,000", texto)
         self.assertIn("<code>AbC123</code>", texto)
 
+    def test_bonding_curve_se_marca(self):
+        self.assertNotIn("bonding curve", _alerter().format_message(_pair(), _SIGNAL))
+        signal = WalletSignal(_SIGNAL.buy, bonding_curve=True)
+        texto = _alerter().format_message(_pair(dexId="pumpfun"), signal)
+        self.assertIn("🧪 <b>En bonding curve</b> (pumpfun)", texto)
+
     def test_campos_null_no_rompen_el_formato(self):
         """Con `"usd": null` el `.get("usd", 0)` devolvía None y el formato
         `:,.0f` tiraba TypeError, perdiendo el aviso en silencio."""

@@ -37,10 +37,17 @@ un token sin pagar (airdrops de spam) no cuenta. El aviso indica si es una
 entrada nueva o amplía una posición, cuánto pagó y qué otras wallets
 seguidas entraron en el mismo token en los últimos `confluence_minutes`.
 
-Se ignoran las compras de tokens que todavía están en la bonding curve de un
-launchpad (pump.fun, Meteora DBC, LaunchLab, Moonshot) y se descartan las de
-tokens que se pueden acuñar o congelar; estas últimas quedan registradas con
-`enviada = 0`. El aviso es por quién compra, no por cómo está el mercado:
+Las compras de tokens que todavía están en la bonding curve de un launchpad
+(pump.fun, Meteora DBC, LaunchLab, Moonshot) se ignoran, salvo con
+`bonding_curve = true`: entonces se avisan marcadas con 🧪, y si el token ya
+tiene pool en un AMM se usa ese. A esas solo se les aplican `quote_tokens`,
+`max_price_change_h1_pct`, `min_txns_m5` y `min_volume_h1_usd` (el dex, la
+edad, el market cap y el turnover las descartarían siempre), se registran con
+`bonding_curve = 1`, su precio se sigue por el token y no por el pool (que
+cambia al graduarse) y no cuentan para la lista negra por rug ni por
+resultados: casi todos los tokens sin graduar mueren, y echarían a wallets
+que en los AMM aciertan. Se descartan las de tokens que se pueden acuñar o
+congelar, que quedan registradas con `enviada = 0`. El aviso es por quién compra, no por cómo está el mercado:
 del par solo se miran el dex y la moneda contra la que cotiza
 (`[dexscreener].dex_ids` y `quote_tokens`) y los filtros propios de
 `[wallets]` que se explican más abajo.
@@ -194,7 +201,8 @@ Secciones disponibles:
   (`max_tokens_per_hour`), bots (`max_txs_per_hour`), abandonadas (`max_inactive_days`), lista negra (`blacklist_file`, `rug_drop_pct`,
   `loser_min_signals`, `loser_max_median_ret_pct`, `loser_checkpoint_minutes`) y filtros del par
   (`min_pair_age_minutes`, `max_price_change_h1_pct`, `min_market_cap_usd`,
-  `min_txns_m5`, `min_volume_h1_usd`, `max_turnover_h1`).
+  `min_txns_m5`, `min_volume_h1_usd`, `max_turnover_h1`) y avisos en bonding
+  curve (`bonding_curve`).
 - `[telegram]` — `bot_token`, `chat_id` y opcionalmente `message_thread_id`
   si querés mandar los avisos a un tema (topic) concreto dentro de un
   grupo con "Temas" activados.

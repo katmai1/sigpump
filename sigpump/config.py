@@ -43,6 +43,7 @@ _KNOWN_KEYS: dict[str, set[str]] = {
         "min_txns_m5",
         "min_volume_h1_usd",
         "max_turnover_h1",
+        "bonding_curve",
         "websocket",
         "ws_url",
         "full_poll_minutes",
@@ -81,6 +82,7 @@ _FIELD_TYPES: dict[str, tuple[str, tuple[type, ...]]] = {
     "wallets_min_txns_m5": ("[wallets].min_txns_m5", (int,)),
     "wallets_min_volume_h1_usd": ("[wallets].min_volume_h1_usd", _NUMBER),
     "wallets_max_turnover_h1": ("[wallets].max_turnover_h1", _NUMBER),
+    "wallets_bonding_curve": ("[wallets].bonding_curve", (bool,)),
     "wallets_websocket": ("[wallets].websocket", (bool,)),
     "wallets_ws_url": ("[wallets].ws_url", (str,)),
     "wallets_full_poll_minutes": ("[wallets].full_poll_minutes", _NUMBER),
@@ -175,6 +177,11 @@ class Config:
     # del que corresponde al tamaño del token lo están bombeando o ya están
     # saliendo, y casi siempre se hundía después. 0 = sin filtro.
     wallets_max_turnover_h1: float = 0.0
+    # Avisar también de las compras de tokens que siguen en la bonding curve
+    # de un launchpad (pump.fun...). A esas solo se les aplican quote_tokens,
+    # max_price_change_h1_pct, min_txns_m5 y min_volume_h1_usd: el dex, la
+    # edad, el market cap y el turnover las descartarían siempre.
+    wallets_bonding_curve: bool = False
     # Avisos de actividad por el WebSocket del RPC: solo se consultan las
     # wallets que hicieron algo. ws_url vacío = el de rpc_url con wss://.
     wallets_websocket: bool = True
@@ -321,6 +328,7 @@ class Config:
             wallets_min_txns_m5=wallets.get("min_txns_m5", 0),
             wallets_min_volume_h1_usd=wallets.get("min_volume_h1_usd", 0.0),
             wallets_max_turnover_h1=wallets.get("max_turnover_h1", 0.0),
+            wallets_bonding_curve=wallets.get("bonding_curve", False),
             wallets_websocket=wallets.get("websocket", True),
             wallets_ws_url=wallets.get("ws_url", ""),
             wallets_full_poll_minutes=wallets.get("full_poll_minutes", 10.0),

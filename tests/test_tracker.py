@@ -200,6 +200,24 @@ class TestAlertTracker(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             tracker.wallet_returns(45)
 
+    async def test_bonding_curve_sigue_el_token_tras_graduarse(self):
+        """Al graduarse el token se muda de la curva a un pool del AMM: se
+        sigue el de más liquidez del token y no el pool de la alerta."""
+        tracker = self._tracker()
+        row_id = tracker.record(_pair(pool="CURVA"), sent=True)
+        tracker.update_row(row_id, {"bonding_curve": 1})
+
+        class _Client:
+            async def get_pairs_for_tokens(self, chain_id, addresses):
+                return [
+                    {"pairAddress": "CURVA", "baseToken": {"address": "TOK"}, "priceUsd": "1.0", "liquidity": {"usd": 10}},
+                    {"pairAddress": "AMM", "baseToken": {"address": "TOK"}, "priceUsd": "3.0", "liquidity": {"usd": 50_000}},
+                ]
+
+        self._age(5)
+        await tracker.update(_Client(), "solana")
+        self.assertEqual(self._rows()[0]["ret_5m_pct"], 200.0)
+
     async def test_sin_precio_en_la_alerta_no_se_sigue(self):
         tracker = self._tracker()
         tracker.record(_pair(price=None), sent=True)

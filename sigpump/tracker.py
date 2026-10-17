@@ -66,6 +66,12 @@ COLUMNS: dict[str, str] = {
     # negra por rug y por resultados solo cuenta estas: una compra que nunca
     # iba a avisarse no dice nada de si vale la pena copiar a la wallet.
     "pasa_filtros_par": "INTEGER",
+    # 1 = el token seguía en la bonding curve de un launchpad. Esas compras
+    # no cuentan para la lista negra por rug ni por resultados: casi todos
+    # los tokens sin graduar mueren, y echarían a wallets que en los AMM
+    # aciertan. Su precio se sigue por el token y no por el pool, que
+    # cambia al graduarse.
+    "bonding_curve": "INTEGER",
     "simbolo": "TEXT",
     "token": "TEXT",
     "pool": "TEXT",
@@ -318,6 +324,7 @@ class AlertTracker:
             rows = conn.execute(
                 f"SELECT wallet, simbolo, token, MIN({_WORST}) AS peor FROM alertas "
                 f"WHERE tipo = 'wallet' AND wallet IS NOT NULL AND pasa_filtros_par = 1 AND {_WORST} <= :limit "
+                "AND COALESCE(bonding_curve, 0) = 0 "
                 "GROUP BY wallet",
                 {"limit": -drop_pct},
             ).fetchall()
@@ -344,7 +351,8 @@ class AlertTracker:
             rows = conn.execute(
                 f"SELECT wallet, {column} AS ret FROM alertas WHERE id IN ("
                 "SELECT MIN(id) FROM alertas WHERE tipo = 'wallet' AND wallet IS NOT NULL "
-                f"AND pasa_filtros_par = 1 GROUP BY wallet, token) AND {column} IS NOT NULL"
+                "AND pasa_filtros_par = 1 AND COALESCE(bonding_curve, 0) = 0 "
+                f"GROUP BY wallet, token) AND {column} IS NOT NULL"
             ).fetchall()
         except sqlite3.Error as exc:
             log.warning("No se pudo leer %s: %s", self._path, exc)
@@ -380,9 +388,21 @@ class AlertTracker:
             str(normalize_address(pair.get("pairAddress") or "")): to_float(pair.get("priceUsd"))
             for pair in pairs
         }
+        # Los tokens en bonding curve se mudan de pool al graduarse: se sigue
+        # el de más liquidez del token, que antes de graduarse es la curva.
+        token_prices: dict[str, tuple[float, float]] = {}
+        for pair in pairs:
+            token = str(normalize_address((pair.get("baseToken") or {}).get("address") or ""))
+            liquidity = to_float((pair.get("liquidity") or {}).get("usd"))
+            price = to_float(pair.get("priceUsd"))
+            if price and (token not in token_prices or liquidity > token_prices[token][0]):
+                token_prices[token] = (liquidity, price)
         try:
             for row in pending:
-                price = prices.get(row["pool"])
+                if row["bonding_curve"]:
+                    price = token_prices.get(row["token"], (0.0, 0.0))[1]
+                else:
+                    price = prices.get(row["pool"])
                 if not price:
                     continue
                 ret = round((price / row["precio_usd"] - 1) * 100, 2)

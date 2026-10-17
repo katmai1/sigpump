@@ -29,7 +29,8 @@ rpc_url = "https://api.mainnet-beta.solana.com"
 # Seguimiento de wallets: avisa cuando una de las del fichero compra un token.
 # Usa el rpc_url de [solana]; el RPC público corta enseguida, conviene uno con
 # API key (Helius, QuickNode...). Las compras en bonding curve (pump.fun antes
-# de graduarse, etc.) y las de tokens que se pueden acuñar o congelar se ignoran.
+# de graduarse, etc.) se ignoran salvo con bonding_curve = true, y las de
+# tokens que se pueden acuñar o congelar se descartan.
 # Una dirección por línea; lo que va detrás de # es la etiqueta del aviso:
 #   5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1  # ballena 1
 # Un * detrás de la dirección la marca de confianza: avisa sola aunque no
@@ -104,6 +105,11 @@ min_volume_h1_usd = 5000
 # están saliendo: por encima del 5%, el 64% de las señales caía más de 50% en
 # días; por debajo, el 28%. 0 = sin filtro.
 max_turnover_h1 = 0.05
+# Avisar también de las compras de tokens en bonding curve (pump.fun antes de
+# graduarse...), marcadas con 🧪. Solo se les aplican quote_tokens,
+# max_price_change_h1_pct, min_txns_m5 y min_volume_h1_usd, y no cuentan para
+# la lista negra por rug ni por resultados. Son mucho más arriesgadas.
+bonding_curve = false
 # Avisos de actividad por el WebSocket del RPC (logsSubscribe): solo se leen
 # las transacciones que avisa (sin las transferencias simples), en vez de
 # consultar todas las wallets en cada vuelta. Si se cae, se vuelve a

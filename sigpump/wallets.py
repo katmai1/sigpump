@@ -115,10 +115,12 @@ class WalletBuy:
 class WalletSignal:
     """Lo que se avisa: la compra y las otras wallets seguidas que entraron
     en el mismo token hace poco (confluencia). `update` marca un token ya
-    avisado al que se sumaron wallets nuevas."""
+    avisado al que se sumaron wallets nuevas y `bonding_curve` uno que
+    todavía no se graduó a un AMM."""
     buy: WalletBuy
     others: tuple[str, ...] = field(default_factory=tuple)
     update: bool = False
+    bonding_curve: bool = False
 
 
 def _until(reason: str) -> float | None:

@@ -344,12 +344,12 @@ class MemecoinRadar:
     def _confluence(self, buy: WalletBuy) -> tuple[str, ...]:
         """Anota la compra y devuelve las etiquetas de las otras wallets
         seguidas que entraron en el mismo token dentro de confluence_minutes.
-        Las hiperactivas no cuentan."""
+        Las hiperactivas no cuentan; las de confianza llevan ⭐."""
         since = buy.ts - self._config.wallets_confluence_minutes * 60
         recent = [b for b in self._wallet_buys.get(buy.mint, []) if b.ts >= since]
         # Una por wallet: dos wallets con la misma etiqueta cuentan como dos.
         others = tuple({
-            b.wallet: b.label for b in recent
+            b.wallet: f"⭐ {b.label}" if b.trusted else b.label for b in recent
             if b.wallet != buy.wallet and not self._hyperactive(b.wallet)
         }.values())
         self._wallet_buys[buy.mint] = recent + [buy]

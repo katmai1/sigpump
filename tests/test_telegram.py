@@ -2,6 +2,7 @@
 a campos numéricos ausentes/null/string. No envía nada: format_message() es
 pura y el Bot nunca se inicializa."""
 
+import dataclasses
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -49,6 +50,13 @@ class TestFormatMessage(unittest.TestCase):
         self.assertIn("Liquidez: $120,000", texto)
         self.assertIn("Cap. mercado: $2,500,000", texto)
         self.assertIn("<code>AbC123</code>", texto)
+
+    def test_wallet_de_confianza_se_marca(self):
+        self.assertNotIn("de las buenas", _alerter().format_message(_pair(), _SIGNAL))
+        signal = WalletSignal(dataclasses.replace(_SIGNAL.buy, trusted=True))
+        texto = _alerter().format_message(_pair(), signal)
+        self.assertIn("⭐ ballena compró", texto)
+        self.assertIn("⭐ <b>Wallet de las buenas</b>", texto)
 
     def test_bonding_curve_se_marca(self):
         self.assertNotIn("bonding curve", _alerter().format_message(_pair(), _SIGNAL))

@@ -790,6 +790,14 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([s.others for _, s in alerter.wallet], [(), ("ballena",)])
         self.assertEqual(self._rows()[1]["wallets_confluencia"], 1)
 
+    async def test_confluencia_marca_las_wallets_de_confianza(self):
+        radar = self._radar([_buy(trusted=True)], [_buy(wallet=OTRA, label="ballena 2")])
+        alerter = _FakeAlerter()
+        client = _FakeClient(pairs=[_pair("TOK")])
+        await radar._wallets_once(client, alerter)
+        await radar._wallets_once(client, alerter)
+        self.assertEqual(alerter.wallet[-1][1].others, ("⭐ ballena",))
+
     async def test_la_confluencia_caduca(self):
         viejo = time.time() - 2 * 3600
         radar = self._radar([_buy(ts=viejo)], [_buy(wallet=OTRA, label="ballena 2")])

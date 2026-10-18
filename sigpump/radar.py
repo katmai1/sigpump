@@ -433,9 +433,8 @@ class MemecoinRadar:
             if not reason and wallets < self._config.wallets_min_wallets and not buy.trusted:
                 reason = f"{wallets} de {self._config.wallets_min_wallets} wallets"
             previous = self._last_token_alert(buy.mint)
-            if not reason and previous is not None and (
-                wallets < previous + self._config.wallets_realert_new_wallets
-            ):
+            realert = self._config.wallets_realert_new_wallets
+            if not reason and previous is not None and (not realert or wallets < previous + realert):
                 reason = f"token ya avisado con {previous} wallets"
             if reason:
                 log.info("Compra de %s en %s descartada: %s", buy.label, _symbol(pair), reason)

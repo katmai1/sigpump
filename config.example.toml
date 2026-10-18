@@ -54,7 +54,8 @@ min_wallets = 1
 # Minutos sin volver a avisar de un token ya avisado por wallets: las compras
 # siguientes quedan en el registro con enviada = 0, salvo que se sumen
 # realert_new_wallets wallets más que en el último aviso (sale como
-# actualización). 0 = sin límite por token.
+# actualización; 0 = no reavisar nunca: que entren más wallets no lo hacía
+# mejor). token_cooldown_minutes = 0 = sin límite por token.
 token_cooldown_minutes = 0
 realert_new_wallets = 2
 # Una wallet que compra más tokens distintos que esto en una hora (un bot o un

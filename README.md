@@ -69,7 +69,8 @@ aunque no llegue a `min_wallets`.
 Para no recibir el mismo token una y otra vez, `token_cooldown_minutes` deja
 un solo aviso por token en esa ventana; solo se vuelve a avisar, marcado como
 🔁 actualización, si se suman `realert_new_wallets` wallets más que en el
-último aviso. `max_tokens_per_hour` silencia las wallets que compran de todo
+último aviso (0 = no reavisar nunca: con los datos, que coincidieran más
+wallets en un token no lo hacía mejor, sino peor). `max_tokens_per_hour` silencia las wallets que compran de todo
 (bots o degens): ni avisan ni cuentan para la confluencia de las demás, y
 con `blacklist_file` entran en la lista negra.
 
@@ -91,10 +92,12 @@ al menos `loser_min_signals` tokens medidos tienen una mediana de
 `loser_max_median_ret_pct` o peor en el checkpoint `loser_checkpoint_minutes`
 (30 min por defecto; en 1440, a 24 h, se ven las que a 30 min parecían
 buenas y se hundían después). Se quitan del fichero de wallets y, si se
-vuelven a añadir, se quitan otra vez. Las dos reglas solo cuentan las compras
+vuelven a añadir, se quitan otra vez. La de rugs solo cuenta las compras
 cuyo par pasó los filtros (dex, moneda, edad, cambio 1h, market cap,
 actividad, volumen sobre market cap y autoridades): un rug en un par de 3 minutos que nunca se iba a
-avisar no dice nada de la wallet.
+avisar no dice nada de la wallet. La de resultados las cuenta todas (menos
+las de bonding curve): elegir mal tokens es elegir mal aunque no se avisen,
+y con los filtros estrictos casi nunca llegaría a tener tokens medidos.
 
 `min_pair_age_minutes`, `max_price_change_h1_pct` y `min_market_cap_usd`
 descartan las compras en pares recién creados, que ya subieron mucho en la

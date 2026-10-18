@@ -863,6 +863,22 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
             [None, "token ya avisado con 1 wallets", None, "token ya avisado con 3 wallets"],
         )
 
+    async def test_realert_cero_no_reavisa_aunque_entren_mas_wallets(self):
+        tercera = "8Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j8"
+        radar = self._radar(
+            [_buy()], [_buy(wallet=OTRA)], [_buy(wallet=tercera)],
+            wallets_token_cooldown_minutes=120, wallets_realert_new_wallets=0,
+        )
+        alerter = _FakeAlerter()
+        client = _FakeClient(pairs=[_pair("TOK")])
+        for _ in range(3):
+            await radar._wallets_once(client, alerter)
+        self.assertEqual(len(alerter.wallet), 1)
+        self.assertEqual(
+            [f["motivo_descarte"] for f in self._rows()],
+            [None, "token ya avisado con 1 wallets", "token ya avisado con 1 wallets"],
+        )
+
     async def test_el_aviso_por_token_sobrevive_a_un_reinicio(self):
         radar = self._radar([_buy()], wallets_token_cooldown_minutes=120)
         client = _FakeClient(pairs=[_pair("TOK")])
@@ -1020,9 +1036,10 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         radar._wallet_watcher.reload()
         self.assertEqual(wallets_txt.read_text(encoding="utf-8"), f"{OTRA}  # buena\n")
 
-    async def test_rug_o_perdidas_en_un_par_descartado_no_cuentan(self):
+    async def test_rug_en_un_par_descartado_no_cuenta_pero_las_perdidas_si(self):
         """Antes una sola compra en un par de 3 minutos que hacía rug echaba a
-        la wallet, aunque ese par nunca se iba a avisar."""
+        la wallet, aunque ese par nunca se iba a avisar. Para la mediana de
+        resultados sí cuentan: elegir mal es elegir mal aunque no se avise."""
         tmp = self.path.parent
         wallets_txt, negra = tmp / "wallets.txt", tmp / "negra.txt"
         wallets_txt.write_text(f"{WALLET}  # ballena\n", encoding="utf-8")
@@ -1040,9 +1057,11 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         radar._wallet_watcher = WalletWatcher(None, "http://rpc", wallets_txt, 0.1, negra)
         radar._wallet_watcher.reload()
         radar._blacklist_ruggers()
-        radar._blacklist_losers()
         self.assertEqual(list(radar._wallet_watcher.wallets), [WALLET])
         self.assertFalse(negra.exists())
+        radar._blacklist_losers()
+        self.assertEqual(list(radar._wallet_watcher.wallets), [])
+        self.assertIn("ballena: mediana -90% a 30 min en 3 tokens", negra.read_text(encoding="utf-8"))
 
     async def test_descarte_por_confluencia_pasa_los_filtros_del_par(self):
         radar = self._radar([_buy()], wallets_min_wallets=2)

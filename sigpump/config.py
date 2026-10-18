@@ -135,7 +135,7 @@ class Config:
     # de confluence_minutes para avisar. 1 = avisar de cada compra.
     wallets_min_wallets: int = 1
     # Minutos sin volver a avisar de un token ya avisado por wallets, salvo
-    # que se sumen realert_new_wallets wallets más. 0 = sin límite por token.
+    # que se sumen realert_new_wallets wallets más (0 = nunca). 0 = sin límite por token.
     wallets_token_cooldown_minutes: float = 0.0
     wallets_realert_new_wallets: int = 2
     # Una wallet que compra más tokens distintos que esto en una hora no
@@ -218,9 +218,9 @@ class Config:
             raise ValueError("[solana].rpc_url no puede estar vacío")
         if self.wallets_min_wallets < 1:
             raise ValueError(f"[wallets].min_wallets debe ser >= 1 ({self.wallets_min_wallets})")
-        if self.wallets_realert_new_wallets < 1:
+        if self.wallets_realert_new_wallets < 0:
             raise ValueError(
-                f"[wallets].realert_new_wallets debe ser >= 1 ({self.wallets_realert_new_wallets})"
+                f"[wallets].realert_new_wallets debe ser >= 0 ({self.wallets_realert_new_wallets})"
             )
         if self.wallets_max_tokens_per_hour < 0:
             raise ValueError(

@@ -200,6 +200,19 @@ class TestAlertTracker(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             tracker.wallet_returns(45)
 
+    def test_wallet_returns_cuenta_las_descartadas_por_el_par(self):
+        """Elegir un token malo cuenta aunque su par no pasara los filtros;
+        las compras en bonding curve no."""
+        tracker = self._tracker()
+        for token, campos in [
+            ("A", {"pasa_filtros_par": 1, "ret_30m_pct": 5}),
+            ("B", {"pasa_filtros_par": 0, "ret_30m_pct": -80}),
+            ("C", {"pasa_filtros_par": 0, "bonding_curve": 1, "ret_30m_pct": -90}),
+        ]:
+            row_id = tracker.record(_pair(), sent=False)
+            tracker.update_row(row_id, {"wallet": "W", "token": token, **campos})
+        self.assertEqual(sorted(tracker.wallet_returns()["W"]), [-80, 5])
+
     async def test_bonding_curve_sigue_el_token_tras_graduarse(self):
         """Al graduarse el token se muda de la curva a un pool del AMM: se
         sigue el de más liquidez del token y no el pool de la alerta."""

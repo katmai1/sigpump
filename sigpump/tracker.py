@@ -338,9 +338,10 @@ class AlertTracker:
 
     def wallet_returns(self, minutes: int = TRACKING_MINUTES) -> dict[str, list[float]]:
         """Wallet -> rendimiento a `minutes` (uno de CHECKPOINTS_MINUTES) de
-        la primera compra registrada de cada token que pasó los filtros del
-        par (avisada o no), solo las ya medidas. Una por token: las compras
-        repetidas del mismo token no deben pesar más."""
+        la primera compra registrada de cada token (avisada o no, pasara o no
+        los filtros del par: el par no cambia lo bien que elige la wallet),
+        solo las ya medidas. Una por token: las compras repetidas del mismo
+        token no deben pesar más."""
         if minutes not in CHECKPOINTS_MINUTES:
             raise ValueError(f"Sin checkpoint a {minutes} min: {CHECKPOINTS_MINUTES}")
         column = f"ret_{minutes}m_pct"
@@ -351,7 +352,7 @@ class AlertTracker:
             rows = conn.execute(
                 f"SELECT wallet, {column} AS ret FROM alertas WHERE id IN ("
                 "SELECT MIN(id) FROM alertas WHERE tipo = 'wallet' AND wallet IS NOT NULL "
-                "AND pasa_filtros_par = 1 AND COALESCE(bonding_curve, 0) = 0 "
+                "AND COALESCE(bonding_curve, 0) = 0 "
                 f"GROUP BY wallet, token) AND {column} IS NOT NULL"
             ).fetchall()
         except sqlite3.Error as exc:

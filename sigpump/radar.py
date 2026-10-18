@@ -280,14 +280,19 @@ class MemecoinRadar:
                 continue
             log.warning("Wallet %s a la lista negra: %s", info.label, reason)
 
-    def _wallet_pair_rejection(self, pair: dict, now: float | None = None, curve: bool = False) -> str | None:
+    def _wallet_pair_rejection(
+        self, pair: dict, now: float | None = None, curve: bool = False, trusted: bool = False
+    ) -> str | None:
         """Motivo para no avisar de una compra de wallet por cómo está el par
         ([dexscreener].dex_ids y quote_tokens; [wallets].min_pair_age_minutes,
         max_price_change_h1_pct, min_market_cap_usd, min_txns_m5,
         min_volume_h1_usd y max_turnover_h1), o None si pasa. `now` es la hora contra la que se
         mide la edad del par (ahora si no se da). Con `curve` (token en
         bonding curve) no se miran el dex, la edad, el market cap ni el
-        turnover: un token sin graduar los incumple siempre."""
+        turnover: un token sin graduar los incumple siempre. Con `trusted`
+        (wallet de confianza) no se miran el cambio en 1h, el market cap ni
+        el turnover: en pares de más de un día, sus compras que esos filtros
+        descartaban eran las mejores del registro (+18% de mediana a 1 h)."""
         cfg = self._config
         if curve:
             if cfg.quote_tokens and not _matches_quote(pair, cfg.quote_tokens):
@@ -304,10 +309,10 @@ class MemecoinRadar:
             if age_minutes < cfg.wallets_min_pair_age_minutes:
                 return f"par creado hace {age_minutes:.0f} min"
         change_h1 = to_float((pair.get("priceChange") or {}).get("h1"))
-        if cfg.wallets_max_price_change_h1_pct and change_h1 > cfg.wallets_max_price_change_h1_pct:
+        if cfg.wallets_max_price_change_h1_pct and change_h1 > cfg.wallets_max_price_change_h1_pct and not trusted:
             return f"cambio 1h {change_h1:+,.0f}% > {cfg.wallets_max_price_change_h1_pct:,.0f}%"
         market_cap_usd = to_float(pair.get("marketCap")) or to_float(pair.get("fdv"))
-        if market_cap_usd < cfg.wallets_min_market_cap_usd and not curve:
+        if market_cap_usd < cfg.wallets_min_market_cap_usd and not curve and not trusted:
             return f"market cap ${market_cap_usd:,.0f} < ${cfg.wallets_min_market_cap_usd:,.0f}"
         # Sin txns o volume no se puede evaluar la actividad: no se descarta por ella.
         txns_m5 = (pair.get("txns") or {}).get("m5")
@@ -319,7 +324,7 @@ class MemecoinRadar:
         if cfg.wallets_min_volume_h1_usd and volume_h1 is not None:
             if to_float(volume_h1) < cfg.wallets_min_volume_h1_usd:
                 return f"volumen 1h ${to_float(volume_h1):,.0f} < ${cfg.wallets_min_volume_h1_usd:,.0f}"
-        if cfg.wallets_max_turnover_h1 and volume_h1 is not None and market_cap_usd > 0 and not curve:
+        if cfg.wallets_max_turnover_h1 and volume_h1 is not None and market_cap_usd > 0 and not curve and not trusted:
             turnover = to_float(volume_h1) / market_cap_usd
             if turnover > cfg.wallets_max_turnover_h1:
                 return f"volumen 1h {turnover:.0%} del market cap > {cfg.wallets_max_turnover_h1:.0%}"
@@ -425,7 +430,7 @@ class MemecoinRadar:
             # Se marca también al descartar, para no registrar una fila por
             # cada compra repetida del mismo token peligroso.
             self._wallet_alerted[key] = time.time()
-            pair_reason = unsafe.get(buy.mint) or self._wallet_pair_rejection(pair, curve=curve)
+            pair_reason = unsafe.get(buy.mint) or self._wallet_pair_rejection(pair, curve=curve, trusted=buy.trusted)
             reason = pair_reason
             wallets = 1 + len(signal.others)
             if not reason and self._hyperactive(buy.wallet):

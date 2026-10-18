@@ -1000,6 +1000,28 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self._rows()[-1]["motivo_descarte"] or "", motivo)
                 self.assertEqual(len(alerter.wallet), 0 if motivo else 1)
 
+    async def test_wallet_de_confianza_se_salta_cambio_market_cap_y_turnover(self):
+        casos = [
+            (_pair("TOK", created_at=_hace_horas(5), change=80), ""),
+            ({**_pair("TOK", created_at=_hace_horas(5)), "marketCap": 50_000}, ""),
+            (_pair("TOK", created_at=_hace_horas(5), volume=50_000), ""),
+            (_pair("TOK", created_at=_hace_horas(0.5)), "par creado hace 30 min"),
+            ({**_pair("TOK", created_at=_hace_horas(5)), "quoteToken": {"symbol": "PUMP"}},
+             "par contra PUMP, no contra SOL"),
+        ]
+        for pair, motivo in casos:
+            with self.subTest(motivo=motivo):
+                radar = self._radar(
+                    [_buy(trusted=True)], wallets_min_pair_age_minutes=120,
+                    wallets_max_price_change_h1_pct=50, wallets_min_market_cap_usd=100_000,
+                    wallets_max_turnover_h1=0.03, quote_tokens=["SOL"],
+                )
+                alerter = _FakeAlerter()
+                pair = {"quoteToken": {"symbol": "SOL"}, **pair}
+                await radar._wallets_once(_FakeClient(pairs=[pair]), alerter)
+                self.assertEqual(self._rows()[-1]["motivo_descarte"] or "", motivo)
+                self.assertEqual(len(alerter.wallet), 0 if motivo else 1)
+
     async def test_filtros_de_actividad_del_par_para_wallets(self):
         casos = [
             ({**_pair("TOK"), "txns": {"m5": {"buys": 1, "sells": 0}}}, "1 txns en 5 min < 5"),

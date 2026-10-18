@@ -64,7 +64,10 @@ la primera compra queda registrada con `enviada = 0` y el aviso sale con la
 que completa el número. Las compras recientes se recuperan del registro al
 reiniciar, así que un reinicio entre las dos no pierde el aviso. Una wallet
 marcada de confianza (un `*` detrás de la dirección en el fichero) avisa sola,
-aunque no llegue a `min_wallets`.
+aunque no llegue a `min_wallets`, y a sus compras no se les aplican
+`max_price_change_h1_pct`, `min_market_cap_usd` ni `max_turnover_h1` (sí la
+edad del par, el dex y `quote_tokens`): en pares de más de un día, las suyas
+que esos filtros descartaban eran las mejores del registro.
 
 Para no recibir el mismo token una y otra vez, `token_cooldown_minutes` deja
 un solo aviso por token en esa ventana; solo se vuelve a avisar, marcado como
@@ -106,7 +109,7 @@ casi siempre perdían. `min_txns_m5` y `min_volume_h1_usd` descartan los
 tokens muertos, con pocas transacciones en los últimos 5 minutos o poco
 volumen en la última hora: no se mueven y el aviso no sirve.
 `max_turnover_h1` descarta los que mueven en la última hora más de esa
-fracción de su market cap (0.05 = 5%): los están bombeando o ya están
+fracción de su market cap (0.1 = 10%): los están bombeando o ya están
 saliendo, y en octubre el 64% de los que pasaban del 5% cayó más de 50% en
 los días siguientes, frente al 28% del resto. Quedan en el registro con su
 motivo.

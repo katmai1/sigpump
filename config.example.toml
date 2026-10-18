@@ -34,7 +34,9 @@ rpc_url = "https://api.mainnet-beta.solana.com"
 # Una dirección por línea; lo que va detrás de # es la etiqueta del aviso:
 #   5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1  # ballena 1
 # Un * detrás de la dirección la marca de confianza: avisa sola aunque no
-# llegue a min_wallets.
+# llegue a min_wallets, y a sus compras no se les aplican
+# max_price_change_h1_pct, min_market_cap_usd ni max_turnover_h1 (sí la edad,
+# el dex y quote_tokens).
 #   5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1 *  # ballena 1
 # Se relee solo cuando cambia: no hace falta reiniciar para añadir wallets.
 file = "wallets.txt"
@@ -104,8 +106,9 @@ min_volume_h1_usd = 5000
 # Volumen de la última hora sobre el market cap (0.05 = 5%). Con mucho más
 # volumen del que corresponde al tamaño del token lo están bombeando o ya
 # están saliendo: por encima del 5%, el 64% de las señales caía más de 50% en
-# días; por debajo, el 28%. 0 = sin filtro.
-max_turnover_h1 = 0.05
+# días; por debajo, el 28%. Con pares de más de un día, hasta el 10% salía
+# igual o mejor. 0 = sin filtro.
+max_turnover_h1 = 0.1
 # Avisar también de las compras de tokens en bonding curve (pump.fun antes de
 # graduarse...), marcadas con 🧪. Solo se les aplican quote_tokens,
 # max_price_change_h1_pct, min_txns_m5 y min_volume_h1_usd, y no cuentan para

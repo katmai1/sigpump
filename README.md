@@ -65,9 +65,18 @@ que completa el número. Las compras recientes se recuperan del registro al
 reiniciar, así que un reinicio entre las dos no pierde el aviso. Una wallet
 marcada de confianza (un `*` detrás de la dirección en el fichero) avisa sola,
 aunque no llegue a `min_wallets`, y a sus compras no se les aplican
-`max_price_change_h1_pct`, `min_market_cap_usd` ni `max_turnover_h1` (sí la
-edad del par, el dex y `quote_tokens`): en pares de más de un día, las suyas
-que esos filtros descartaban eran las mejores del registro.
+`max_price_change_h1_pct`, `min_market_cap_usd`, `max_turnover_h1` ni
+`min_txns_m5` (sí la edad del par, el dex y `quote_tokens`): en pares de más
+de un día, las suyas que esos filtros descartaban eran las mejores del
+registro. Sirven para salir rápido: esas mismas daban +6% a 1 h y +11% a 4 h,
+pero -42% a 24 h.
+
+`cooldown_minutes` deja un aviso por wallet y token en esa ventana. Con 24 h
+(1440) no se repiten las wallets que van promediando un token cada pocas
+horas: en octubre una mandó 22 avisos del mismo token mientras caía de 4,5M
+a 466k de market cap, y las recompras que se quitaban así daban -21% de
+mediana a 24 h, frente al -3% de las que quedaban. Se recupera del registro
+al reiniciar.
 
 Para no recibir el mismo token una y otra vez, `token_cooldown_minutes` deja
 un solo aviso por token en esa ventana; solo se vuelve a avisar, marcado como

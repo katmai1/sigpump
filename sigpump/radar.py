@@ -81,11 +81,16 @@ class MemecoinRadar:
         now = time.time()
         # Sin las compras recientes, un reinicio entre la compra de una wallet
         # y la de otra perdía la confluencia (y con min_wallets > 1, el aviso).
-        # Lo mismo con la actividad de cada wallet y los tokens ya avisados.
+        # Lo mismo con la actividad de cada wallet, los tokens ya avisados y
+        # el cooldown de cada wallet en cada token: con uno de 24 h, cada
+        # reinicio volvía a avisar de las recompras de una wallet que
+        # promedia en el mismo token.
         confluence_since = now - self._config.wallets_confluence_minutes * 60
         token_since = now - self._config.wallets_token_cooldown_minutes * 60
         activity_since = now - WALLET_ACTIVITY_SECONDS
-        for row in self._tracker.recent_wallet_buys(min(confluence_since, token_since, activity_since)):
+        wallet_since = now - self._config.wallets_cooldown_minutes * 60
+        since = min(confluence_since, token_since, activity_since, wallet_since)
+        for row in self._tracker.recent_wallet_buys(since):
             if row["timestamp"] > confluence_since:
                 buy = WalletBuy(
                     wallet=row["wallet"], label=row["wallet_etiqueta"] or row["wallet"],
@@ -95,6 +100,10 @@ class MemecoinRadar:
                 self._wallet_buys.setdefault(buy.mint, []).append(buy)
             if row["timestamp"] > activity_since:
                 self._wallet_activity.setdefault(row["wallet"], {})[row["token"]] = row["timestamp"]
+            # Solo se registran las compras fuera del cooldown, así que la
+            # última de cada (wallet, token) es la que lo abrió.
+            if row["timestamp"] > wallet_since:
+                self._wallet_alerted[(row["wallet"], row["token"])] = row["timestamp"]
             if row["enviada"] and row["timestamp"] > token_since:
                 wallets = 1 + (row["wallets_confluencia"] or 0)
                 self._wallet_token_alerted[row["token"]] = (row["timestamp"], wallets)
@@ -290,9 +299,11 @@ class MemecoinRadar:
         mide la edad del par (ahora si no se da). Con `curve` (token en
         bonding curve) no se miran el dex, la edad, el market cap ni el
         turnover: un token sin graduar los incumple siempre. Con `trusted`
-        (wallet de confianza) no se miran el cambio en 1h, el market cap ni
-        el turnover: en pares de más de un día, sus compras que esos filtros
-        descartaban eran las mejores del registro (+18% de mediana a 1 h)."""
+        (wallet de confianza) no se miran el cambio en 1h, el market cap, el
+        turnover ni min_txns_m5: en pares de más de un día, sus compras que
+        esos filtros descartaban eran las mejores del registro (+18% de
+        mediana a 1 h), y en octubre las de 4y2T…dvE1 que min_txns_m5 tiraba
+        (0-2 txns en 5 min) acabaron todas en positivo a 24 h."""
         cfg = self._config
         if curve:
             if cfg.quote_tokens and not _matches_quote(pair, cfg.quote_tokens):
@@ -316,7 +327,7 @@ class MemecoinRadar:
             return f"market cap ${market_cap_usd:,.0f} < ${cfg.wallets_min_market_cap_usd:,.0f}"
         # Sin txns o volume no se puede evaluar la actividad: no se descarta por ella.
         txns_m5 = (pair.get("txns") or {}).get("m5")
-        if cfg.wallets_min_txns_m5 and isinstance(txns_m5, dict):
+        if cfg.wallets_min_txns_m5 and isinstance(txns_m5, dict) and not trusted:
             count = int(to_float(txns_m5.get("buys")) + to_float(txns_m5.get("sells")))
             if count < cfg.wallets_min_txns_m5:
                 return f"{count} txns en 5 min < {cfg.wallets_min_txns_m5}"

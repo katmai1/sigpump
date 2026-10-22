@@ -35,8 +35,8 @@ rpc_url = "https://api.mainnet-beta.solana.com"
 #   5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1  # ballena 1
 # Un * detrás de la dirección la marca de confianza: avisa sola aunque no
 # llegue a min_wallets, y a sus compras no se les aplican
-# max_price_change_h1_pct, min_market_cap_usd ni max_turnover_h1 (sí la edad,
-# el dex y quote_tokens).
+# max_price_change_h1_pct, min_market_cap_usd, max_turnover_h1 ni min_txns_m5
+# (sí la edad, el dex y quote_tokens).
 #   5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1 *  # ballena 1
 # Se relee solo cuando cambia: no hace falta reiniciar para añadir wallets.
 file = "wallets.txt"
@@ -44,9 +44,11 @@ interval_seconds = 15
 # SOL mínimo gastado para contar una transacción como compra (descarta
 # airdrops de spam y transferencias). Pagar con USDC/USDT cuenta siempre.
 min_sol = 0.1
-# Minutos sin repetir aviso de la misma wallet en el mismo token (las que
-# compran en varias tx seguidas).
-cooldown_minutes = 60
+# Minutos sin repetir aviso de la misma wallet en el mismo token: las que
+# compran en varias tx seguidas y las que van promediando un token cada pocas
+# horas. 2026-10-22: con 24 h se quitaban 83 de 146 avisos, que daban -21% de
+# mediana a 24 h (los que quedaban, -3%). Se recupera del registro al reiniciar.
+cooldown_minutes = 1440
 # Si otra wallet seguida entró en el mismo token en estos minutos, el aviso lo dice.
 confluence_minutes = 60
 # Wallets seguidas distintas que tienen que haber comprado el token dentro de

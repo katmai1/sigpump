@@ -897,6 +897,17 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         await reiniciado._wallets_once(client, alerter)
         self.assertEqual(alerter.wallet, [])
 
+    async def test_el_cooldown_de_la_wallet_sobrevive_a_un_reinicio(self):
+        radar = self._radar([_buy()], wallets_cooldown_minutes=1440)
+        client = _FakeClient(pairs=[_pair("TOK")])
+        await radar._wallets_once(client, _FakeAlerter())
+        reiniciado = self._radar([_buy(), _buy(wallet=OTRA)], wallets_cooldown_minutes=1440)
+        reiniciado._restore_cooldowns()
+        alerter = _FakeAlerter()
+        await reiniciado._wallets_once(client, alerter)
+        # La recompra de la misma wallet no avisa; la de otra wallet sí.
+        self.assertEqual([s.buy.wallet for _, s in alerter.wallet], [OTRA])
+
     async def test_wallet_hiperactiva_no_avisa_ni_cuenta_para_la_confluencia(self):
         compras = [_buy(mint=f"T{i}") for i in range(3)] + [_buy(mint="TOK")]
         radar = self._radar(compras, [_buy(wallet=OTRA)], wallets_max_tokens_per_hour=3)
@@ -1005,6 +1016,7 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
             (_pair("TOK", created_at=_hace_horas(5), change=80), ""),
             ({**_pair("TOK", created_at=_hace_horas(5)), "marketCap": 50_000}, ""),
             (_pair("TOK", created_at=_hace_horas(5), volume=50_000), ""),
+            ({**_pair("TOK", created_at=_hace_horas(5)), "txns": {"m5": {"buys": 1, "sells": 0}}}, ""),
             (_pair("TOK", created_at=_hace_horas(0.5)), "par creado hace 30 min"),
             ({**_pair("TOK", created_at=_hace_horas(5)), "quoteToken": {"symbol": "PUMP"}},
              "par contra PUMP, no contra SOL"),
@@ -1014,7 +1026,7 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
                 radar = self._radar(
                     [_buy(trusted=True)], wallets_min_pair_age_minutes=120,
                     wallets_max_price_change_h1_pct=50, wallets_min_market_cap_usd=100_000,
-                    wallets_max_turnover_h1=0.03, quote_tokens=["SOL"],
+                    wallets_max_turnover_h1=0.03, wallets_min_txns_m5=5, quote_tokens=["SOL"],
                 )
                 alerter = _FakeAlerter()
                 pair = {"quoteToken": {"symbol": "SOL"}, **pair}

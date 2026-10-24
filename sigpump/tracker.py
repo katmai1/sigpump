@@ -15,7 +15,9 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from sigpump.util import buy_ratio_m5, normalize_address, to_float, txns_m5, volume_acceleration
+from sigpump.util import (
+    buy_ratio_m5, liquidity_usd, market_cap_usd, normalize_address, to_float, txns_m5, volume_acceleration,
+)
 
 log = logging.getLogger()
 
@@ -197,10 +199,13 @@ class AlertTracker:
         pair: dict,
         sent: bool,
         reason: str = "",
+        extra: dict[str, object] | None = None,
     ) -> int | None:
         """Agrega una fila con los datos de `pair` en el momento del aviso
-        (o del descarte, con sent=False y su motivo). Devuelve el id de la
-        fila, o None si no se pudo registrar."""
+        (o del descarte, con sent=False y su motivo), más las columnas de
+        `extra` (la compra de la wallet). Devuelve el id de la fila, o None si
+        no se pudo registrar."""
+        self._check_columns(extra or {})
         conn = self._db()
         if conn is None:
             return None
@@ -226,12 +231,13 @@ class AlertTracker:
             "moneda_par": str((pair.get("quoteToken") or {}).get("symbol") or ""),
             "edad_par_min": _round((now - created / 1000) / 60) if (created := to_float(pair.get("pairCreatedAt"))) > 0 else None,
             "volumen_h1_usd": _round(to_float(volume.get("h1"))),
-            "liquidez_usd": _round(to_float((pair.get("liquidity") or {}).get("usd"))),
-            "market_cap_usd": _round(to_float(pair.get("marketCap")) or to_float(pair.get("fdv"))),
+            "liquidez_usd": _round(liquidity_usd(pair)),
+            "market_cap_usd": _round(market_cap_usd(pair)),
             "aceleracion_volumen": _round(volume_acceleration(pair)),
             "compras_m5_pct": _round(buy_ratio * 100) if buy_ratio is not None else None,
             "url": str(pair.get("url") or ""),
             "timestamp": now,
+            **(extra or {}),
         }
         try:
             cursor = conn.execute(
@@ -247,9 +253,7 @@ class AlertTracker:
 
     def update_row(self, row_id: int, values: dict[str, object]) -> None:
         """Actualiza columnas de una fila ya registrada."""
-        unknown = set(values) - set(COLUMNS)
-        if unknown:
-            raise ValueError(f"Columnas desconocidas en el registro: {sorted(unknown)}")
+        self._check_columns(values)
         conn = self._db()
         if conn is None or not values:
             return
@@ -261,6 +265,12 @@ class AlertTracker:
             conn.commit()
         except sqlite3.Error as exc:
             log.warning("No se pudo actualizar %s: %s", self._path, exc)
+
+    @staticmethod
+    def _check_columns(values: dict[str, object]) -> None:
+        unknown = set(values) - set(COLUMNS)
+        if unknown:
+            raise ValueError(f"Columnas desconocidas en el registro: {sorted(unknown)}")
 
     def recent_wallet_buys(self, since: float) -> list[dict]:
         """Compras de wallets seguidas (avisadas o no) posteriores a `since`,
@@ -394,7 +404,7 @@ class AlertTracker:
         token_prices: dict[str, tuple[float, float]] = {}
         for pair in pairs:
             token = str(normalize_address((pair.get("baseToken") or {}).get("address") or ""))
-            liquidity = to_float((pair.get("liquidity") or {}).get("usd"))
+            liquidity = liquidity_usd(pair)
             price = to_float(pair.get("priceUsd"))
             if price and (token not in token_prices or liquidity > token_prices[token][0]):
                 token_prices[token] = (liquidity, price)

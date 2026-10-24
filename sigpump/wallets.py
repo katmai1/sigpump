@@ -410,8 +410,20 @@ class WalletWatcher:
         self._last_signature.pop(address, None)
         self._activity.pop(address, None)
         self._last_active.pop(address, None)
+        self._pending.pop(address, None)
         # Fuerza la relectura, que la quita también del fichero de wallets.
         self._loaded = None
+
+    def ban(self, address: str, label: str, reason: str, seconds: float | None = None) -> bool:
+        """blacklist() con su aviso en el log, con el motivo "etiqueta: motivo".
+        True si la metió; si no se pudo escribir la lista, lo avisa y False."""
+        try:
+            self.blacklist(address, f"{label}: {reason}", seconds)
+        except OSError as exc:
+            log.warning("No se pudo añadir %s a la lista negra: %s", label, exc)
+            return False
+        log.warning("Wallet %s a la lista negra: %s", label, reason)
+        return True
 
     def _blacklist_bot(self, wallet: str, signatures: list[tuple[str, float]]) -> bool:
         """Apunta las transacciones (firma, hora) de `wallet` y, si en la
@@ -428,16 +440,7 @@ class WalletWatcher:
             del recent[signature]
         if len(recent) <= self._max_txs_per_hour:
             return False
-        label = self._wallets[wallet].label
-        reason = f"bot, {len(recent)} tx en 1h"
-        try:
-            self.blacklist(wallet, f"{label}: {reason}")
-        except OSError as exc:
-            log.warning("No se pudo añadir %s a la lista negra: %s", label, exc)
-            return False
-        self._pending.pop(wallet, None)
-        log.warning("Wallet %s a la lista negra: %s", label, reason)
-        return True
+        return self.ban(wallet, self._wallets[wallet].label, f"bot, {len(recent)} tx en 1h")
 
     def _blacklist_abandoned(self, wallet: str) -> bool:
         """Mete `wallet` en la lista negra si lleva más de max_inactive_seconds
@@ -452,16 +455,9 @@ class WalletWatcher:
             return False
         label = self._wallets[wallet].label
         reason = f"{ABANDONED_REASON}, {idle / 86400:.0f} días sin actividad"
-        try:
-            self.blacklist(wallet, f"{label}: {reason}", seconds=self._max_inactive_seconds)
-        except OSError as exc:
-            log.warning("No se pudo añadir %s a la lista negra: %s", label, exc)
+        if not self.ban(wallet, label, reason, seconds=self._max_inactive_seconds):
             return False
-        self._pending.pop(wallet, None)
-        log.warning(
-            "Wallet %s a la lista negra: %s; se vuelve a comprobar en %.0f días",
-            label, reason, self._max_inactive_seconds / 86400,
-        )
+        log.info("%s se vuelve a comprobar en %.0f días", label, self._max_inactive_seconds / 86400)
         return True
 
     def reload(self) -> None:

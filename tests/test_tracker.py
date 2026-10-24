@@ -289,6 +289,15 @@ class TestAlertTracker(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             tracker.update_row(row_id, {"no_existe": 1})
 
+    def test_record_guarda_las_columnas_extra_en_la_misma_fila(self):
+        tracker = self._tracker()
+        tracker.record(_pair(), sent=True, extra={"wallet": "W", "bonding_curve": 1})
+        [row] = self._rows()
+        self.assertEqual((row["wallet"], row["bonding_curve"]), ("W", 1))
+        with self.assertRaises(ValueError):
+            tracker.record(_pair(), sent=True, extra={"no_existe": 1})
+        self.assertEqual(len(self._rows()), 1)
+
     async def test_continua_las_pendientes_tras_reiniciar(self):
         anterior = self._tracker()
         anterior.record(_pair(), sent=True)

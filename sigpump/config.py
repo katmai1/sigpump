@@ -163,8 +163,8 @@ class Config:
     # lista negra sola. 0 = no hacerlo.
     wallets_rug_drop_pct: float = 90.0
     # Una wallet con al menos loser_min_signals tokens registrados cuya
-    # mediana a 30 min es loser_max_median_ret_pct o peor entra en la lista
-    # negra sola. 0 = no hacerlo.
+    # mediana a loser_checkpoint_minutes es loser_max_median_ret_pct o peor
+    # entra en la lista negra sola. 0 = no hacerlo.
     wallets_loser_min_signals: int = 0
     wallets_loser_max_median_ret_pct: float = -30.0
     # Checkpoint del registro (minutos, uno de tracker.CHECKPOINTS_MINUTES)
@@ -190,8 +190,9 @@ class Config:
     wallets_max_turnover_h1: float = 0.0
     # Avisar también de las compras de tokens que siguen en la bonding curve
     # de un launchpad (pump.fun...). A esas solo se les aplican quote_tokens,
-    # max_price_change_h1_pct, min_txns_m5 y min_volume_h1_usd: el dex, la
-    # edad, el market cap y el turnover las descartarían siempre.
+    # max_price_change_h1_pct, max_price_change_m5_pct, min_txns_m5 y
+    # min_volume_h1_usd: el dex, la edad, el market cap y el turnover las
+    # descartarían siempre.
     wallets_bonding_curve: bool = False
     # Avisos de actividad por el WebSocket del RPC: solo se consultan las
     # wallets que hicieron algo. ws_url vacío = el de rpc_url con wss://.

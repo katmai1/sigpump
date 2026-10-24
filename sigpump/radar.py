@@ -22,7 +22,7 @@ from sigpump.screener import DexScreenerClient
 from sigpump.solana import MAX_REQUESTS_PER_SECOND, RateLimiter, TokenAuthorities
 from sigpump.telegram import TelegramAlerter
 from sigpump.tracker import AlertTracker, format_minutes
-from sigpump.util import normalize_address, to_float
+from sigpump.util import liquidity_usd, market_cap_usd, normalize_address, to_float, txns_m5
 from sigpump.wallets import WalletBuy, WalletSignal, WalletWatcher, import_blacklist_file, ws_url
 
 log = logging.getLogger()
@@ -36,11 +36,6 @@ WALLET_ACTIVITY_SECONDS = 3600
 # token, wallet hiperactiva): esas compras sí pasaron sus filtros. Solo se
 # usa para las filas registradas antes de que existiera pasa_filtros_par.
 _NOT_PAIR_REASON_RE = re.compile(r"\d+ de \d+ wallets$|token ya avisado|wallet hiperactiva")
-
-
-def _liquidity_usd(pair: dict) -> float:
-    """Liquidez en USD del par, 0.0 si la API no la informa."""
-    return to_float((pair.get("liquidity") or {}).get("usd"))
 
 
 def _mint(pair: dict) -> str:
@@ -189,7 +184,7 @@ class MemecoinRadar:
         se queda el de más liquidez, que luego se descarta por eso.
         """
         def rank(pair: dict) -> tuple[bool, float]:
-            return self._venue_reason(pair) is None, _liquidity_usd(pair)
+            return self._venue_reason(pair) is None, liquidity_usd(pair)
 
         wanted = set(addresses)
         best: dict[str, dict] = {}
@@ -210,9 +205,15 @@ class MemecoinRadar:
             dex_id = str(pair.get("dexId") or "")
             if dex_id.lower() not in {d.lower() for d in cfg.dex_ids}:
                 return f"par en {dex_id or '?'}, no en {' o '.join(cfg.dex_ids)}"
-        if cfg.quote_tokens and not _matches_quote(pair, cfg.quote_tokens):
+        return self._quote_reason(pair)
+
+    def _quote_reason(self, pair: dict) -> str | None:
+        """Motivo para descartar un par por la moneda contra la que cotiza
+        ([dexscreener].quote_tokens), o None si pasa."""
+        quote_tokens = self._config.quote_tokens
+        if quote_tokens and not _matches_quote(pair, quote_tokens):
             quote = (pair.get("quoteToken") or {}).get("symbol") or "?"
-            return f"par contra {quote}, no contra {' o '.join(cfg.quote_tokens)}"
+            return f"par contra {quote}, no contra {' o '.join(quote_tokens)}"
         return None
 
     async def _unsafe_reasons(self, pairs: list[dict]) -> dict[str, str]:
@@ -259,14 +260,8 @@ class MemecoinRadar:
             return
         for wallet, reason in self._tracker.rug_wallets(drop).items():
             info = watcher.wallets.get(wallet)
-            if info is None:
-                continue
-            try:
-                watcher.blacklist(wallet, f"{info.label}: {reason}")
-            except OSError as exc:
-                log.warning("No se pudo añadir %s a la lista negra: %s", info.label, exc)
-                continue
-            log.warning("Wallet %s a la lista negra: %s", info.label, reason)
+            if info is not None:
+                watcher.ban(wallet, info.label, reason)
 
     def _blacklist_losers(self) -> None:
         """Mete en la lista negra las wallets seguidas cuyas compras, con al
@@ -285,13 +280,9 @@ class MemecoinRadar:
             median = statistics.median(returns)
             if median > cfg.wallets_loser_max_median_ret_pct:
                 continue
-            reason = f"mediana {median:+.0f}% a {format_minutes(minutes)} en {len(returns)} tokens"
-            try:
-                watcher.blacklist(wallet, f"{info.label}: {reason}")
-            except OSError as exc:
-                log.warning("No se pudo añadir %s a la lista negra: %s", info.label, exc)
-                continue
-            log.warning("Wallet %s a la lista negra: %s", info.label, reason)
+            watcher.ban(
+                wallet, info.label, f"mediana {median:+.0f}% a {format_minutes(minutes)} en {len(returns)} tokens"
+            )
 
     def _wallet_pair_rejection(
         self, pair: dict, now: float | None = None, curve: bool = False, trusted: bool = False
@@ -309,16 +300,12 @@ class MemecoinRadar:
         mediana a 1 h), y en octubre las de 4y2T…dvE1 que min_txns_m5 tiraba
         (0-2 txns en 5 min) acabaron todas en positivo a 24 h.
         max_price_change_m5_pct se mira siempre: comprar lo que acaba de
-        subir mucho es llegar tarde, sea quien sea quien compra."""
+        subir mucho es llegar tarde, sea quien sea quien compra. Igual
+        min_volume_h1_usd: un token sin volumen no se mueve."""
         cfg = self._config
-        if curve:
-            if cfg.quote_tokens and not _matches_quote(pair, cfg.quote_tokens):
-                quote = (pair.get("quoteToken") or {}).get("symbol") or "?"
-                return f"par contra {quote}, no contra {' o '.join(cfg.quote_tokens)}"
-        else:
-            venue_reason = self._venue_reason(pair)
-            if venue_reason:
-                return venue_reason
+        venue_reason = self._quote_reason(pair) if curve else self._venue_reason(pair)
+        if venue_reason:
+            return venue_reason
         created_at = to_float(pair.get("pairCreatedAt"))
         # Sin pairCreatedAt no se puede evaluar la edad: no se descarta por ella.
         if cfg.wallets_min_pair_age_minutes and created_at > 0 and not curve:
@@ -331,21 +318,21 @@ class MemecoinRadar:
         change_m5 = to_float((pair.get("priceChange") or {}).get("m5"))
         if cfg.wallets_max_price_change_m5_pct and change_m5 > cfg.wallets_max_price_change_m5_pct:
             return f"cambio 5m {change_m5:+,.0f}% > {cfg.wallets_max_price_change_m5_pct:,.0f}%"
-        market_cap_usd = to_float(pair.get("marketCap")) or to_float(pair.get("fdv"))
-        if market_cap_usd < cfg.wallets_min_market_cap_usd and not curve and not trusted:
-            return f"market cap ${market_cap_usd:,.0f} < ${cfg.wallets_min_market_cap_usd:,.0f}"
+        market_cap = market_cap_usd(pair)
+        if market_cap < cfg.wallets_min_market_cap_usd and not curve and not trusted:
+            return f"market cap ${market_cap:,.0f} < ${cfg.wallets_min_market_cap_usd:,.0f}"
         # Sin txns o volume no se puede evaluar la actividad: no se descarta por ella.
-        txns_m5 = (pair.get("txns") or {}).get("m5")
-        if cfg.wallets_min_txns_m5 and isinstance(txns_m5, dict) and not trusted:
-            count = int(to_float(txns_m5.get("buys")) + to_float(txns_m5.get("sells")))
+        has_txns = isinstance((pair.get("txns") or {}).get("m5"), dict)
+        if cfg.wallets_min_txns_m5 and has_txns and not trusted:
+            count = int(txns_m5(pair))
             if count < cfg.wallets_min_txns_m5:
                 return f"{count} txns en 5 min < {cfg.wallets_min_txns_m5}"
         volume_h1 = (pair.get("volume") or {}).get("h1")
         if cfg.wallets_min_volume_h1_usd and volume_h1 is not None:
             if to_float(volume_h1) < cfg.wallets_min_volume_h1_usd:
                 return f"volumen 1h ${to_float(volume_h1):,.0f} < ${cfg.wallets_min_volume_h1_usd:,.0f}"
-        if cfg.wallets_max_turnover_h1 and volume_h1 is not None and market_cap_usd > 0 and not curve and not trusted:
-            turnover = to_float(volume_h1) / market_cap_usd
+        if cfg.wallets_max_turnover_h1 and volume_h1 is not None and market_cap > 0 and not curve and not trusted:
+            turnover = to_float(volume_h1) / market_cap
             if turnover > cfg.wallets_max_turnover_h1:
                 return f"volumen 1h {turnover:.0%} del market cap > {cfg.wallets_max_turnover_h1:.0%}"
         return None
@@ -358,13 +345,7 @@ class MemecoinRadar:
             return
         if buy.wallet not in watcher.wallets:
             return
-        reason = f"hiperactiva, {self._tokens_last_hour(buy.wallet)} tokens en 1h"
-        try:
-            watcher.blacklist(buy.wallet, f"{buy.label}: {reason}")
-        except OSError as exc:
-            log.warning("No se pudo añadir %s a la lista negra: %s", buy.label, exc)
-            return
-        log.warning("Wallet %s a la lista negra: %s", buy.label, reason)
+        watcher.ban(buy.wallet, buy.label, f"hiperactiva, {self._tokens_last_hour(buy.wallet)} tokens en 1h")
 
     def _confluence(self, buy: WalletBuy) -> tuple[str, ...]:
         """Anota la compra y devuelve las etiquetas de las otras wallets
@@ -494,11 +475,9 @@ class MemecoinRadar:
     ) -> None:
         if not self._tracker:
             return
-        row_id = self._tracker.record(pair, sent=sent, reason=reason)
-        if row_id is None:
-            return
         buy = signal.buy
-        self._tracker.update_row(row_id, {
+        # En el mismo INSERT: con un UPDATE aparte eran dos escrituras por compra.
+        self._tracker.record(pair, sent=sent, reason=reason, extra={
             "wallet": buy.wallet,
             "wallet_etiqueta": buy.label,
             "sol_gastado": buy.sol_spent,
@@ -556,26 +535,20 @@ class MemecoinRadar:
                 self._config.wallets_max_inactive_days * 86400,
                 limiter,
             )
-            loops = [
-                self._loop(
-                    self._wallets_once, client, alerter,
-                    self._config.wallets_interval_seconds, "Error siguiendo las wallets",
-                )
-            ]
+            loops = [self._wallets_loop(client, alerter)]
             if self._config.wallets_websocket:
                 loops.append(self._wallet_watcher.listen(
                     self._config.wallets_ws_url or ws_url(self._config.solana_rpc_url)
                 ))
             await asyncio.gather(*loops)
 
-    @staticmethod
-    async def _loop(step, client, alerter, interval: float, error_message: str) -> None:
-        """Repite `step(client, alerter)` cada `interval` segundos. Errores
+    async def _wallets_loop(self, client: DexScreenerClient, alerter: TelegramAlerter) -> None:
+        """Una vuelta de _wallets_once cada [wallets].interval_seconds. Errores
         inesperados (red, parsing, etc.) no deben matar el proceso: se loguean
         y se reintenta en la próxima vuelta."""
         while True:
             try:
-                await step(client, alerter)
+                await self._wallets_once(client, alerter)
             except Exception:
-                log.exception(error_message)
-            await asyncio.sleep(interval)
+                log.exception("Error siguiendo las wallets")
+            await asyncio.sleep(self._config.wallets_interval_seconds)

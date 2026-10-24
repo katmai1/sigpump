@@ -36,7 +36,7 @@ rpc_url = "https://api.mainnet-beta.solana.com"
 # Un * detrás de la dirección la marca de confianza: avisa sola aunque no
 # llegue a min_wallets, y a sus compras no se les aplican
 # max_price_change_h1_pct, min_market_cap_usd, max_turnover_h1 ni min_txns_m5
-# (sí la edad, max_price_change_m5_pct, el dex y quote_tokens).
+# (sí la edad, max_price_change_m5_pct, min_volume_h1_usd, el dex y quote_tokens).
 #   5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1 *  # ballena 1
 # Se relee solo cuando cambia: no hace falta reiniciar para añadir wallets.
 file = "wallets.txt"

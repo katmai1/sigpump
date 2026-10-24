@@ -30,6 +30,17 @@ def normalize_address(address: object) -> object:
     return address
 
 
+def liquidity_usd(pair: dict) -> float:
+    """Liquidez en USD del par, 0.0 si la API no la informa."""
+    return to_float((pair.get("liquidity") or {}).get("usd"))
+
+
+def market_cap_usd(pair: dict) -> float:
+    """Market cap en USD del par. marketCap suele venir ausente en tokens
+    nuevos; fdv es el fallback de DexScreener."""
+    return to_float(pair.get("marketCap")) or to_float(pair.get("fdv"))
+
+
 # Por debajo de esto las compras/ventas de 5 min son ruido: 3 compras y
 # 1 venta dan 75% sin decir nada del mercado.
 MIN_TXNS_M5 = 5

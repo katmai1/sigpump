@@ -68,7 +68,7 @@ reiniciar, así que un reinicio entre las dos no pierde el aviso. Una wallet
 marcada de confianza (un `*` detrás de la dirección en el fichero) avisa sola,
 aunque no llegue a `min_wallets`, y a sus compras no se les aplican
 `max_price_change_h1_pct`, `min_market_cap_usd`, `max_turnover_h1` ni
-`min_txns_m5` (sí la edad del par, `max_price_change_m5_pct`, el dex y `quote_tokens`): en pares de más
+`min_txns_m5` (sí la edad del par, `max_price_change_m5_pct`, `min_volume_h1_usd`, el dex y `quote_tokens`): en pares de más
 de un día, las suyas que esos filtros descartaban eran las mejores del
 registro. Sirven para salir rápido: esas mismas daban +6% a 1 h y +11% a 4 h,
 pero -42% a 24 h.
@@ -274,9 +274,12 @@ sigpump/
   radar.py                  Orquesta el ciclo compra -> filtros -> aviso -> registro
   wallets.py                 Detección de las compras de las wallets (RPC y WebSocket)
   screener.py                 Cliente HTTP async de DexScreener
-  solana.py                   Comprobación de mint/freeze authority
+  solana.py                   Comprobación de mint/freeze authority y llamadas al RPC
   telegram.py                 Formateo y envío de los avisos por Telegram
   tracker.py                  Registro SQLite de las compras y su resultado
+  blacklist.py                Lista negra de wallets (tabla lista_negra)
+  buyers.py                   Herramienta aparte: quién compró un token
   util.py                     Conversión defensiva y métricas de los campos de la API
+buyers.py                 CLI de sigpump/buyers.py (gasta créditos del RPC)
 tests/                    Tests (stdlib unittest, sin red)
 ```

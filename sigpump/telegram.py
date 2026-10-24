@@ -15,7 +15,7 @@ from telegram.constants import ParseMode  # type: ignore[import-not-found]
 from telegram.error import RetryAfter  # type: ignore[import-not-found]
 from telegram.warnings import PTBDeprecationWarning  # type: ignore[import-not-found]
 
-from sigpump.util import buy_ratio_m5, to_float, volume_acceleration
+from sigpump.util import buy_ratio_m5, liquidity_usd, market_cap_usd, to_float, volume_acceleration
 from sigpump.wallets import WalletSignal
 
 # Espera máxima aceptable ante flood control. Más que esto bloquearía el
@@ -48,8 +48,8 @@ class TelegramAlerter:
     async def __aexit__(self, *exc_info: object) -> None:
         await self._bot.shutdown()
 
-    def format_message(self, pair: dict, wallet: WalletSignal) -> str:
-        """Arma el HTML del aviso de la compra `wallet` en el token de `pair`.
+    def format_message(self, pair: dict, signal: WalletSignal) -> str:
+        """Arma el HTML del aviso de la compra `signal` en el token de `pair`.
 
         Todo lo que viene de la API pasa por html.escape() o por to_float():
         symbol/name/url los controla quien crea el token, y los campos
@@ -59,7 +59,6 @@ class TelegramAlerter:
         name = html.escape(str(base.get("name", "?")))
         address = html.escape(str(base.get("address", "?")))
         price_usd = html.escape(str(pair.get("priceUsd", "?")))
-        liquidity_usd = to_float((pair.get("liquidity") or {}).get("usd"))
         volume_h1 = to_float((pair.get("volume") or {}).get("h1"))
         change_m5 = to_float((pair.get("priceChange") or {}).get("m5"))
         change_h1 = to_float((pair.get("priceChange") or {}).get("h1"))
@@ -68,8 +67,6 @@ class TelegramAlerter:
         buy_ratio = buy_ratio_m5(pair)
         if buy_ratio is not None:
             momentum += f"Compras 5m: {buy_ratio * 100:.0f}%\n"
-        # marketCap suele venir ausente en tokens nuevos; fdv es el fallback de DexScreener.
-        market_cap_usd = to_float(pair.get("marketCap")) or to_float(pair.get("fdv"))
         pool = html.escape(str(pair.get("dexId", "?")))
         quote = html.escape(str((pair.get("quoteToken") or {}).get("symbol") or "?"))
         # quote=True porque va dentro de un atributo href="...": una comilla
@@ -89,14 +86,14 @@ class TelegramAlerter:
             links += f" | <a href=\"{photon_url}\">Ver en Photon</a>"
 
         # Aviso de wallet: lo primero es quién entró y cuánto metió.
-        buy = wallet.buy
+        buy = signal.buy
         spent = []
         if buy.sol_spent > 0:
             spent.append(f"{buy.sol_spent:,.2f} SOL")
         if buy.stable_spent > 0:
             spent.append(f"${buy.stable_spent:,.0f}")
         tx_url = html.escape(f"https://solscan.io/tx/{buy.signature}", quote=True)
-        header = "🔁 <b>ACTUALIZACIÓN</b>: entran más wallets\n" if wallet.update else ""
+        header = "🔁 <b>ACTUALIZACIÓN</b>: entran más wallets\n" if signal.update else ""
         star = "⭐ " if buy.trusted else ""
         header += (
             f"👛 <b>{star}{html.escape(buy.label)} compró {name} ({symbol})</b>\n"
@@ -105,11 +102,11 @@ class TelegramAlerter:
         )
         if buy.trusted:
             header += "⭐ <b>Wallet de las buenas</b>\n"
-        if wallet.bonding_curve:
+        if signal.bonding_curve:
             header += f"🧪 <b>En bonding curve</b> ({pool}): sin graduar, más riesgo\n"
-        if wallet.others:
+        if signal.others:
             header += (
-                f"👛 También entraron: <b>{html.escape(', '.join(wallet.others))}</b>\n"
+                f"👛 También entraron: <b>{html.escape(', '.join(signal.others))}</b>\n"
             )
         return (
             f"{header}"
@@ -119,17 +116,17 @@ class TelegramAlerter:
             f"Cambio 1h: {change_h1:+.1f}%\n"
             f"Volumen 1h: ${volume_h1:,.0f}\n"
             f"{momentum}"
-            f"Liquidez: ${liquidity_usd:,.0f}\n"
-            f"Cap. mercado: ${market_cap_usd:,.0f}\n\n"
+            f"Liquidez: ${liquidity_usd(pair):,.0f}\n"
+            f"Cap. mercado: ${market_cap_usd(pair):,.0f}\n\n"
             f"<code>{address}</code>\n\n"
             f"{links}"
         )
 
-    async def send(self, pair: dict, wallet: WalletSignal) -> None:
-        """Arma y envía el aviso de la compra `wallet` en el token de `pair`."""
+    async def send(self, pair: dict, signal: WalletSignal) -> None:
+        """Arma y envía el aviso de la compra `signal` en el token de `pair`."""
         kwargs = dict(
             chat_id=self._chat_id,
-            text=self.format_message(pair, wallet),
+            text=self.format_message(pair, signal),
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
             message_thread_id=self._message_thread_id,

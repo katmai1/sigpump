@@ -14,7 +14,7 @@ import logging
 log = logging.getLogger()
 
 API_BASE = "https://api.dexscreener.com"
-MAX_ADDRESSES_PER_CALL = 30  # límite de la API para /latest/dex/tokens/{addrs}
+MAX_ADDRESSES_PER_CALL = 30  # límite de la API para /tokens/v1/{chainId}/{addrs}
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 2.0
 REQUEST_TIMEOUT_SECONDS = 15
@@ -24,7 +24,7 @@ RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 
 class DexScreenerClient:
-    """Thin async client for the public DexScreener REST API."""
+    """Cliente async mínimo de la API REST pública de DexScreener."""
 
     def __init__(self, session: aiohttp.ClientSession):
         self._session = session
@@ -60,7 +60,6 @@ class DexScreenerClient:
             # queda para cuando se agotan los reintentos.
             log.debug("DexScreener %s en %s, reintentando en %.1fs", reason, path, wait)
             await asyncio.sleep(wait)
-        return None
 
     async def get_pairs_for_tokens(self, chain_id: str, addresses: list[str]) -> list[dict]:
         """Datos de mercado (pares) de las direcciones pedidas, en lotes de 30."""
@@ -82,7 +81,7 @@ class DexScreenerClient:
                 continue
             if not data:
                 continue
-            # Endpoint returns either {"pairs": [...]} or a bare list depending on version
+            # Según la versión del endpoint llega {"pairs": [...]} o la lista sola.
             batch_pairs = data.get("pairs") if isinstance(data, dict) else data
             for pair in batch_pairs or []:
                 # Filtro extra por las dudas: la API a veces devuelve pares

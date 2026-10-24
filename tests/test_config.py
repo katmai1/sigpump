@@ -3,6 +3,7 @@
 import logging
 import tempfile
 import unittest
+from dataclasses import fields
 from pathlib import Path
 
 from sigpump.config import Config
@@ -179,6 +180,18 @@ class TestFromToml(unittest.TestCase):
     def test_chat_id_numerico_se_acepta_como_str(self):
         config = Config.from_toml(self._write("[telegram]\nchat_id = -100123\n"))
         self.assertEqual(config.telegram_chat_id, "-100123")
+
+    def test_cada_campo_tiene_su_clave_del_toml(self):
+        # Las claves válidas, los tipos y la lectura salen de esta metadata:
+        # un campo sin ella no se podría poner desde el TOML.
+        secciones = {"dexscreener", "radar", "solana", "wallets", "telegram"}
+        claves = set()
+        for f in fields(Config):
+            seccion, _, clave = f.metadata.get("toml", "").partition(".")
+            self.assertIn(seccion, secciones, f.name)
+            self.assertTrue(clave, f.name)
+            claves.add((seccion, clave))
+        self.assertEqual(len(claves), len(fields(Config)))
 
     def test_ejemplo_del_repo_es_valido_y_sin_claves_desconocidas(self):
         # config.example.toml es lo que copia el usuario: tiene que parsear limpio.

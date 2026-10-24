@@ -7,94 +7,42 @@ valida al arrancar.
 
 import logging
 import tomllib
-from dataclasses import dataclass, field
+import types
+import typing
+from dataclasses import Field, dataclass, field, fields
 from pathlib import Path
+from typing import Any, Callable
 
 from sigpump.solana import MAINNET_RPC_URL
 from sigpump.tracker import CHECKPOINTS_MINUTES
 
 log = logging.getLogger()
 
-# Claves válidas por sección del TOML.
-_KNOWN_KEYS: dict[str, set[str]] = {
-    "dexscreener": {"chain_id", "quote_tokens", "dex_ids"},
-    "radar": {"alert_log_path", "verbose"},
-    "solana": {"check_token_authorities", "rpc_url"},
-    "wallets": {
-        "file",
-        "interval_seconds",
-        "min_sol",
-        "cooldown_minutes",
-        "confluence_minutes",
-        "min_wallets",
-        "token_cooldown_minutes",
-        "realert_new_wallets",
-        "max_tokens_per_hour",
-        "max_txs_per_hour",
-        "max_inactive_days",
-        "blacklist",
-        "blacklist_file",
-        "rug_drop_pct",
-        "loser_min_signals",
-        "loser_max_median_ret_pct",
-        "loser_checkpoint_minutes",
-        "min_pair_age_minutes",
-        "max_price_change_h1_pct",
-        "max_price_change_m5_pct",
-        "min_market_cap_usd",
-        "min_txns_m5",
-        "min_volume_h1_usd",
-        "max_turnover_h1",
-        "bonding_curve",
-        "websocket",
-        "ws_url",
-        "full_poll_minutes",
-    },
-    "telegram": {"bot_token", "chat_id", "message_thread_id"},
-}
 
-_NUMBER = (int, float)
-# Campo de Config -> (nombre en el TOML, tipos aceptados).
-_FIELD_TYPES: dict[str, tuple[str, tuple[type, ...]]] = {
-    "chain_id": ("[dexscreener].chain_id", (str,)),
-    "quote_tokens": ("[dexscreener].quote_tokens", (list,)),
-    "dex_ids": ("[dexscreener].dex_ids", (list,)),
-    "check_token_authorities": ("[solana].check_token_authorities", (bool,)),
-    "solana_rpc_url": ("[solana].rpc_url", (str,)),
-    "alert_log_path": ("[radar].alert_log_path", (str,)),
-    "wallets_file": ("[wallets].file", (str,)),
-    "wallets_interval_seconds": ("[wallets].interval_seconds", _NUMBER),
-    "wallets_min_sol": ("[wallets].min_sol", _NUMBER),
-    "wallets_cooldown_minutes": ("[wallets].cooldown_minutes", _NUMBER),
-    "wallets_confluence_minutes": ("[wallets].confluence_minutes", _NUMBER),
-    "wallets_min_wallets": ("[wallets].min_wallets", (int,)),
-    "wallets_token_cooldown_minutes": ("[wallets].token_cooldown_minutes", _NUMBER),
-    "wallets_realert_new_wallets": ("[wallets].realert_new_wallets", (int,)),
-    "wallets_max_tokens_per_hour": ("[wallets].max_tokens_per_hour", (int,)),
-    "wallets_max_txs_per_hour": ("[wallets].max_txs_per_hour", (int,)),
-    "wallets_max_inactive_days": ("[wallets].max_inactive_days", _NUMBER),
-    "wallets_blacklist": ("[wallets].blacklist", (bool,)),
-    "wallets_blacklist_file": ("[wallets].blacklist_file", (str,)),
-    "wallets_rug_drop_pct": ("[wallets].rug_drop_pct", _NUMBER),
-    "wallets_loser_min_signals": ("[wallets].loser_min_signals", (int,)),
-    "wallets_loser_max_median_ret_pct": ("[wallets].loser_max_median_ret_pct", _NUMBER),
-    "wallets_loser_checkpoint_minutes": ("[wallets].loser_checkpoint_minutes", (int,)),
-    "wallets_min_pair_age_minutes": ("[wallets].min_pair_age_minutes", _NUMBER),
-    "wallets_max_price_change_h1_pct": ("[wallets].max_price_change_h1_pct", _NUMBER),
-    "wallets_max_price_change_m5_pct": ("[wallets].max_price_change_m5_pct", _NUMBER),
-    "wallets_min_market_cap_usd": ("[wallets].min_market_cap_usd", _NUMBER),
-    "wallets_min_txns_m5": ("[wallets].min_txns_m5", (int,)),
-    "wallets_min_volume_h1_usd": ("[wallets].min_volume_h1_usd", _NUMBER),
-    "wallets_max_turnover_h1": ("[wallets].max_turnover_h1", _NUMBER),
-    "wallets_bonding_curve": ("[wallets].bonding_curve", (bool,)),
-    "wallets_websocket": ("[wallets].websocket", (bool,)),
-    "wallets_ws_url": ("[wallets].ws_url", (str,)),
-    "wallets_full_poll_minutes": ("[wallets].full_poll_minutes", _NUMBER),
-    "verbose": ("[radar].verbose", (bool,)),
-    "telegram_bot_token": ("[telegram].bot_token", (str,)),
-    "telegram_chat_id": ("[telegram].chat_id", (str,)),
-    "telegram_message_thread_id": ("[telegram].message_thread_id", (int, type(None))),
-}
+def _key(toml_key: str, default: object = None, *, factory: Callable[[], object] | None = None) -> Any:
+    """Campo de Config leído de `toml_key` ("sección.clave"). Las claves
+    válidas, los tipos aceptados y la lectura del TOML salen de acá: antes
+    cada clave se declaraba en tres sitios, con el default repetido."""
+    metadata = {"toml": toml_key}
+    if factory is not None:
+        return field(default_factory=factory, metadata=metadata)
+    return field(default=default, metadata=metadata)
+
+
+def _toml_key(f: Field) -> tuple[str, str]:
+    section, _, key = f.metadata["toml"].partition(".")
+    return section, key
+
+
+def _accepted_types(annotation: object) -> tuple[type, ...]:
+    """Tipos que acepta un campo según su anotación: un float acepta también
+    un int (`interval_seconds = 15`), list[str] se mira como list (sus
+    elementos los valida __post_init__) e `int | None` acepta los dos."""
+    if annotation is float:
+        return (int, float)
+    if isinstance(annotation, types.UnionType):
+        return tuple(t for arg in annotation.__args__ for t in _accepted_types(arg))
+    return (typing.get_origin(annotation) or annotation,)
 
 
 def _section(raw: dict, name: str) -> dict:
@@ -117,107 +65,109 @@ def _section(raw: dict, name: str) -> dict:
 @dataclass
 class Config:
     """Configuración completa, con defaults sensatos si el TOML no los define."""
-    chain_id: str = "solana"
+    chain_id: str = _key("dexscreener.chain_id", "solana")
     # Monedas contra las que debe cotizar el par (símbolo o dirección del
     # quote). Vacío = cualquiera.
-    quote_tokens: list[str] = field(default_factory=list)
+    quote_tokens: list[str] = _key("dexscreener.quote_tokens", factory=list)
     # dexId de DexScreener en los que debe estar el par (pumpswap, raydium...).
     # Vacío = cualquiera.
-    dex_ids: list[str] = field(default_factory=list)
-    alert_log_path: str = "alertas.db"
+    dex_ids: list[str] = _key("dexscreener.dex_ids", factory=list)
+    alert_log_path: str = _key("radar.alert_log_path", "alertas.db")
     # Seguimiento de wallets: avisa cuando una de las del fichero entra en un token.
-    wallets_file: str = "wallets.txt"
-    wallets_interval_seconds: float = 15.0
+    wallets_file: str = _key("wallets.file", "wallets.txt")
+    wallets_interval_seconds: float = _key("wallets.interval_seconds", 15.0)
     # Mínimo de SOL gastado para considerar que una transacción es una compra.
-    wallets_min_sol: float = 0.1
+    wallets_min_sol: float = _key("wallets.min_sol", 0.1)
     # Minutos sin repetir aviso de la misma wallet en el mismo token.
-    wallets_cooldown_minutes: float = 60.0
+    wallets_cooldown_minutes: float = _key("wallets.cooldown_minutes", 60.0)
     # Ventana en la que otras wallets seguidas que entraron en el mismo token
     # se mencionan en el aviso.
-    wallets_confluence_minutes: float = 60.0
+    wallets_confluence_minutes: float = _key("wallets.confluence_minutes", 60.0)
     # Wallets seguidas distintas que tienen que haber comprado el token dentro
     # de confluence_minutes para avisar. 1 = avisar de cada compra.
-    wallets_min_wallets: int = 1
+    wallets_min_wallets: int = _key("wallets.min_wallets", 1)
     # Minutos sin volver a avisar de un token ya avisado por wallets, salvo
     # que se sumen realert_new_wallets wallets más (0 = nunca). 0 = sin límite por token.
-    wallets_token_cooldown_minutes: float = 0.0
-    wallets_realert_new_wallets: int = 2
+    wallets_token_cooldown_minutes: float = _key("wallets.token_cooldown_minutes", 0.0)
+    wallets_realert_new_wallets: int = _key("wallets.realert_new_wallets", 2)
     # Una wallet que compra más tokens distintos que esto en una hora no
     # avisa ni cuenta para la confluencia de otras, y con blacklist va a
     # la lista negra. 0 = sin tope.
-    wallets_max_tokens_per_hour: int = 0
+    wallets_max_tokens_per_hour: int = _key("wallets.max_tokens_per_hour", 0)
     # Una wallet con más transacciones que esto en una hora es un bot: con
     # blacklist va a la lista negra antes de leerlas. 0 = sin tope.
-    wallets_max_txs_per_hour: int = 0
+    wallets_max_txs_per_hour: int = _key("wallets.max_txs_per_hour", 0)
     # Una wallet sin ninguna transacción en estos días está abandonada: con
     # blacklist va a la lista negra por max_inactive_days, y al acabar se
     # comprueba si volvió a operar. 0 = no hacerlo.
-    wallets_max_inactive_days: float = 30.0
+    wallets_max_inactive_days: float = _key("wallets.max_inactive_days", 30.0)
     # Lista negra, en la tabla lista_negra de alert_log_path: sus wallets se
     # quitan del fichero y no se vuelven a seguir.
-    wallets_blacklist: bool = False
+    wallets_blacklist: bool = _key("wallets.blacklist", False)
     # Fichero de lista negra de versiones anteriores: al arrancar se pasa a
     # la base y se renombra a .importado.
-    wallets_blacklist_file: str = ""
+    wallets_blacklist_file: str = _key("wallets.blacklist_file", "")
     # Una wallet cuya compra cae este % (rug) en el seguimiento entra en la
     # lista negra sola. 0 = no hacerlo.
-    wallets_rug_drop_pct: float = 90.0
+    wallets_rug_drop_pct: float = _key("wallets.rug_drop_pct", 90.0)
     # Una wallet con al menos loser_min_signals tokens registrados cuya
     # mediana a loser_checkpoint_minutes es loser_max_median_ret_pct o peor
     # entra en la lista negra sola. 0 = no hacerlo.
-    wallets_loser_min_signals: int = 0
-    wallets_loser_max_median_ret_pct: float = -30.0
+    wallets_loser_min_signals: int = _key("wallets.loser_min_signals", 0)
+    wallets_loser_max_median_ret_pct: float = _key("wallets.loser_max_median_ret_pct", -30.0)
     # Checkpoint del registro (minutos, uno de tracker.CHECKPOINTS_MINUTES)
     # con el que se mide esa mediana. A 30 min muchas parecían buenas y se
     # hundían horas después.
-    wallets_loser_checkpoint_minutes: int = 30
+    wallets_loser_checkpoint_minutes: int = _key("wallets.loser_checkpoint_minutes", 30)
     # Filtros del par para los avisos de wallets (0 = sin filtro): los pares
     # recién creados, los que ya subieron mucho en 1h y los de market cap
     # pequeño daban casi siempre pérdidas.
-    wallets_min_pair_age_minutes: float = 0.0
-    wallets_max_price_change_h1_pct: float = 0.0
+    wallets_min_pair_age_minutes: float = _key("wallets.min_pair_age_minutes", 0.0)
+    wallets_max_price_change_h1_pct: float = _key("wallets.max_price_change_h1_pct", 0.0)
     # Lo que ya subió en los últimos 5 min: llegar tarde a la vela. Se aplica
     # también a las wallets de confianza y en bonding curve.
-    wallets_max_price_change_m5_pct: float = 0.0
-    wallets_min_market_cap_usd: float = 0.0
+    wallets_max_price_change_m5_pct: float = _key("wallets.max_price_change_m5_pct", 0.0)
+    wallets_min_market_cap_usd: float = _key("wallets.min_market_cap_usd", 0.0)
     # Actividad mínima del par: los tokens muertos (una o dos transacciones
     # en los últimos minutos) no se mueven y el aviso no sirve de nada.
-    wallets_min_txns_m5: int = 0
-    wallets_min_volume_h1_usd: float = 0.0
+    wallets_min_txns_m5: int = _key("wallets.min_txns_m5", 0)
+    wallets_min_volume_h1_usd: float = _key("wallets.min_volume_h1_usd", 0.0)
     # Volumen de la última hora sobre el market cap: con mucho más volumen
     # del que corresponde al tamaño del token lo están bombeando o ya están
     # saliendo, y casi siempre se hundía después. 0 = sin filtro.
-    wallets_max_turnover_h1: float = 0.0
+    wallets_max_turnover_h1: float = _key("wallets.max_turnover_h1", 0.0)
     # Avisar también de las compras de tokens que siguen en la bonding curve
     # de un launchpad (pump.fun...). A esas solo se les aplican quote_tokens,
     # max_price_change_h1_pct, max_price_change_m5_pct, min_txns_m5 y
     # min_volume_h1_usd: el dex, la edad, el market cap y el turnover las
     # descartarían siempre.
-    wallets_bonding_curve: bool = False
+    wallets_bonding_curve: bool = _key("wallets.bonding_curve", False)
     # Avisos de actividad por el WebSocket del RPC: solo se consultan las
     # wallets que hicieron algo. ws_url vacío = el de rpc_url con wss://.
-    wallets_websocket: bool = True
-    wallets_ws_url: str = ""
+    wallets_websocket: bool = _key("wallets.websocket", True)
+    wallets_ws_url: str = _key("wallets.ws_url", "")
     # Con el WebSocket, cada cuánto se consultan todas por si se perdió algún aviso.
-    wallets_full_poll_minutes: float = 10.0
-    verbose: bool = False
+    wallets_full_poll_minutes: float = _key("wallets.full_poll_minutes", 10.0)
+    verbose: bool = _key("radar.verbose", False)
     # Comprobación en la blockchain de que el token no se pueda acuñar ni congelar.
-    check_token_authorities: bool = True
-    solana_rpc_url: str = MAINNET_RPC_URL
-    telegram_bot_token: str = ""
-    telegram_chat_id: str = ""
-    telegram_message_thread_id: int | None = None
+    check_token_authorities: bool = _key("solana.check_token_authorities", True)
+    solana_rpc_url: str = _key("solana.rpc_url", MAINNET_RPC_URL)
+    telegram_bot_token: str = _key("telegram.bot_token", "")
+    telegram_chat_id: str = _key("telegram.chat_id", "")
+    telegram_message_thread_id: int | None = _key("telegram.message_thread_id", None)
 
     def __post_init__(self) -> None:
         """Valida los rangos apenas se construye el Config, para que un TOML
         inconsistente falle al arrancar y no a mitad de una vuelta."""
         # Tipos primero: con `interval_seconds = "15"` la comparación de
         # abajo tiraba un TypeError crudo en vez de un error de configuración.
-        for name, (toml_name, types) in _FIELD_TYPES.items():
-            value = getattr(self, name)
+        for f in fields(self):
+            value = getattr(self, f.name)
+            accepted = _accepted_types(f.type)
             # bool es subclase de int: `min_wallets = true` no es un número.
-            if not isinstance(value, types) or (isinstance(value, bool) and bool not in types):
-                raise ValueError(f"{toml_name} tiene un tipo inválido: {value!r}")
+            if not isinstance(value, accepted) or (isinstance(value, bool) and bool not in accepted):
+                section, key = _toml_key(f)
+                raise ValueError(f"[{section}].{key} tiene un tipo inválido: {value!r}")
         if not self.chain_id:
             raise ValueError("[dexscreener].chain_id no puede estar vacío")
         if not all(isinstance(quote, str) and quote for quote in self.quote_tokens):
@@ -294,63 +244,39 @@ class Config:
         if not path.is_file():
             raise FileNotFoundError(f"Archivo de configuración no encontrado: {path}")
 
-        with open(path, "rb") as f:
-            raw = tomllib.load(f)
+        with open(path, "rb") as file:
+            raw = tomllib.load(file)
 
-        # Cada sección del TOML se mapea a un grupo de campos de Config.
         unknown_sections = sorted(set(raw) - set(_KNOWN_KEYS))
         if unknown_sections:
             log.warning("Secciones desconocidas en el TOML, se ignoran: %s", ", ".join(unknown_sections))
-        radar = _section(raw, "radar")
-        dexscreener = _section(raw, "dexscreener")
-        solana = _section(raw, "solana")
-        wallets = _section(raw, "wallets")
-        telegram = _section(raw, "telegram")
+        sections = {name: _section(raw, name) for name in _KNOWN_KEYS}
+        # Lo que no está en el TOML se queda con el default del campo.
+        values: dict[str, object] = {}
+        for f in fields(cls):
+            section, key = _toml_key(f)
+            if key in sections[section]:
+                values[f.name] = sections[section][key]
 
-        chat_id = telegram.get("chat_id", "")
+        # Un config con blacklist_file de antes sigue teniendo lista negra.
+        wallets = sections["wallets"]
+        if "blacklist" not in wallets:
+            values["wallets_blacklist"] = bool(wallets.get("blacklist_file"))
         # Los chat_id son números (-100123...) y es natural escribirlos sin
         # comillas; Telegram acepta ambos, así que se normaliza a str.
+        chat_id = values.get("telegram_chat_id")
         if isinstance(chat_id, int) and not isinstance(chat_id, bool):
-            chat_id = str(chat_id)
+            values["telegram_chat_id"] = str(chat_id)
+        return cls(**values)
 
-        return cls(
-            chain_id=dexscreener.get("chain_id", "solana"),
-            quote_tokens=dexscreener.get("quote_tokens", []),
-            dex_ids=dexscreener.get("dex_ids", []),
-            check_token_authorities=solana.get("check_token_authorities", True),
-            solana_rpc_url=solana.get("rpc_url", MAINNET_RPC_URL),
-            alert_log_path=radar.get("alert_log_path", "alertas.db"),
-            wallets_file=wallets.get("file", "wallets.txt"),
-            wallets_interval_seconds=wallets.get("interval_seconds", 15.0),
-            wallets_min_sol=wallets.get("min_sol", 0.1),
-            wallets_cooldown_minutes=wallets.get("cooldown_minutes", 60.0),
-            wallets_confluence_minutes=wallets.get("confluence_minutes", 60.0),
-            wallets_min_wallets=wallets.get("min_wallets", 1),
-            wallets_token_cooldown_minutes=wallets.get("token_cooldown_minutes", 0.0),
-            wallets_realert_new_wallets=wallets.get("realert_new_wallets", 2),
-            wallets_max_tokens_per_hour=wallets.get("max_tokens_per_hour", 0),
-            wallets_max_txs_per_hour=wallets.get("max_txs_per_hour", 0),
-            wallets_max_inactive_days=wallets.get("max_inactive_days", 30.0),
-            # Un config con blacklist_file de antes sigue teniendo lista negra.
-            wallets_blacklist=wallets.get("blacklist", bool(wallets.get("blacklist_file"))),
-            wallets_blacklist_file=wallets.get("blacklist_file", ""),
-            wallets_rug_drop_pct=wallets.get("rug_drop_pct", 90.0),
-            wallets_loser_min_signals=wallets.get("loser_min_signals", 0),
-            wallets_loser_max_median_ret_pct=wallets.get("loser_max_median_ret_pct", -30.0),
-            wallets_loser_checkpoint_minutes=wallets.get("loser_checkpoint_minutes", 30),
-            wallets_min_pair_age_minutes=wallets.get("min_pair_age_minutes", 0.0),
-            wallets_max_price_change_h1_pct=wallets.get("max_price_change_h1_pct", 0.0),
-            wallets_max_price_change_m5_pct=wallets.get("max_price_change_m5_pct", 0.0),
-            wallets_min_market_cap_usd=wallets.get("min_market_cap_usd", 0.0),
-            wallets_min_txns_m5=wallets.get("min_txns_m5", 0),
-            wallets_min_volume_h1_usd=wallets.get("min_volume_h1_usd", 0.0),
-            wallets_max_turnover_h1=wallets.get("max_turnover_h1", 0.0),
-            wallets_bonding_curve=wallets.get("bonding_curve", False),
-            wallets_websocket=wallets.get("websocket", True),
-            wallets_ws_url=wallets.get("ws_url", ""),
-            wallets_full_poll_minutes=wallets.get("full_poll_minutes", 10.0),
-            verbose=radar.get("verbose", False),
-            telegram_bot_token=telegram.get("bot_token", ""),
-            telegram_chat_id=chat_id,
-            telegram_message_thread_id=telegram.get("message_thread_id"),
-        )
+
+def _known_keys() -> dict[str, set[str]]:
+    """Claves válidas por sección del TOML, sacadas de los campos de Config."""
+    keys: dict[str, set[str]] = {}
+    for f in fields(Config):
+        section, key = _toml_key(f)
+        keys.setdefault(section, set()).add(key)
+    return keys
+
+
+_KNOWN_KEYS = _known_keys()

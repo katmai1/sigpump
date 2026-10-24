@@ -62,6 +62,7 @@ class TestConfigValidation(unittest.TestCase):
             dict(wallets_token_cooldown_minutes=-1),
             dict(wallets_min_pair_age_minutes=-1),
             dict(wallets_max_price_change_h1_pct=-1),
+            dict(wallets_max_price_change_m5_pct=-1),
             dict(wallets_min_market_cap_usd=-1),
             dict(wallets_min_txns_m5=-1),
             dict(wallets_min_volume_h1_usd=-1),

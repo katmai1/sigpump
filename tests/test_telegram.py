@@ -51,6 +51,11 @@ class TestFormatMessage(unittest.TestCase):
         self.assertIn("Cap. mercado: $2,500,000", texto)
         self.assertIn("<code>AbC123</code>", texto)
 
+    def test_muestra_el_par(self):
+        texto = _alerter().format_message(_pair(quoteToken={"symbol": "SOL"}), _SIGNAL)
+        self.assertIn("Par: <b>PEPE/SOL</b> en raydium", texto)
+        self.assertIn("Par: <b>PEPE/?</b>", _alerter().format_message(_pair(), _SIGNAL))
+
     def test_wallet_de_confianza_se_marca(self):
         self.assertNotIn("de las buenas", _alerter().format_message(_pair(), _SIGNAL))
         signal = WalletSignal(dataclasses.replace(_SIGNAL.buy, trusted=True))

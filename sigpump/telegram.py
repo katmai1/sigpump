@@ -71,6 +71,7 @@ class TelegramAlerter:
         # marketCap suele venir ausente en tokens nuevos; fdv es el fallback de DexScreener.
         market_cap_usd = to_float(pair.get("marketCap")) or to_float(pair.get("fdv"))
         pool = html.escape(str(pair.get("dexId", "?")))
+        quote = html.escape(str((pair.get("quoteToken") or {}).get("symbol") or "?"))
         # quote=True porque va dentro de un atributo href="...": una comilla
         # sin escapar rompe el tag y Telegram rechaza el mensaje entero.
         raw_url = pair.get("url") or (
@@ -112,14 +113,14 @@ class TelegramAlerter:
             )
         return (
             f"{header}"
+            f"Par: <b>{symbol}/{quote}</b> en {pool}\n"
             f"Precio: ${price_usd}\n"
             f"Cambio 5m: {change_m5:+.1f}%\n"
             f"Cambio 1h: {change_h1:+.1f}%\n"
             f"Volumen 1h: ${volume_h1:,.0f}\n"
             f"{momentum}"
             f"Liquidez: ${liquidity_usd:,.0f}\n"
-            f"Cap. mercado: ${market_cap_usd:,.0f}\n"
-            f"Pool: {pool}\n\n"
+            f"Cap. mercado: ${market_cap_usd:,.0f}\n\n"
             f"<code>{address}</code>\n\n"
             f"{links}"
         )

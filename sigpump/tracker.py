@@ -291,7 +291,7 @@ class AlertTracker:
         try:
             rows = conn.execute(
                 "SELECT id, timestamp, enviada, motivo_descarte, moneda_par, edad_par_min, "
-                "cambio_h1_pct, market_cap_usd, txns_m5, volumen_h1_usd FROM alertas "
+                "cambio_m5_pct, cambio_h1_pct, market_cap_usd, txns_m5, volumen_h1_usd FROM alertas "
                 "WHERE tipo = 'wallet' AND pasa_filtros_par IS NULL"
             ).fetchall()
         except sqlite3.Error as exc:

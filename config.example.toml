@@ -36,7 +36,7 @@ rpc_url = "https://api.mainnet-beta.solana.com"
 # Un * detrás de la dirección la marca de confianza: avisa sola aunque no
 # llegue a min_wallets, y a sus compras no se les aplican
 # max_price_change_h1_pct, min_market_cap_usd, max_turnover_h1 ni min_txns_m5
-# (sí la edad, el dex y quote_tokens).
+# (sí la edad, max_price_change_m5_pct, el dex y quote_tokens).
 #   5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1 *  # ballena 1
 # Se relee solo cuando cambia: no hace falta reiniciar para añadir wallets.
 file = "wallets.txt"
@@ -99,6 +99,11 @@ loser_checkpoint_minutes = 1440
 min_pair_age_minutes = 120
 max_price_change_h1_pct = 50
 min_market_cap_usd = 100000
+# Lo que ya subió en los últimos 5 min (0 = sin filtro). A diferencia de los
+# anteriores se aplica también a las wallets de confianza y en bonding curve:
+# comprar en plena vela es llegar tarde. 2026-10-24: las que entraban con
+# +20% o más en 5 min daban -33% de media a 24 h (+10% o menos, -8%).
+max_price_change_m5_pct = 20
 # Actividad mínima del par (0 = sin filtro): transacciones (compras + ventas)
 # en los últimos 5 min y volumen en USD de la última hora. Los tokens muertos
 # (una o dos transacciones en los últimos minutos) no se mueven: el aviso no
@@ -113,7 +118,7 @@ min_volume_h1_usd = 5000
 max_turnover_h1 = 0.1
 # Avisar también de las compras de tokens en bonding curve (pump.fun antes de
 # graduarse...), marcadas con 🧪. Solo se les aplican quote_tokens,
-# max_price_change_h1_pct, min_txns_m5 y min_volume_h1_usd, y no cuentan para
+# max_price_change_h1_pct, max_price_change_m5_pct, min_txns_m5 y min_volume_h1_usd, y no cuentan para
 # la lista negra por rug ni por resultados. Son mucho más arriesgadas.
 bonding_curve = false
 # Avisos de actividad por el WebSocket del RPC (logsSubscribe): solo se leen

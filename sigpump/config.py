@@ -39,6 +39,7 @@ _KNOWN_KEYS: dict[str, set[str]] = {
         "loser_checkpoint_minutes",
         "min_pair_age_minutes",
         "max_price_change_h1_pct",
+        "max_price_change_m5_pct",
         "min_market_cap_usd",
         "min_txns_m5",
         "min_volume_h1_usd",
@@ -78,6 +79,7 @@ _FIELD_TYPES: dict[str, tuple[str, tuple[type, ...]]] = {
     "wallets_loser_checkpoint_minutes": ("[wallets].loser_checkpoint_minutes", (int,)),
     "wallets_min_pair_age_minutes": ("[wallets].min_pair_age_minutes", _NUMBER),
     "wallets_max_price_change_h1_pct": ("[wallets].max_price_change_h1_pct", _NUMBER),
+    "wallets_max_price_change_m5_pct": ("[wallets].max_price_change_m5_pct", _NUMBER),
     "wallets_min_market_cap_usd": ("[wallets].min_market_cap_usd", _NUMBER),
     "wallets_min_txns_m5": ("[wallets].min_txns_m5", (int,)),
     "wallets_min_volume_h1_usd": ("[wallets].min_volume_h1_usd", _NUMBER),
@@ -168,6 +170,9 @@ class Config:
     # pequeño daban casi siempre pérdidas.
     wallets_min_pair_age_minutes: float = 0.0
     wallets_max_price_change_h1_pct: float = 0.0
+    # Lo que ya subió en los últimos 5 min: llegar tarde a la vela. Se aplica
+    # también a las wallets de confianza y en bonding curve.
+    wallets_max_price_change_m5_pct: float = 0.0
     wallets_min_market_cap_usd: float = 0.0
     # Actividad mínima del par: los tokens muertos (una o dos transacciones
     # en los últimos minutos) no se mueven y el aviso no sirve de nada.
@@ -243,7 +248,7 @@ class Config:
                 f"[wallets].loser_min_signals debe ser >= 0 ({self.wallets_loser_min_signals})"
             )
         for name in (
-            "min_pair_age_minutes", "max_price_change_h1_pct", "min_market_cap_usd",
+            "min_pair_age_minutes", "max_price_change_h1_pct", "max_price_change_m5_pct", "min_market_cap_usd",
             "min_txns_m5", "min_volume_h1_usd", "max_turnover_h1",
         ):
             if getattr(self, f"wallets_{name}") < 0:
@@ -324,6 +329,7 @@ class Config:
             wallets_loser_checkpoint_minutes=wallets.get("loser_checkpoint_minutes", 30),
             wallets_min_pair_age_minutes=wallets.get("min_pair_age_minutes", 0.0),
             wallets_max_price_change_h1_pct=wallets.get("max_price_change_h1_pct", 0.0),
+            wallets_max_price_change_m5_pct=wallets.get("max_price_change_m5_pct", 0.0),
             wallets_min_market_cap_usd=wallets.get("min_market_cap_usd", 0.0),
             wallets_min_txns_m5=wallets.get("min_txns_m5", 0),
             wallets_min_volume_h1_usd=wallets.get("min_volume_h1_usd", 0.0),

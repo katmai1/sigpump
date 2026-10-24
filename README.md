@@ -41,7 +41,7 @@ Las compras de tokens que todavía están en la bonding curve de un launchpad
 (pump.fun, Meteora DBC, LaunchLab, Moonshot) se ignoran, salvo con
 `bonding_curve = true`: entonces se avisan marcadas con 🧪, y si el token ya
 tiene pool en un AMM se usa ese. A esas solo se les aplican `quote_tokens`,
-`max_price_change_h1_pct`, `min_txns_m5` y `min_volume_h1_usd` (el dex, la
+`max_price_change_h1_pct`, `max_price_change_m5_pct`, `min_txns_m5` y `min_volume_h1_usd` (el dex, la
 edad, el market cap y el turnover las descartarían siempre), se registran con
 `bonding_curve = 1`, su precio se sigue por el token y no por el pool (que
 cambia al graduarse) y no cuentan para la lista negra por rug ni por
@@ -66,7 +66,7 @@ reiniciar, así que un reinicio entre las dos no pierde el aviso. Una wallet
 marcada de confianza (un `*` detrás de la dirección en el fichero) avisa sola,
 aunque no llegue a `min_wallets`, y a sus compras no se les aplican
 `max_price_change_h1_pct`, `min_market_cap_usd`, `max_turnover_h1` ni
-`min_txns_m5` (sí la edad del par, el dex y `quote_tokens`): en pares de más
+`min_txns_m5` (sí la edad del par, `max_price_change_m5_pct`, el dex y `quote_tokens`): en pares de más
 de un día, las suyas que esos filtros descartaban eran las mejores del
 registro. Sirven para salir rápido: esas mismas daban +6% a 1 h y +11% a 4 h,
 pero -42% a 24 h.
@@ -117,6 +117,9 @@ descartan las compras en pares recién creados, que ya subieron mucho en la
 casi siempre perdían. `min_txns_m5` y `min_volume_h1_usd` descartan los
 tokens muertos, con pocas transacciones en los últimos 5 minutos o poco
 volumen en la última hora: no se mueven y el aviso no sirve.
+`max_price_change_m5_pct` descarta los que ya subieron mucho en los
+últimos 5 minutos, también para las wallets de confianza: es llegar tarde
+a la vela.
 `max_turnover_h1` descarta los que mueven en la última hora más de esa
 fracción de su market cap (0.1 = 10%): los están bombeando o ya están
 saliendo, y en octubre el 64% de los que pasaban del 5% cayó más de 50% en
@@ -215,8 +218,8 @@ Secciones disponibles:
   (`token_cooldown_minutes`, `realert_new_wallets`), tope de actividad
   (`max_tokens_per_hour`), bots (`max_txs_per_hour`), abandonadas (`max_inactive_days`), lista negra (`blacklist_file`, `rug_drop_pct`,
   `loser_min_signals`, `loser_max_median_ret_pct`, `loser_checkpoint_minutes`) y filtros del par
-  (`min_pair_age_minutes`, `max_price_change_h1_pct`, `min_market_cap_usd`,
-  `min_txns_m5`, `min_volume_h1_usd`, `max_turnover_h1`) y avisos en bonding
+  (`min_pair_age_minutes`, `max_price_change_h1_pct`, `max_price_change_m5_pct`,
+  `min_market_cap_usd`, `min_txns_m5`, `min_volume_h1_usd`, `max_turnover_h1`) y avisos en bonding
   curve (`bonding_curve`).
 - `[telegram]` — `bot_token`, `chat_id` y opcionalmente `message_thread_id`
   si querés mandar los avisos a un tema (topic) concreto dentro de un

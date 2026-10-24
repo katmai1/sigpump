@@ -138,7 +138,7 @@ class MemecoinRadar:
             "dexId": self._config.dex_ids[0] if self._config.dex_ids else "",
             "quoteToken": {"symbol": row["moneda_par"]},
             "pairCreatedAt": (ts - age * 60) * 1000 if age is not None else 0,
-            "priceChange": {"h1": row["cambio_h1_pct"]},
+            "priceChange": {"m5": row["cambio_m5_pct"], "h1": row["cambio_h1_pct"]},
             "marketCap": row["market_cap_usd"],
             "txns": {"m5": {"buys": txns, "sells": 0}} if txns is not None else {},
             "volume": {"h1": row["volumen_h1_usd"]},
@@ -294,7 +294,7 @@ class MemecoinRadar:
     ) -> str | None:
         """Motivo para no avisar de una compra de wallet por cómo está el par
         ([dexscreener].dex_ids y quote_tokens; [wallets].min_pair_age_minutes,
-        max_price_change_h1_pct, min_market_cap_usd, min_txns_m5,
+        max_price_change_h1_pct, max_price_change_m5_pct, min_market_cap_usd, min_txns_m5,
         min_volume_h1_usd y max_turnover_h1), o None si pasa. `now` es la hora contra la que se
         mide la edad del par (ahora si no se da). Con `curve` (token en
         bonding curve) no se miran el dex, la edad, el market cap ni el
@@ -303,7 +303,9 @@ class MemecoinRadar:
         turnover ni min_txns_m5: en pares de más de un día, sus compras que
         esos filtros descartaban eran las mejores del registro (+18% de
         mediana a 1 h), y en octubre las de 4y2T…dvE1 que min_txns_m5 tiraba
-        (0-2 txns en 5 min) acabaron todas en positivo a 24 h."""
+        (0-2 txns en 5 min) acabaron todas en positivo a 24 h.
+        max_price_change_m5_pct se mira siempre: comprar lo que acaba de
+        subir mucho es llegar tarde, sea quien sea quien compra."""
         cfg = self._config
         if curve:
             if cfg.quote_tokens and not _matches_quote(pair, cfg.quote_tokens):
@@ -322,6 +324,9 @@ class MemecoinRadar:
         change_h1 = to_float((pair.get("priceChange") or {}).get("h1"))
         if cfg.wallets_max_price_change_h1_pct and change_h1 > cfg.wallets_max_price_change_h1_pct and not trusted:
             return f"cambio 1h {change_h1:+,.0f}% > {cfg.wallets_max_price_change_h1_pct:,.0f}%"
+        change_m5 = to_float((pair.get("priceChange") or {}).get("m5"))
+        if cfg.wallets_max_price_change_m5_pct and change_m5 > cfg.wallets_max_price_change_m5_pct:
+            return f"cambio 5m {change_m5:+,.0f}% > {cfg.wallets_max_price_change_m5_pct:,.0f}%"
         market_cap_usd = to_float(pair.get("marketCap")) or to_float(pair.get("fdv"))
         if market_cap_usd < cfg.wallets_min_market_cap_usd and not curve and not trusted:
             return f"market cap ${market_cap_usd:,.0f} < ${cfg.wallets_min_market_cap_usd:,.0f}"

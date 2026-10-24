@@ -1018,6 +1018,8 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
             (_pair("TOK", created_at=_hace_horas(5), volume=50_000), ""),
             ({**_pair("TOK", created_at=_hace_horas(5)), "txns": {"m5": {"buys": 1, "sells": 0}}}, ""),
             (_pair("TOK", created_at=_hace_horas(0.5)), "par creado hace 30 min"),
+            ({**_pair("TOK", created_at=_hace_horas(5)), "priceChange": {"m5": 25, "h1": 10}},
+             "cambio 5m +25% > 20%"),
             ({**_pair("TOK", created_at=_hace_horas(5)), "quoteToken": {"symbol": "PUMP"}},
              "par contra PUMP, no contra SOL"),
         ]
@@ -1027,6 +1029,7 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
                     [_buy(trusted=True)], wallets_min_pair_age_minutes=120,
                     wallets_max_price_change_h1_pct=50, wallets_min_market_cap_usd=100_000,
                     wallets_max_turnover_h1=0.03, wallets_min_txns_m5=5, quote_tokens=["SOL"],
+                    wallets_max_price_change_m5_pct=20,
                 )
                 alerter = _FakeAlerter()
                 pair = {"quoteToken": {"symbol": "SOL"}, **pair}

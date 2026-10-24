@@ -48,6 +48,17 @@ def _symbol(pair: dict) -> object:
     return (pair.get("baseToken") or {}).get("symbol")
 
 
+@dataclasses.dataclass(frozen=True)
+class _Decision:
+    """Qué hacer con una compra: `reason` es el motivo para no avisar (None =
+    se avisa), `pair_ok` si pasó los filtros del par y las autoridades (lo
+    usa la lista negra por rug) y `update` si es un reaviso de un token ya
+    avisado al que entraron más wallets."""
+    reason: str | None
+    pair_ok: bool = True
+    update: bool = False
+
+
 class MemecoinRadar:
     def __init__(self, config: Config):
         self._config = config
@@ -216,18 +227,7 @@ class MemecoinRadar:
         if not signals:
             return
 
-        mints = list(dict.fromkeys(s.buy.mint for s in signals))
-        all_pairs = await client.get_pairs_for_tokens(self._config.chain_id, mints)
-        amm_pairs = [p for p in all_pairs if p.get("dexId") not in BONDING_CURVE_DEX_IDS]
-        pairs = {_mint(p): p for p in self._best_pair_per_token(amm_pairs, mints)}
-        # Los que siguen en la bonding curve: solo si no tienen pool en un AMM.
-        curve_mints: set[str] = set()
-        if self._config.wallets_bonding_curve:
-            curve_pairs = [p for p in all_pairs if p.get("dexId") in BONDING_CURVE_DEX_IDS]
-            for pair in self._best_pair_per_token(curve_pairs, [m for m in mints if m not in pairs]):
-                mint = _mint(pair)
-                pairs[mint] = pair
-                curve_mints.add(mint)
+        pairs, curve_mints = await self._pairs_for(client, [s.buy.mint for s in signals])
         unsafe = await self._unsafe_reasons(list(pairs.values()))
 
         for signal in signals:
@@ -236,8 +236,7 @@ class MemecoinRadar:
             if pair is None:
                 log.info("Compra de %s en %s ignorada: sin pool fuera de bonding curve", buy.label, buy.mint)
                 continue
-            curve = buy.mint in curve_mints
-            if curve:
+            if buy.mint in curve_mints:
                 signal = dataclasses.replace(signal, bonding_curve=True)
             # Una wallet que compra en varias tx seguidas da una señal por tx
             # en la misma vuelta: solo cuenta la primera.
@@ -246,42 +245,78 @@ class MemecoinRadar:
             # Se marca también al descartar, para no registrar una fila por
             # cada compra repetida del mismo token peligroso.
             cooldowns.start_wallet_cooldown(buy)
-            pair_reason = unsafe.get(buy.mint) or pair_rejection(
-                self._config, pair, curve=curve, trusted=buy.trusted
-            )
-            reason = pair_reason
-            wallets = 1 + len(signal.others)
-            if not reason and cooldowns.hyperactive(buy.wallet):
-                reason = f"wallet hiperactiva ({cooldowns.tokens_last_hour(buy.wallet)} tokens en 1h)"
-            if not reason and wallets < self._config.wallets_min_wallets and not buy.trusted:
-                reason = f"{wallets} de {self._config.wallets_min_wallets} wallets"
-            previous = cooldowns.last_token_alert(buy.mint)
-            realert = self._config.wallets_realert_new_wallets
-            if not reason and previous is not None and (not realert or wallets < previous + realert):
-                reason = f"token ya avisado con {previous} wallets"
-            if reason:
-                log.info("Compra de %s en %s descartada: %s", buy.label, _symbol(pair), reason)
-                self._record_wallet(pair, signal, sent=False, reason=reason, pair_ok=not pair_reason)
+            decision = self._decide(signal, pair, unsafe.get(buy.mint))
+            if decision.reason:
+                log.info("Compra de %s en %s descartada: %s", buy.label, _symbol(pair), decision.reason)
+                self._record_wallet(pair, signal, sent=False, reason=decision.reason, pair_ok=decision.pair_ok)
                 continue
-            if previous is not None:
+            if decision.update:
                 signal = dataclasses.replace(signal, update=True)
-            log.info(
-                "Wallet%s: %s compró %s (%.2f SOL, %s)%s",
-                " (actualización)" if signal.update else "",
-                buy.label,
-                _symbol(pair),
-                buy.sol_spent,
-                "entrada nueva" if buy.new_position else "amplía",
-                f" | también {', '.join(signal.others)}" if signal.others else "",
-            )
-            try:
-                await alerter.send(pair, signal)
-            except Exception:
-                log.exception("Error enviando aviso de wallet para %s", buy.mint)
-                cooldowns.cancel_wallet_cooldown(buy)
-                continue
-            cooldowns.mark_token_alerted(buy.mint, wallets)
-            self._record_wallet(pair, signal, sent=True, pair_ok=True)
+            await self._alert(alerter, pair, signal)
+
+    async def _pairs_for(self, client: DexScreenerClient, mints: list[str]) -> tuple[dict[str, dict], set[str]]:
+        """Par de DexScreener de cada token (mint -> par) y cuáles siguen en la
+        bonding curve. Se usa el pool de un AMM si lo tiene; el de la curva,
+        solo con [wallets].bonding_curve y si no tiene otro."""
+        mints = list(dict.fromkeys(mints))
+        all_pairs = await client.get_pairs_for_tokens(self._config.chain_id, mints)
+        amm_pairs = [p for p in all_pairs if p.get("dexId") not in BONDING_CURVE_DEX_IDS]
+        pairs = {_mint(p): p for p in self._best_pair_per_token(amm_pairs, mints)}
+        curve_mints: set[str] = set()
+        if self._config.wallets_bonding_curve:
+            curve_pairs = [p for p in all_pairs if p.get("dexId") in BONDING_CURVE_DEX_IDS]
+            for pair in self._best_pair_per_token(curve_pairs, [m for m in mints if m not in pairs]):
+                mint = _mint(pair)
+                pairs[mint] = pair
+                curve_mints.add(mint)
+        return pairs, curve_mints
+
+    def _decide(self, signal: WalletSignal, pair: dict, unsafe_reason: str | None = None) -> _Decision:
+        """Si se avisa de la compra de `signal` en `pair`, y si no, por qué. En
+        orden: autoridades del mint (`unsafe_reason`), filtros del par, wallet
+        hiperactiva, [wallets].min_wallets (salvo las de confianza) y un aviso
+        previo del token sin realert_new_wallets wallets más. No cambia nada:
+        el cooldown de la wallet se mira y se marca antes."""
+        buy = signal.buy
+        cfg = self._config
+        cooldowns = self._cooldowns
+        pair_reason = unsafe_reason or pair_rejection(cfg, pair, curve=signal.bonding_curve, trusted=buy.trusted)
+        if pair_reason:
+            return _Decision(pair_reason, pair_ok=False)
+        if cooldowns.hyperactive(buy.wallet):
+            return _Decision(f"wallet hiperactiva ({cooldowns.tokens_last_hour(buy.wallet)} tokens en 1h)")
+        wallets = 1 + len(signal.others)
+        if wallets < cfg.wallets_min_wallets and not buy.trusted:
+            return _Decision(f"{wallets} de {cfg.wallets_min_wallets} wallets")
+        previous = cooldowns.last_token_alert(buy.mint)
+        if previous is None:
+            return _Decision(None)
+        realert = cfg.wallets_realert_new_wallets
+        if not realert or wallets < previous + realert:
+            return _Decision(f"token ya avisado con {previous} wallets")
+        return _Decision(None, update=True)
+
+    async def _alert(self, alerter: TelegramAlerter, pair: dict, signal: WalletSignal) -> None:
+        """Envía el aviso y lo registra. Si Telegram falla no se registra y se
+        quita el cooldown de la wallet: su próxima compra lo vuelve a intentar."""
+        buy = signal.buy
+        log.info(
+            "Wallet%s: %s compró %s (%.2f SOL, %s)%s",
+            " (actualización)" if signal.update else "",
+            buy.label,
+            _symbol(pair),
+            buy.sol_spent,
+            "entrada nueva" if buy.new_position else "amplía",
+            f" | también {', '.join(signal.others)}" if signal.others else "",
+        )
+        try:
+            await alerter.send(pair, signal)
+        except Exception:
+            log.exception("Error enviando aviso de wallet para %s", buy.mint)
+            self._cooldowns.cancel_wallet_cooldown(buy)
+            return
+        self._cooldowns.mark_token_alerted(buy.mint, 1 + len(signal.others))
+        self._record_wallet(pair, signal, sent=True, pair_ok=True)
 
     def _record_wallet(
         self, pair: dict, signal: WalletSignal, sent: bool, reason: str = "", pair_ok: bool = True

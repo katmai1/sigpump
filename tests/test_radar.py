@@ -6,6 +6,7 @@ import unittest
 
 from sigpump.config import Config
 from sigpump.radar import MemecoinRadar
+from sigpump.wallets import WalletBuy, WalletSignal
 
 
 def _pair(address, liquidity=100_000, volume=50_000, change=50, created_at=None, symbol="X"):
@@ -123,3 +124,51 @@ class TestUnsafeReasons(unittest.IsolatedAsyncioTestCase):
         radar._authorities = _Autoridades()
         await radar._unsafe_reasons([{"baseToken": {"address": None}}, _pair("TOK")])
         self.assertEqual(radar._authorities.pedidas, ["", "TOK"])
+
+
+def _signal(wallet="W1", mint="TOK", trusted=False, others=(), curve=False):
+    buy = WalletBuy(
+        wallet=wallet, label=wallet, mint=mint, sol_spent=1.0, stable_spent=0.0,
+        new_position=True, signature="SIG", ts=time.time(), trusted=trusted,
+    )
+    return WalletSignal(buy, tuple(others), bonding_curve=curve)
+
+
+class TestDecide(unittest.TestCase):
+    """La decisión de avisar o no, sin el bucle, la red ni Telegram."""
+
+    def test_avisa_si_nada_lo_impide(self):
+        decision = MemecoinRadar(_config())._decide(_signal(), _pair("TOK"))
+        self.assertEqual((decision.reason, decision.pair_ok, decision.update), (None, True, False))
+
+    def test_autoridades_y_filtros_del_par_no_pasan_el_par(self):
+        radar = MemecoinRadar(_config(wallets_max_price_change_h1_pct=10))
+        por_autoridades = radar._decide(_signal(), _pair("TOK", change=5), "se pueden congelar")
+        por_par = radar._decide(_signal(), _pair("TOK", change=50))
+        self.assertEqual((por_autoridades.reason, por_autoridades.pair_ok), ("se pueden congelar", False))
+        self.assertEqual((por_par.reason, por_par.pair_ok), ("cambio 1h +50% > 10%", False))
+
+    def test_min_wallets_salvo_las_de_confianza(self):
+        radar = MemecoinRadar(_config(wallets_min_wallets=2))
+        decision = radar._decide(_signal(), _pair("TOK"))
+        self.assertEqual((decision.reason, decision.pair_ok), ("1 de 2 wallets", True))
+        self.assertIsNone(radar._decide(_signal(trusted=True), _pair("TOK")).reason)
+        self.assertIsNone(radar._decide(_signal(others=("W2",)), _pair("TOK")).reason)
+
+    def test_hiperactiva(self):
+        radar = MemecoinRadar(_config(wallets_max_tokens_per_hour=1))
+        for mint in ("A", "B"):
+            radar._cooldowns.add_activity(_signal(mint=mint).buy)
+        self.assertEqual(radar._decide(_signal(), _pair("TOK")).reason, "wallet hiperactiva (2 tokens en 1h)")
+
+    def test_token_ya_avisado_y_reaviso(self):
+        radar = MemecoinRadar(_config(wallets_token_cooldown_minutes=60, wallets_realert_new_wallets=2))
+        radar._cooldowns.mark_token_alerted("TOK", 1)
+        self.assertEqual(radar._decide(_signal(others=("W2",)), _pair("TOK")).reason, "token ya avisado con 1 wallets")
+        reaviso = radar._decide(_signal(others=("W2", "W3")), _pair("TOK"))
+        self.assertEqual((reaviso.reason, reaviso.update), (None, True))
+
+    def test_bonding_curve_se_salta_los_filtros_de_amm(self):
+        radar = MemecoinRadar(_config(dex_ids=["pumpswap"], wallets_min_market_cap_usd=5_000_000))
+        self.assertIsNotNone(radar._decide(_signal(), _pair("TOK")).reason)
+        self.assertIsNone(radar._decide(_signal(curve=True), _pair("TOK")).reason)

@@ -119,6 +119,9 @@ class Config:
     # con el que se mide esa mediana. A 30 min muchas parecían buenas y se
     # hundían horas después.
     wallets_loser_checkpoint_minutes: int = _key("wallets.loser_checkpoint_minutes", 30)
+    # Hora local (0-23) a la que se manda cada día por Telegram el ranking de
+    # las wallets seguidas por su historial en el registro. -1 = no mandarlo.
+    wallets_ranking_hour: int = _key("wallets.ranking_hour", -1)
     # Filtros del par para los avisos de wallets (0 = sin filtro): los pares
     # recién creados, los que ya subieron mucho en 1h y los de market cap
     # pequeño daban casi siempre pérdidas.
@@ -215,6 +218,10 @@ class Config:
                 f"[wallets].loser_checkpoint_minutes debe ser uno de "
                 f"{', '.join(map(str, CHECKPOINTS_MINUTES))} ({self.wallets_loser_checkpoint_minutes})"
             )
+        if not -1 <= self.wallets_ranking_hour <= 23:
+            raise ValueError(f"[wallets].ranking_hour debe estar entre -1 y 23 ({self.wallets_ranking_hour})")
+        if self.wallets_ranking_hour >= 0 and not self.alert_log_path:
+            raise ValueError("[wallets].ranking_hour necesita [radar].alert_log_path: el ranking sale de esa base")
         if not self.wallets_file:
             raise ValueError("[wallets].file no puede estar vacío")
         if self.wallets_blacklist and not self.alert_log_path:

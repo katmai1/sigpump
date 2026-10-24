@@ -15,12 +15,48 @@ from telegram.constants import ParseMode  # type: ignore[import-not-found]
 from telegram.error import RetryAfter  # type: ignore[import-not-found]
 from telegram.warnings import PTBDeprecationWarning  # type: ignore[import-not-found]
 
+from sigpump.tracker import TRACK_RECORD_MINUTES, TrackRecord, format_minutes
 from sigpump.util import buy_ratio_m5, liquidity_usd, market_cap_usd, to_float, volume_acceleration
 from sigpump.wallets import WalletSignal
 
 # Espera máxima aceptable ante flood control. Más que esto bloquearía el
 # bucle de wallets demasiado tiempo: se deja fallar y se loguea.
 MAX_RETRY_AFTER_SECONDS = 60.0
+# Wallets del ranking diario que se muestran por arriba y por abajo: con
+# todas el mensaje se hacía largo y lo que interesa son los extremos.
+RANKING_TOP = 10
+RANKING_BOTTOM = 5
+
+
+def format_track_record(record: TrackRecord) -> str:
+    """'+3% a 1 h, -2% a 4 h, -28% a 24 h (14 tokens)': las medianas del
+    historial, con los tokens medidos del checkpoint que más tiene."""
+    medians = ", ".join(f"{median:+.0f}% a {format_minutes(minutes)}" for minutes, median, _ in record)
+    return f"{medians} ({max(count for _, _, count in record)} tokens)"
+
+
+def format_ranking(rows: list[tuple[str, bool, TrackRecord]], without_data: int, min_tokens: int) -> str:
+    """HTML del ranking diario: (etiqueta, de confianza, historial) por
+    wallet, ya ordenadas de mejor a peor en el primer checkpoint de
+    TRACK_RECORD_MINUTES. `without_data` son las que no llegan a
+    `min_tokens` tokens medidos en él."""
+    lines = [
+        "📊 <b>Ranking de wallets</b> (mediana por token, de mejor a peor "
+        f"a {format_minutes(TRACK_RECORD_MINUTES[0])})"
+    ]
+    numbered = list(enumerate(rows, 1))
+    if len(numbered) > RANKING_TOP + RANKING_BOTTOM:
+        numbered = numbered[:RANKING_TOP] + [None] + numbered[-RANKING_BOTTOM:]
+    for item in numbered:
+        if item is None:
+            lines.append("…")
+            continue
+        position, (label, trusted, record) = item
+        star = "⭐ " if trusted else ""
+        lines.append(f"{position}. {star}{html.escape(label)}: {format_track_record(record)}")
+    if without_data:
+        lines.append(f"\nSin datos suficientes (menos de {min_tokens} tokens medidos): {without_data} wallets")
+    return "\n".join(lines)
 
 
 class TelegramAlerter:
@@ -102,6 +138,11 @@ class TelegramAlerter:
         )
         if buy.trusted:
             header += "⭐ <b>Wallet de las buenas</b>\n"
+        if signal.track_record is not None:
+            header += (
+                f"📊 Historial: {format_track_record(signal.track_record)}\n" if signal.track_record
+                else "📊 Sin historial medido todavía\n"
+            )
         if signal.bonding_curve:
             header += f"🧪 <b>En bonding curve</b> ({pool}): sin graduar, más riesgo\n"
         if signal.transfer_fee_bps:
@@ -131,9 +172,13 @@ class TelegramAlerter:
 
     async def send(self, pair: dict, signal: WalletSignal) -> None:
         """Arma y envía el aviso de la compra `signal` en el token de `pair`."""
+        await self.send_text(self.format_message(pair, signal))
+
+    async def send_text(self, text: str) -> None:
+        """Envía un mensaje ya formateado en HTML (el aviso, el ranking)."""
         kwargs = dict(
             chat_id=self._chat_id,
-            text=self.format_message(pair, signal),
+            text=text,
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
             message_thread_id=self._message_thread_id,

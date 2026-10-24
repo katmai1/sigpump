@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock
 
-from sigpump.radar import MemecoinRadar
+from sigpump.radar import RANKING_MIN_TOKENS, MemecoinRadar, next_daily
 from sigpump.solana import RpcClient
 from sigpump.telegram import TelegramAlerter
 from sigpump.wallet_list import FollowedWallet
@@ -89,6 +89,55 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fila["wallet"], WALLET)
         self.assertEqual(fila["sol_gastado"], 1.5)
         self.assertEqual(fila["entrada_nueva"], 1)
+
+    async def test_el_aviso_lleva_el_historial_de_la_wallet(self):
+        radar = self._radar([_buy(mint="T0")], [_buy(mint="T1")], [_buy(wallet=OTRA, mint="T2")])
+        alerter = _FakeAlerter()
+        client = _FakeClient(pairs=[_pair(f"T{i}") for i in range(3)])
+        await radar.run_once(client, alerter)
+        self._anotar(radar, self._rows()[0]["id"], {"ret_60m_pct": 12, "ret_1440m_pct": -30})
+        await radar.run_once(client, alerter)
+        await radar.run_once(client, alerter)
+        self.assertEqual(
+            [s.track_record for _, s in alerter.wallet], [(), ((60, 12, 1), (1440, -30, 1)), ()]
+        )
+
+    async def test_ranking_de_las_wallets_seguidas(self):
+        tercera = "9Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j3"
+        radar = self._radar(wallets_ranking_hour=9)
+        radar._wallet_watcher.wallets = {
+            WALLET: FollowedWallet("ballena", trusted=True),
+            OTRA: FollowedWallet("ballena 2"),
+            tercera: FollowedWallet("nueva"),
+        }
+        for wallet, ret in [(WALLET, -10), (OTRA, 20)]:
+            for i in range(RANKING_MIN_TOKENS):
+                row_id = radar._tracker.record(_pair(f"T{i}"), sent=True)
+                self._anotar(radar, row_id, {"wallet": wallet, "token": f"T{i}", "ret_60m_pct": ret})
+        # Una sola compra medida no basta para entrar.
+        row_id = radar._tracker.record(_pair("X"), sent=True)
+        self._anotar(radar, row_id, {"wallet": tercera, "token": "X", "ret_60m_pct": 99})
+        alerter = _FakeAlerter()
+        radar._next_ranking = 0.0
+        await radar.send_ranking(alerter)
+        [texto] = alerter.textos
+        self.assertIn("1. ballena 2: +20% a 1 h", texto)
+        self.assertIn("2. ⭐ ballena: -10% a 1 h", texto)
+        self.assertNotIn("nueva", texto)
+        self.assertIn(": 1 wallets", texto)
+        self.assertGreater(radar._next_ranking, time.time())
+
+    async def test_ranking_apagado_por_defecto(self):
+        self.assertIsNone(self._radar()._next_ranking)
+        self.assertIsNotNone(self._radar(wallets_ranking_hour=0)._next_ranking)
+
+    def test_proxima_hora_del_ranking(self):
+        from datetime import datetime
+        antes = datetime(2026, 10, 24, 8, 30).timestamp()
+        self.assertEqual(next_daily(antes, 9), datetime(2026, 10, 24, 9).timestamp())
+        # Justo a la hora (recién mandado) pasa al día siguiente.
+        a_las_9 = datetime(2026, 10, 24, 9).timestamp()
+        self.assertEqual(next_daily(a_las_9, 9), datetime(2026, 10, 25, 9).timestamp())
 
     async def test_la_comision_de_transferencia_llega_al_aviso_y_al_registro(self):
         radar = self._radar([_buy()], [_buy(mint="SIN")], fees={"TOK": 300})

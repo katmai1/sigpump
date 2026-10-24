@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 from telegram.error import RetryAfter
 
-from sigpump.telegram import TelegramAlerter
+from sigpump.telegram import RANKING_BOTTOM, RANKING_TOP, TelegramAlerter, format_ranking
 from sigpump.wallets import WalletBuy, WalletSignal
 
 TOKEN_FALSO = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
@@ -48,6 +48,16 @@ class TestFormatMessage(unittest.TestCase):
             with self.subTest(fee=fee):
                 texto = _alerter().format_message(_pair(), dataclasses.replace(_SIGNAL, transfer_fee_bps=fee))
                 self.assertNotIn("Comisión", texto)
+
+    def test_historial_de_la_wallet(self):
+        con = _alerter().format_message(
+            _pair(), dataclasses.replace(_SIGNAL, track_record=((60, 3.4, 14), (240, -2.0, 12), (1440, -28.0, 9)))
+        )
+        self.assertIn("📊 Historial: +3% a 1 h, -2% a 4 h, -28% a 24 h (14 tokens)", con)
+        sin = _alerter().format_message(_pair(), dataclasses.replace(_SIGNAL, track_record=()))
+        self.assertIn("📊 Sin historial medido todavía", sin)
+        # Sin registro no hay historial que mostrar.
+        self.assertNotIn("📊", _alerter().format_message(_pair(), _SIGNAL))
 
     def test_mensaje_completo(self):
         texto = _alerter().format_message(_pair(), _SIGNAL)
@@ -110,6 +120,25 @@ class TestFormatMessage(unittest.TestCase):
             "Cap. mercado: $999,000",
             _alerter().format_message(_pair(marketCap=None, fdv=999_000), _SIGNAL),
         )
+
+
+class TestRanking(unittest.TestCase):
+    def test_ranking_con_las_wallets_y_las_que_no_tienen_datos(self):
+        texto = format_ranking(
+            [("<buena>", True, ((60, 8.0, 12), (240, 1.0, 10))), ("mala", False, ((60, -9.0, 6),))], 3, 5
+        )
+        self.assertIn("1. ⭐ &lt;buena&gt;: +8% a 1 h, +1% a 4 h (12 tokens)", texto)
+        self.assertIn("2. mala: -9% a 1 h (6 tokens)", texto)
+        self.assertIn("menos de 5 tokens medidos): 3 wallets", texto)
+
+    def test_con_muchas_solo_los_extremos(self):
+        total = RANKING_TOP + RANKING_BOTTOM + 3
+        filas = [(f"w{i}", False, ((60, float(-i), 5),)) for i in range(1, total + 1)]
+        lineas = format_ranking(filas, 0, 5).splitlines()[1:]
+        self.assertEqual(len(lineas), RANKING_TOP + RANKING_BOTTOM + 1)
+        self.assertTrue(lineas[0].startswith("1. w1:"))
+        self.assertEqual(lineas[RANKING_TOP], "…")
+        self.assertTrue(lineas[-1].startswith(f"{total}. w{total}:"))
 
 
 class TestMomentum(unittest.TestCase):

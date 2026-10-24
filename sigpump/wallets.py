@@ -29,6 +29,7 @@ import aiohttp  # type: ignore[import-not-found]
 
 from sigpump.blacklist import ABANDONED_REASON, Blacklist
 from sigpump.solana import RpcClient, redact
+from sigpump.tracker import TrackRecord
 from sigpump.wallet_list import FollowedWallet, WalletList
 
 log = logging.getLogger()
@@ -101,12 +102,15 @@ class WalletSignal:
     en el mismo token hace poco (confluencia). `update` marca un token ya
     avisado al que se sumaron wallets nuevas y `bonding_curve` uno que
     todavía no se graduó a un AMM. `transfer_fee_bps` es la comisión de
-    transferencia del token (Token-2022), None si no se sabe."""
+    transferencia del token (Token-2022), None si no se sabe.
+    `track_record` es cómo le fue a la wallet en el registro (() sin tokens
+    medidos, None sin registro)."""
     buy: WalletBuy
     others: tuple[str, ...] = field(default_factory=tuple)
     update: bool = False
     bonding_curve: bool = False
     transfer_fee_bps: int | None = None
+    track_record: TrackRecord | None = None
 
 
 def _token_amounts(balances: object, owner: str) -> dict[str, float]:

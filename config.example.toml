@@ -93,6 +93,12 @@ loser_max_median_ret_pct = -50
 # A 30 min casi todas las compras parecían buenas y se hundían horas o días
 # después; a 24 h se ve.
 loser_checkpoint_minutes = 1440
+# Hora local (0-23) a la que llega cada día por Telegram el ranking de las
+# wallets seguidas por la mediana de sus tokens a 1 h, 4 h y 24 h, para ver
+# cuáles merecen el `*` de confianza. -1 = no mandarlo. 2026-10-24: ordenando
+# las wallets por su mediana hasta el 19-oct, el mejor tercio dio después +3%
+# a 1 h y el peor -9% (Spearman +0.76); el historial predice.
+ranking_hour = 9
 # Filtros del par para avisar de una compra de wallet (0 = sin filtro). Con
 # los primeros datos, los pares de menos de 2 h daban una mediana de -67% a
 # 30 min, los que ya subían más de 50% en 1h -25% y los de market cap por

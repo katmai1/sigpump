@@ -11,6 +11,7 @@ permite ajustar los filtros con datos en vez de a ojo.
 
 import logging
 import sqlite3
+import statistics
 import time
 from datetime import datetime
 from pathlib import Path
@@ -54,6 +55,17 @@ def format_minutes(minutes: int) -> str:
 
 
 _LAST = CHECKPOINTS_MINUTES[-1]
+
+# Checkpoints del historial de cada wallet que se muestra en el aviso y en el
+# ranking diario. 2026-10-24: ordenando las wallets por su mediana hasta el
+# 19-oct, el mejor tercio dio después +3% a 1 h y el peor -9% (16 wallets,
+# Spearman +0.76); a 4 h -2% frente a -38% y a 24 h -28% frente a -65%. El
+# pasado de una wallet sí dice algo de lo que hará.
+TRACK_RECORD_MINUTES = (60, 240, 1440)
+
+# Historial de una wallet: (minutos, mediana en %, tokens medidos) por cada
+# checkpoint de TRACK_RECORD_MINUTES que tenga alguno medido.
+TrackRecord = tuple[tuple[int, float, int], ...]
 
 # Columnas de la tabla `alertas` (además de `id`) y su tipo. Al abrir una
 # base creada por una versión anterior se agregan las que falten; las que
@@ -387,12 +399,12 @@ class AlertTracker:
             for row in rows
         }
 
-    def wallet_returns(self, minutes: int = TRACKING_MINUTES) -> dict[str, list[float]]:
+    def wallet_returns(self, minutes: int = TRACKING_MINUTES, wallet: str | None = None) -> dict[str, list[float]]:
         """Wallet -> rendimiento a `minutes` (uno de CHECKPOINTS_MINUTES) de
         la primera compra registrada de cada token (avisada o no, pasara o no
         los filtros del par: el par no cambia lo bien que elige la wallet),
         solo las ya medidas. Una por token: las compras repetidas del mismo
-        token no deben pesar más."""
+        token no deben pesar más. Con `wallet`, solo la de esa."""
         if minutes not in CHECKPOINTS_MINUTES:
             raise ValueError(f"Sin checkpoint a {minutes} min: {CHECKPOINTS_MINUTES}")
         column = f"ret_{minutes}m_pct"
@@ -403,8 +415,9 @@ class AlertTracker:
             rows = conn.execute(
                 f"SELECT wallet, {column} AS ret FROM alertas WHERE id IN ("
                 "SELECT MIN(id) FROM alertas WHERE tipo = 'wallet' AND wallet IS NOT NULL "
-                "AND COALESCE(bonding_curve, 0) = 0 "
-                f"GROUP BY wallet, token) AND {column} IS NOT NULL"
+                "AND COALESCE(bonding_curve, 0) = 0 AND (:wallet IS NULL OR wallet = :wallet) "
+                f"GROUP BY wallet, token) AND {column} IS NOT NULL",
+                {"wallet": wallet},
             ).fetchall()
         except sqlite3.Error as exc:
             log.warning("No se pudo leer %s: %s", self._path, exc)
@@ -413,6 +426,19 @@ class AlertTracker:
         for row in rows:
             returns.setdefault(row["wallet"], []).append(row["ret"])
         return returns
+
+    def track_records(self, wallet: str | None = None) -> dict[str, TrackRecord]:
+        """Wallet -> su historial (medianas de wallet_returns() en cada
+        checkpoint de TRACK_RECORD_MINUTES). Con `wallet`, solo el de esa."""
+        by_minutes = {minutes: self.wallet_returns(minutes, wallet) for minutes in TRACK_RECORD_MINUTES}
+        wallets = {w for returns in by_minutes.values() for w in returns}
+        return {
+            w: tuple(
+                (minutes, statistics.median(returns[w]), len(returns[w]))
+                for minutes, returns in by_minutes.items() if returns.get(w)
+            )
+            for w in wallets
+        }
 
     async def update(self, client: DexScreenerClient, chain_id: str) -> None:
         """Muestrea el precio actual de las filas a las que les toca (un

@@ -132,6 +132,15 @@ avisar no dice nada de la wallet. La de resultados las cuenta todas (menos
 las de bonding curve): elegir mal tokens es elegir mal aunque no se avisen,
 y con los filtros estrictos casi nunca llegaría a tener tokens medidos.
 
+Cada aviso lleva el historial de la wallet en el registro: la mediana a 1 h,
+4 h y 24 h de la primera compra de cada token (las mismas que cuenta la lista
+negra por resultados), con los tokens medidos. Con `ranking_hour` (hora local,
+-1 = apagado) llega además cada día un ranking de las wallets seguidas con al
+menos 5 tokens medidos a 1 h, de mejor a peor, para decidir a cuáles poner el
+`*` de confianza. Con los datos de octubre el pasado de una wallet predice:
+ordenándolas por su mediana hasta el 19, el mejor tercio dio después +3% a
+1 h y el peor -9%; a 24 h, -28% frente a -65%.
+
 `min_pair_age_minutes`, `max_price_change_h1_pct` y `min_market_cap_usd`
 descartan las compras en pares recién creados, que ya subieron mucho en la
 última hora o de market cap pequeño: con los primeros datos eran las que
@@ -241,7 +250,8 @@ Secciones disponibles:
   tienen que coincidir en un token para avisar), un aviso por token
   (`token_cooldown_minutes`, `realert_new_wallets`), tope de actividad
   (`max_tokens_per_hour`), bots (`max_txs_per_hour`), abandonadas (`max_inactive_days`), lista negra (`blacklist`, `rug_drop_pct`,
-  `loser_min_signals`, `loser_max_median_ret_pct`, `loser_checkpoint_minutes`) y filtros del par
+  `loser_min_signals`, `loser_max_median_ret_pct`, `loser_checkpoint_minutes`), ranking diario
+  (`ranking_hour`) y filtros del par
   (`min_pair_age_minutes`, `max_price_change_h1_pct`, `max_price_change_m5_pct`,
   `min_market_cap_usd`, `min_txns_m5`, `min_volume_h1_usd`, `max_turnover_h1`) y avisos en bonding
   curve (`bonding_curve`).

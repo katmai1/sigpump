@@ -12,6 +12,7 @@ import dataclasses
 import logging
 import re
 import statistics
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import aiohttp  # type: ignore[import-not-found]
@@ -23,8 +24,8 @@ from sigpump.filters import first_failing, pair_rejection, venue_reason
 from sigpump.screener import DexScreenerClient
 from sigpump.solana import RpcClient, TokenAuthorities
 from sigpump.summary import Summary
-from sigpump.telegram import TelegramAlerter
-from sigpump.tracker import AlertTracker, format_minutes, pair_from_row
+from sigpump.telegram import TelegramAlerter, format_ranking
+from sigpump.tracker import TRACK_RECORD_MINUTES, AlertTracker, format_minutes, pair_from_row
 from sigpump.util import liquidity_usd, normalize_address
 from sigpump.wallets import WalletBuy, WalletSignal, WalletWatcher, ws_url
 
@@ -37,6 +38,18 @@ BONDING_CURVE_DEX_IDS = {"pumpfun", "meteoradbc", "launchlab", "moonshot"}
 # token, wallet hiperactiva): esas compras sí pasaron sus filtros. Solo se
 # usa para las filas registradas antes de que existiera pasa_filtros_par.
 _NOT_PAIR_REASON_RE = re.compile(r"\d+ de \d+ wallets$|token ya avisado|wallet hiperactiva")
+# Tokens medidos a TRACK_RECORD_MINUTES[0] que necesita una wallet para entrar
+# en el ranking diario: con menos, su mediana es casi azar. Es el mismo mínimo
+# que se usó para comprobar que el historial predice (2026-10-24).
+RANKING_MIN_TOKENS = 5
+
+
+def next_daily(now: float, hour: int) -> float:
+    """Epoch de la próxima vez, después de `now`, que el reloj local marque `hour`:00."""
+    moment = datetime.fromtimestamp(now).replace(hour=hour, minute=0, second=0, microsecond=0)
+    if moment.timestamp() <= now:
+        moment += timedelta(days=1)
+    return moment.timestamp()
 
 
 def _mint(pair: dict) -> str:
@@ -73,6 +86,8 @@ class MemecoinRadar:
         self._summary = Summary()
         # Se crea en run(), con la sesión HTTP; el resumen cuenta sus llamadas.
         self._rpc: RpcClient | None = None
+        hour = config.wallets_ranking_hour
+        self._next_ranking = next_daily(time.time(), hour) if hour >= 0 and self._tracker else None
 
     def restore_cooldowns(self) -> None:
         """Recupera del registro las compras recientes de wallets. Sin esto un
@@ -322,6 +337,10 @@ class MemecoinRadar:
         """Envía el aviso y lo registra. Si Telegram falla no se registra y se
         quita el cooldown de la wallet: su próxima compra lo vuelve a intentar."""
         buy = signal.buy
+        if self._tracker:
+            signal = dataclasses.replace(
+                signal, track_record=self._tracker.track_records(buy.wallet).get(buy.wallet, ())
+            )
         log.info(
             "Wallet%s: %s compró %s (%.2f SOL, %s)%s",
             " (actualización)" if signal.update else "",
@@ -444,7 +463,29 @@ class MemecoinRadar:
                 log.exception("Error siguiendo las wallets")
             if self._summary.due():
                 self._log_summary()
+            if self._next_ranking is not None and time.time() >= self._next_ranking:
+                await self.send_ranking(alerter)
             await asyncio.sleep(self._config.wallets_interval_seconds)
+
+    async def send_ranking(self, alerter: TelegramAlerter) -> None:
+        """Manda el ranking diario de las wallets seguidas por su historial en
+        el registro, para ver cuáles merecen el `*` de confianza y cuáles
+        sobran. Si falla se loguea y se espera al día siguiente."""
+        self._next_ranking = next_daily(time.time(), self._config.wallets_ranking_hour)
+        watcher = self._wallet_watcher
+        if not (self._tracker and watcher and watcher.wallets):
+            return
+        records = self._tracker.track_records()
+        rows = []
+        for wallet, info in watcher.wallets.items():
+            record = records.get(wallet, ())
+            if record and record[0][0] == TRACK_RECORD_MINUTES[0] and record[0][2] >= RANKING_MIN_TOKENS:
+                rows.append((info.label, info.trusted, record))
+        rows.sort(key=lambda row: row[2][0][1], reverse=True)
+        try:
+            await alerter.send_text(format_ranking(rows, len(watcher.wallets) - len(rows), RANKING_MIN_TOKENS))
+        except Exception:
+            log.exception("Error enviando el ranking de wallets")
 
     def _log_summary(self) -> None:
         watcher = self._wallet_watcher

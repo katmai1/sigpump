@@ -273,6 +273,28 @@ class TestAlertTracker(unittest.IsolatedAsyncioTestCase):
             tracker.update_row(row_id, {"wallet": "W", "token": token, **campos})
         self.assertEqual(sorted(tracker.wallet_returns()["W"]), [-80, 5])
 
+    def test_wallet_returns_de_una_sola_wallet(self):
+        tracker = self._tracker()
+        for wallet, ret in [("W", 5), ("OTRA", -40)]:
+            row_id = tracker.record(_pair(), sent=True)
+            tracker.update_row(row_id, {"wallet": wallet, "ret_30m_pct": ret})
+        self.assertEqual(tracker.wallet_returns(wallet="W"), {"W": [5]})
+        self.assertEqual(tracker.wallet_returns(wallet="NADIE"), {})
+
+    def test_historial_con_las_medianas_de_cada_checkpoint(self):
+        """Las de 24 h tardan un día en medirse: el historial lleva los
+        checkpoints que tengan algo, cada uno con sus tokens."""
+        tracker = self._tracker()
+        for token, campos in [
+            ("A", {"ret_60m_pct": 10, "ret_240m_pct": -20, "ret_1440m_pct": -50}),
+            ("B", {"ret_60m_pct": -4, "ret_240m_pct": 30}),
+            ("C", {"ret_60m_pct": 2}),
+        ]:
+            row_id = tracker.record(_pair(), sent=True)
+            tracker.update_row(row_id, {"wallet": "W", "token": token, **campos})
+        self.assertEqual(tracker.track_records(), {"W": ((60, 2, 3), (240, 5, 2), (1440, -50, 1))})
+        self.assertEqual(tracker.track_records("OTRA"), {})
+
     async def test_bonding_curve_sigue_el_token_tras_graduarse(self):
         """Al graduarse el token se muda de la curva a un pool del AMM: se
         sigue el de más liquidez del token y no el pool de la alerta."""

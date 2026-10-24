@@ -193,10 +193,16 @@ class _FakeAutoridades:
 class _FakeAlerter:
     def __init__(self):
         self.wallet: list[tuple[dict, WalletSignal]] = []
+        # Mensajes que no son avisos (el ranking diario).
+        self.textos: list[str] = []
 
     async def send(self, pair, wallet):
         await asyncio.sleep(0)
         self.wallet.append((pair, wallet))
+
+    async def send_text(self, text):
+        await asyncio.sleep(0)
+        self.textos.append(text)
 
 
 class ConFicheroDeWallets(unittest.IsolatedAsyncioTestCase):

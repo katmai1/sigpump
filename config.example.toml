@@ -64,27 +64,29 @@ token_cooldown_minutes = 0
 realert_new_wallets = 2
 # Una wallet que compra más tokens distintos que esto en una hora (un bot o un
 # degen que entra en todo) no avisa ni cuenta para la confluencia y, con
-# blacklist_file, va a la lista negra. 0 = sin tope.
+# blacklist, va a la lista negra. 0 = sin tope.
 max_tokens_per_hour = 0
 # Una wallet con más transacciones que esto en una hora es un bot (los de
-# trading hacen cientos por minuto): con blacklist_file va a la lista negra
+# trading hacen cientos por minuto): con blacklist va a la lista negra
 # antes de leerlas, porque cada una cuesta una consulta al RPC. 0 = sin tope.
 max_txs_per_hour = 300
 # Una wallet sin ninguna transacción en estos días está abandonada: con
-# blacklist_file va a la lista negra. 0 = no hacerlo.
+# blacklist va a la lista negra durante otros tantos días, y al acabar se
+# comprueba si volvió a operar (si no, vuelve a entrar). 0 = no hacerlo.
 max_inactive_days = 30
-# Lista negra: sus wallets se quitan de `file` y no se vuelven a seguir.
-# Mismo formato que `file`. Las entradas cuyo motivo empieza por
-# "hasta <fecha ISO>" son temporales: la wallet se deja de consultar hasta
-# esa fecha, pero sigue en `file`. Vacío = sin lista negra.
-blacklist_file = ""
+# Lista negra, en la tabla lista_negra de [radar].alert_log_path: sus wallets
+# se quitan de `file` y no se vuelven a seguir. Las entradas con `hasta` son
+# temporales: la wallet se deja de consultar hasta esa fecha, pero sigue en
+# `file`. Un blacklist_file de versiones anteriores se pasa a la base al
+# arrancar y se renombra a .importado.
+blacklist = false
 # Una wallet con una compra que cae este % en el seguimiento (rug) entra sola
 # en la lista negra. 0 = no hacerlo.
 rug_drop_pct = 90
 # Lista negra automática por resultados: una wallet con al menos
 # loser_min_signals tokens medidos cuya mediana a loser_checkpoint_minutes
 # es loser_max_median_ret_pct o peor entra sola en la lista negra (requiere
-# blacklist_file y alert_log_path). 0 = no hacerlo.
+# blacklist). 0 = no hacerlo.
 loser_min_signals = 5
 loser_max_median_ret_pct = -50
 # Checkpoint del registro con el que se mide: 5, 15, 30, 60, 240 o 1440 min.

@@ -16,13 +16,14 @@ from pathlib import Path
 
 import aiohttp  # type: ignore[import-not-found]
 
+from sigpump.blacklist import Blacklist
 from sigpump.config import Config
 from sigpump.screener import DexScreenerClient
 from sigpump.solana import TokenAuthorities
 from sigpump.telegram import TelegramAlerter
 from sigpump.tracker import AlertTracker, format_minutes
 from sigpump.util import normalize_address, to_float
-from sigpump.wallets import WalletBuy, WalletSignal, WalletWatcher, ws_url
+from sigpump.wallets import WalletBuy, WalletSignal, WalletWatcher, import_blacklist_file, ws_url
 
 log = logging.getLogger()
 
@@ -251,7 +252,7 @@ class MemecoinRadar:
         que luego hizo rug (cayó [wallets].rug_drop_pct en el seguimiento)."""
         watcher = self._wallet_watcher
         drop = self._config.wallets_rug_drop_pct
-        if not (self._tracker and watcher and drop and self._config.wallets_blacklist_file):
+        if not (self._tracker and watcher and drop and self._config.wallets_blacklist):
             return
         for wallet, reason in self._tracker.rug_wallets(drop).items():
             info = watcher.wallets.get(wallet)
@@ -271,7 +272,7 @@ class MemecoinRadar:
         hace perder."""
         watcher = self._wallet_watcher
         cfg = self._config
-        if not (self._tracker and watcher and cfg.wallets_loser_min_signals and cfg.wallets_blacklist_file):
+        if not (self._tracker and watcher and cfg.wallets_loser_min_signals and cfg.wallets_blacklist):
             return
         minutes = cfg.wallets_loser_checkpoint_minutes
         for wallet, returns in self._tracker.wallet_returns(minutes).items():
@@ -350,7 +351,7 @@ class MemecoinRadar:
         """Mete en la lista negra la wallet de `buy` si pasó de
         [wallets].max_tokens_per_hour: compra de todo y no sirve copiarla."""
         watcher = self._wallet_watcher
-        if not (watcher and self._config.wallets_blacklist_file and self._hyperactive(buy.wallet)):
+        if not (watcher and self._config.wallets_blacklist and self._hyperactive(buy.wallet)):
             return
         if buy.wallet not in watcher.wallets:
             return
@@ -520,6 +521,16 @@ class MemecoinRadar:
         )
         # `async with alerter` valida el token al arrancar y cierra el cliente
         # HTTP de Telegram al salir.
+        blacklist = None
+        if self._config.wallets_blacklist:
+            blacklist = Blacklist(Path(self._config.alert_log_path))
+            if self._config.wallets_blacklist_file:
+                try:
+                    import_blacklist_file(
+                        blacklist, Path(self._config.wallets_blacklist_file), Path(self._config.wallets_file)
+                    )
+                except OSError as exc:
+                    log.error("No se pudo pasar la lista negra a la base: %s", exc)
         async with aiohttp.ClientSession() as session, alerter:
             client = DexScreenerClient(session)
             if self._config.check_token_authorities:
@@ -529,7 +540,7 @@ class MemecoinRadar:
                 self._config.solana_rpc_url,
                 Path(self._config.wallets_file),
                 self._config.wallets_min_sol,
-                Path(self._config.wallets_blacklist_file) if self._config.wallets_blacklist_file else None,
+                blacklist,
                 self._config.wallets_full_poll_minutes * 60,
                 self._config.wallets_max_txs_per_hour,
                 self._config.wallets_max_inactive_days * 86400,

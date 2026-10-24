@@ -161,6 +161,16 @@ class TestFromToml(unittest.TestCase):
         self.assertFalse(config.wallets_websocket)
         self.assertEqual(config.wallets_min_market_cap_usd, 50_000)
 
+    def test_lista_negra(self):
+        self.assertFalse(Config.from_toml(self._write("")).wallets_blacklist)
+        self.assertTrue(Config.from_toml(self._write("[wallets]\nblacklist = true\n")).wallets_blacklist)
+        # Un config de antes con blacklist_file sigue teniendo lista negra.
+        viejo = Config.from_toml(self._write('[wallets]\nblacklist_file = "negra.txt"\n'))
+        self.assertTrue(viejo.wallets_blacklist)
+        self.assertEqual(viejo.wallets_blacklist_file, "negra.txt")
+        with self.assertRaises(ValueError):
+            Config(wallets_blacklist=True, alert_log_path="")
+
     def test_clave_desconocida_en_solana_avisa(self):
         with self.assertLogs(level=logging.WARNING) as logs:
             Config.from_toml(self._write("[solana]\nrcp_url = 'x'\n"))

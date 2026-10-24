@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+from sigpump.blacklist import Blacklist
 from sigpump.radar import MemecoinRadar
 from sigpump.telegram import TelegramAlerter
 from sigpump.wallets import (
@@ -21,9 +22,7 @@ from sigpump.wallets import (
     WalletBuy,
     WalletSignal,
     WalletWatcher,
-    add_to_blacklist,
-    load_blacklist,
-    load_temporary_blacklist,
+    import_blacklist_file,
     load_wallets,
     parse_buys,
     only_transfers,
@@ -35,6 +34,16 @@ WALLET = "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1"
 OTRA = "7Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j9"
 USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 TOKEN = "TokenMint1111111111111111111111111111111pump"
+
+
+def _permanentes(negra):
+    return {address for address, until in negra.entries().items() if until is None}
+
+
+def _motivos(negra):
+    """Las entradas de la lista negra, una por línea como en el fichero de antes."""
+    rows = negra._db().execute("SELECT wallet, motivo FROM lista_negra ORDER BY timestamp").fetchall()
+    return "".join(f"{wallet}  # {reason}\n" for wallet, reason in rows)
 
 
 def _saldo(mint, cantidad, owner=WALLET, decimals=6):
@@ -109,37 +118,65 @@ class TestLoadWallets(unittest.TestCase):
 
     def test_las_de_la_lista_negra_se_eliminan_del_fichero(self):
         self.path.write_text(f"{WALLET}  # ballena\n{OTRA}  # rug\n", encoding="utf-8")
-        negra = self.path.with_name("negra.txt")
-        add_to_blacklist(negra, OTRA, "rug NGU -96%")
-        wallets = load_wallets(self.path, load_blacklist(negra))
+        wallets = load_wallets(self.path, {OTRA})
         self.assertEqual(list(wallets), [WALLET])
         self.assertEqual(self.path.read_text(encoding="utf-8"), f"{WALLET}  # ballena\n")
 
-    def test_lista_negra_sin_fichero_esta_vacia(self):
-        self.assertEqual(load_blacklist(self.path.with_name("no-existe.txt")), set())
 
-    def test_las_temporales_no_se_eliminan_del_fichero(self):
-        self.path.write_text(f"{WALLET}  # ballena\n{OTRA}  # bot\n", encoding="utf-8")
-        negra = self.path.with_name("negra.txt")
+class TestBlacklist(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+        self.negra = Blacklist(self.dir / "alertas.db")
+        self.addCleanup(self.negra.close)
+
+    def test_vacia(self):
+        self.assertEqual(self.negra.entries(), {})
+
+    def test_permanente_y_temporal(self):
         hasta = time.time() + 3600
-        add_to_blacklist(negra, OTRA, "bot: 12 tokens en 1h", until=hasta)
-        self.assertEqual(load_blacklist(negra), set())
-        self.assertAlmostEqual(load_temporary_blacklist(negra)[OTRA], hasta, delta=1)
-        self.assertEqual(list(load_wallets(self.path, load_blacklist(negra))), [WALLET, OTRA])
+        self.negra.add(WALLET, "rug NGU -96%")
+        self.negra.add(OTRA, "abandonada", until=hasta)
+        self.assertEqual(self.negra.entries(), {WALLET: None, OTRA: hasta})
+        self.assertEqual(self.negra.reason(WALLET), "rug NGU -96%")
 
     def test_las_temporales_vencidas_se_ignoran_y_se_limpian(self):
-        negra = self.path.with_name("negra.txt")
-        add_to_blacklist(negra, OTRA, "bot", until=time.time() - 1)
-        self.assertEqual(load_temporary_blacklist(negra), {})
-        add_to_blacklist(negra, WALLET, "rug")
-        self.assertEqual(negra.read_text(encoding="utf-8"), f"{WALLET}  # rug\n")
+        self.negra.add(OTRA, "bot", until=time.time() - 1)
+        self.assertEqual(self.negra.entries(), {})
+        self.negra.add(WALLET, "rug")
+        self.assertEqual(_motivos(self.negra), f"{WALLET}  # rug\n")
 
     def test_la_permanente_gana_a_la_temporal(self):
-        negra = self.path.with_name("negra.txt")
-        add_to_blacklist(negra, OTRA, "bot", until=time.time() + 3600)
-        add_to_blacklist(negra, OTRA, "rug")
-        self.assertEqual(load_blacklist(negra), {OTRA})
-        self.assertEqual(load_temporary_blacklist(negra), {})
+        self.negra.add(OTRA, "bot", until=time.time() + 3600)
+        self.negra.add(OTRA, "rug")
+        self.negra.add(OTRA, "abandonada", until=time.time() + 3600)
+        self.assertEqual(self.negra.entries(), {OTRA: None})
+        self.assertEqual(self.negra.reason(OTRA), "rug")
+
+    def test_importa_el_fichero_de_antes(self):
+        wallets_txt, fichero = self.dir / "wallets.txt", self.dir / "negra.txt"
+        wallets_txt.write_text(f"{WALLET}  # ballena", encoding="utf-8")
+        tercera = "8Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j8"
+        fichero.write_text(
+            f"{WALLET}  # ballena: rug NGU -96%\n"
+            f"{OTRA}  # ab12…cd34: abandonada, 9 días sin actividad\n"
+            f"{tercera}  # hasta 2000-01-01T00:00:00+00:00 · vencida\n",
+            encoding="utf-8",
+        )
+        import_blacklist_file(self.negra, fichero, wallets_txt)
+        self.assertFalse(fichero.exists())
+        self.assertTrue(fichero.with_name("negra.txt.importado").exists())
+        self.assertEqual(self.negra.reason(WALLET), "ballena: rug NGU -96%")
+        self.assertIsNone(self.negra.reason(tercera))
+        # La abandonada vuelve al fichero de wallets, para comprobarla ya.
+        self.assertEqual(self.negra.entries(), {WALLET: None})
+        self.assertIn("abandonada", self.negra.reason(OTRA))
+        self.assertEqual(
+            wallets_txt.read_text(encoding="utf-8"), f"{WALLET}  # ballena\n{OTRA}  # ab12…cd34\n"
+        )
+        # Ya importado, no hace nada.
+        import_blacklist_file(self.negra, fichero, wallets_txt)
 
 
 class TestParseBuys(unittest.TestCase):
@@ -239,7 +276,7 @@ class _FakeRpc:
 
 class TestWalletWatcher(unittest.IsolatedAsyncioTestCase):
     async def test_blacklist_deja_de_seguir_y_quita_del_fichero(self):
-        negra = self.path.with_name("negra.txt")
+        negra = Blacklist(self.path.with_name("negra.db"))
         watcher = WalletWatcher(_FakeRpc(firmas=[]), "http://rpc", self.path, 0.1, negra)
         watcher.reload()
         watcher.blacklist(WALLET, "ballena: rug NGU -96%")
@@ -247,10 +284,10 @@ class TestWalletWatcher(unittest.IsolatedAsyncioTestCase):
         watcher.reload()
         self.assertEqual(watcher.wallets, {})
         self.assertEqual(self.path.read_text(encoding="utf-8"), "")
-        self.assertIn(WALLET, load_blacklist(negra))
+        self.assertIn(WALLET, _permanentes(negra))
 
     async def test_blacklist_temporal_deja_de_consultarla_hasta_que_acaba(self):
-        negra = self.path.with_name("negra.txt")
+        negra = Blacklist(self.path.with_name("negra.db"))
         rpc = _FakeRpc(firmas=["VIEJA"])
         watcher = WalletWatcher(rpc, "http://rpc", self.path, 0.1, negra)
         await watcher.poll()
@@ -369,43 +406,43 @@ class TestWebSocket(unittest.IsolatedAsyncioTestCase):
         return watcher, ws
 
     async def test_bot_a_la_lista_negra_sin_leer_sus_transacciones(self):
-        negra = self.path.with_name("negra.txt")
+        negra = Blacklist(self.path.with_name("negra.db"))
         rpc = _FakeRpc(firmas=["VIEJA"])
-        watcher, ws = await self._conectado(rpc, blacklist_path=negra, max_txs_per_hour=3)
+        watcher, ws = await self._conectado(rpc, blacklist=negra, max_txs_per_hour=3)
         for i in range(3):
             watcher._handle(_aviso(77, f"TX{i}", logs=_LOGS_SWAP))
         self.assertIn(WALLET, watcher.wallets)
         # Las transferencias y las fallidas también cuentan.
         watcher._handle(_aviso(77, "SPAM", logs=_LOGS_TRANSFERENCIA))
         self.assertEqual(watcher.wallets, {})
-        self.assertIn(WALLET, load_blacklist(negra))
-        self.assertIn("bot, 4 tx en 1h", negra.read_text(encoding="utf-8"))
+        self.assertIn(WALLET, _permanentes(negra))
+        self.assertIn("bot, 4 tx en 1h", _motivos(negra))
         # Los avisos que siguen llegando hasta darse de baja no la apuntan otra vez.
         watcher._handle(_aviso(77, "TX9", logs=_LOGS_SWAP))
-        self.assertEqual(negra.read_text(encoding="utf-8").count(WALLET), 1)
+        self.assertEqual(_motivos(negra).count(WALLET), 1)
         self.assertEqual(await watcher.poll(), [])
         self.assertEqual(rpc.llamadas, [])
         await watcher._sync_subscriptions(ws)
         self.assertEqual(ws.enviados[-1]["method"], "logsUnsubscribe")
 
     async def test_bot_sin_tope_se_sigue(self):
-        negra = self.path.with_name("negra.txt")
+        negra = Blacklist(self.path.with_name("negra.db"))
         rpc = _FakeRpc(firmas=["VIEJA"])
-        watcher, _ = await self._conectado(rpc, blacklist_path=negra)
+        watcher, _ = await self._conectado(rpc, blacklist=negra)
         for i in range(50):
             watcher._handle(_aviso(77, f"TX{i}", logs=_LOGS_SWAP))
         self.assertIn(WALLET, watcher.wallets)
 
     async def test_bot_cuenta_solo_la_ultima_hora(self):
-        negra = self.path.with_name("negra.txt")
+        negra = Blacklist(self.path.with_name("negra.db"))
         rpc = _FakeRpc(firmas=["VIEJA"])
-        watcher, _ = await self._conectado(rpc, blacklist_path=negra, max_txs_per_hour=3)
+        watcher, _ = await self._conectado(rpc, blacklist=negra, max_txs_per_hour=3)
         watcher._activity[WALLET] = {f"VIEJA{i}": time.time() - 3700 for i in range(10)}
         watcher._handle(_aviso(77, "NUEVA", logs=_LOGS_SWAP))
         self.assertIn(WALLET, watcher.wallets)
 
     async def test_bot_detectado_en_la_pasada_completa(self):
-        negra = self.path.with_name("negra.txt")
+        negra = Blacklist(self.path.with_name("negra.db"))
         rpc = _FakeRpc(firmas=["VIEJA"])
         watcher = WalletWatcher(rpc, "http://rpc", self.path, 0.1, negra, max_txs_per_hour=3)
         await watcher.poll()
@@ -413,38 +450,66 @@ class TestWebSocket(unittest.IsolatedAsyncioTestCase):
         rpc.llamadas.clear()
         self.assertEqual(await watcher.poll(), [])
         self.assertEqual([m for m, _ in rpc.llamadas], ["getSignaturesForAddress"])
-        self.assertIn(WALLET, load_blacklist(negra))
+        self.assertIn(WALLET, _permanentes(negra))
 
     async def test_abandonada_a_la_lista_negra(self):
-        negra = self.path.with_name("negra.txt")
+        negra = Blacklist(self.path.with_name("negra.db"))
         rpc = _FakeRpc(firmas=["VIEJA"], horas={"VIEJA": time.time() - 31 * 86400})
         watcher = WalletWatcher(rpc, "http://rpc", self.path, 0.1, negra, max_inactive_seconds=30 * 86400)
         await watcher.poll()
-        self.assertEqual(watcher.wallets, {})
-        self.assertIn(WALLET, load_blacklist(negra))
-        self.assertIn("abandonada, 31 días sin actividad", negra.read_text(encoding="utf-8"))
+        # Por otros 30 días: sigue en el fichero, pero no se consulta.
+        self.assertIn(WALLET, watcher.wallets)
+        self.assertAlmostEqual(negra.entries()[WALLET], time.time() + 30 * 86400, delta=5)
+        self.assertIn("abandonada, 31 días sin actividad", _motivos(negra))
+        self.assertEqual(self.path.read_text(encoding="utf-8"), f"{WALLET}  # ballena\n")
+        rpc.llamadas.clear()
+        await watcher.poll()
+        self.assertEqual(rpc.llamadas, [])
+
+    async def test_abandonada_se_vuelve_a_comprobar_al_acabar(self):
+        negra = Blacklist(self.path.with_name("negra.db"))
+        rpc = _FakeRpc(firmas=["VIEJA"], horas={"VIEJA": time.time() - 31 * 86400})
+        watcher = WalletWatcher(rpc, "http://rpc", self.path, 0.1, negra, max_inactive_seconds=30 * 86400)
+        await watcher.poll()
+        # Al acabar sigue sin operar: vuelve a entrar.
+        negra._db().execute("UPDATE lista_negra SET hasta = ?", (time.time() - 1,))
+        rpc.llamadas.clear()
+        await watcher.poll()
+        self.assertEqual([m for m, _ in rpc.llamadas], ["getSignaturesForAddress"])
+        self.assertGreater(negra.entries()[WALLET], time.time() + 29 * 86400)
+        # Ha vuelto a operar: se sigue otra vez, desde su última firma.
+        negra._db().execute("UPDATE lista_negra SET hasta = ?", (time.time() - 1,))
+        rpc.firmas = ["NUEVA", "VIEJA"]
+        rpc.horas["NUEVA"] = time.time() - 3600
+        rpc.txs["NUEVA"] = _tx(post_tokens=[_saldo(TOKEN, 1)], sol_gastado=1)
+        self.assertEqual(await watcher.poll(), [])
+        self.assertEqual(negra.entries(), {})
+        rpc.firmas = ["OTRA", "NUEVA", "VIEJA"]
+        rpc.horas["OTRA"] = time.time()
+        rpc.txs["OTRA"] = _tx(post_tokens=[_saldo(TOKEN, 1)], sol_gastado=1)
+        self.assertEqual(len(await watcher.poll()), 1)
 
     async def test_activa_hace_poco_se_sigue(self):
-        negra = self.path.with_name("negra.txt")
+        negra = Blacklist(self.path.with_name("negra.db"))
         rpc = _FakeRpc(firmas=["VIEJA"], horas={"VIEJA": time.time() - 29 * 86400})
         watcher = WalletWatcher(rpc, "http://rpc", self.path, 0.1, negra, max_inactive_seconds=30 * 86400)
         await watcher.poll()
         self.assertIn(WALLET, watcher.wallets)
 
     async def test_se_abandona_mientras_se_sigue(self):
-        negra = self.path.with_name("negra.txt")
+        negra = Blacklist(self.path.with_name("negra.db"))
         rpc = _FakeRpc(firmas=["VIEJA"])
         watcher = WalletWatcher(rpc, "http://rpc", self.path, 0.1, negra, max_inactive_seconds=30 * 86400)
         await watcher.poll()
         self.assertIn(WALLET, watcher.wallets)
         watcher._last_active[WALLET] = time.time() - 31 * 86400
         await watcher.poll()
-        self.assertIn(WALLET, load_blacklist(negra))
+        self.assertIn(WALLET, negra.entries())
 
     async def test_un_aviso_del_websocket_cuenta_como_actividad(self):
-        negra = self.path.with_name("negra.txt")
+        negra = Blacklist(self.path.with_name("negra.db"))
         rpc = _FakeRpc(firmas=["VIEJA"])
-        watcher, _ = await self._conectado(rpc, blacklist_path=negra, max_inactive_seconds=30 * 86400)
+        watcher, _ = await self._conectado(rpc, blacklist=negra, max_inactive_seconds=30 * 86400)
         watcher._last_active[WALLET] = time.time() - 31 * 86400
         watcher._handle(_aviso(77, "SPAM", logs=_LOGS_TRANSFERENCIA))
         watcher._next_full_poll = 0.0
@@ -729,10 +794,10 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
 
     async def test_rug_en_bonding_curve_no_echa_a_la_wallet(self):
         tmp = self.path.parent
-        wallets_txt, negra = tmp / "wallets.txt", tmp / "negra.txt"
+        wallets_txt, negra = tmp / "wallets.txt", Blacklist(tmp / "negra.db")
         wallets_txt.write_text(f"{WALLET}  # ballena\n", encoding="utf-8")
         radar = self._radar(
-            [_buy()], wallets_bonding_curve=True, wallets_blacklist_file=str(negra), wallets_rug_drop_pct=90,
+            [_buy()], wallets_bonding_curve=True, wallets_blacklist=True, wallets_rug_drop_pct=90,
         )
         await radar._wallets_once(_FakeClient(pairs=[{**_pair("TOK"), "dexId": "pumpfun"}]), _FakeAlerter())
         radar._tracker.update_row(self._rows()[0]["id"], {"peor_ret_30m_pct": -97.0})
@@ -923,29 +988,29 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
 
     async def test_wallet_hiperactiva_va_a_la_lista_negra(self):
         tmp = self.path.parent
-        wallets_txt, negra = tmp / "wallets.txt", tmp / "negra.txt"
+        wallets_txt, negra = tmp / "wallets.txt", Blacklist(tmp / "negra.db")
         wallets_txt.write_text(f"{WALLET}  # ballena\n{OTRA}  # buena\n", encoding="utf-8")
         compras = [_buy(mint=f"T{i}") for i in range(4)]
-        radar = self._radar(wallets_blacklist_file=str(negra), wallets_max_tokens_per_hour=3)
+        radar = self._radar(wallets_blacklist=True, wallets_max_tokens_per_hour=3)
         watcher = WalletWatcher(None, "http://rpc", wallets_txt, 0.1, negra)
         watcher.reload()
         watcher.poll = AsyncMock(return_value=compras)
         radar._wallet_watcher = watcher
         await radar._wallets_once(_FakeClient(pairs=[_pair(f"T{i}") for i in range(4)]), _FakeAlerter())
-        self.assertIn(WALLET, load_blacklist(negra))
-        self.assertEqual(negra.read_text(encoding="utf-8").count(WALLET), 1)
-        self.assertIn("ballena: hiperactiva, 4 tokens en 1h", negra.read_text(encoding="utf-8"))
+        self.assertIn(WALLET, _permanentes(negra))
+        self.assertEqual(_motivos(negra).count(WALLET), 1)
+        self.assertIn("ballena: hiperactiva, 4 tokens en 1h", _motivos(negra))
         watcher.reload()
         self.assertEqual(list(watcher.wallets), [OTRA])
         self.assertEqual(wallets_txt.read_text(encoding="utf-8"), f"{OTRA}  # buena\n")
 
     async def test_wallet_que_pierde_va_a_la_lista_negra(self):
         tmp = self.path.parent
-        wallets_txt, negra = tmp / "wallets.txt", tmp / "negra.txt"
+        wallets_txt, negra = tmp / "wallets.txt", Blacklist(tmp / "negra.db")
         wallets_txt.write_text(f"{WALLET}  # ballena\n{OTRA}  # buena\n", encoding="utf-8")
         compras = [_buy(mint=f"T{i}") for i in range(3)] + [_buy(wallet=OTRA, mint=f"T{i}") for i in range(3)]
         radar = self._radar(
-            compras, wallets_blacklist_file=str(negra),
+            compras, wallets_blacklist=True,
             wallets_loser_min_signals=3, wallets_loser_max_median_ret_pct=-30,
         )
         await radar._wallets_once(_FakeClient(pairs=[_pair(f"T{i}") for i in range(3)]), _FakeAlerter())
@@ -956,17 +1021,17 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         radar._wallet_watcher.reload()
         radar._blacklist_losers()
         self.assertEqual(list(radar._wallet_watcher.wallets), [OTRA])
-        self.assertIn("ballena: mediana -40% a 30 min en 3 tokens", negra.read_text(encoding="utf-8"))
+        self.assertIn("ballena: mediana -40% a 30 min en 3 tokens", _motivos(negra))
 
     async def test_wallet_que_pierde_se_mide_con_el_checkpoint_pedido(self):
         """A 30 min la mediana es buena, pero a 24 h se hundieron: con
         loser_checkpoint_minutes = 1440 cuenta la de 24 h."""
         tmp = self.path.parent
-        wallets_txt, negra = tmp / "wallets.txt", tmp / "negra.txt"
+        wallets_txt, negra = tmp / "wallets.txt", Blacklist(tmp / "negra.db")
         wallets_txt.write_text(f"{WALLET}  # ballena\n", encoding="utf-8")
         compras = [_buy(mint=f"T{i}") for i in range(3)]
         radar = self._radar(
-            compras, wallets_blacklist_file=str(negra), wallets_loser_min_signals=3,
+            compras, wallets_blacklist=True, wallets_loser_min_signals=3,
             wallets_loser_max_median_ret_pct=-40, wallets_loser_checkpoint_minutes=1440,
         )
         await radar._wallets_once(_FakeClient(pairs=[_pair(f"T{i}") for i in range(3)]), _FakeAlerter())
@@ -976,14 +1041,14 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         radar._wallet_watcher.reload()
         radar._blacklist_losers()
         self.assertEqual(list(radar._wallet_watcher.wallets), [])
-        self.assertIn("ballena: mediana -60% a 24 h en 3 tokens", negra.read_text(encoding="utf-8"))
+        self.assertIn("ballena: mediana -60% a 24 h en 3 tokens", _motivos(negra))
 
     async def test_wallet_con_pocas_senales_no_se_juzga(self):
         tmp = self.path.parent
-        wallets_txt, negra = tmp / "wallets.txt", tmp / "negra.txt"
+        wallets_txt, negra = tmp / "wallets.txt", Blacklist(tmp / "negra.db")
         wallets_txt.write_text(f"{WALLET}  # ballena\n", encoding="utf-8")
         radar = self._radar(
-            [_buy()], wallets_blacklist_file=str(negra),
+            [_buy()], wallets_blacklist=True,
             wallets_loser_min_signals=3, wallets_loser_max_median_ret_pct=-30,
         )
         await radar._wallets_once(_FakeClient(pairs=[_pair("TOK")]), _FakeAlerter())
@@ -1068,16 +1133,16 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
 
     async def test_wallet_que_compra_un_rug_va_a_la_lista_negra(self):
         tmp = self.path.parent
-        wallets_txt, negra = tmp / "wallets.txt", tmp / "negra.txt"
+        wallets_txt, negra = tmp / "wallets.txt", Blacklist(tmp / "negra.db")
         wallets_txt.write_text(f"{WALLET}  # ballena\n{OTRA}  # buena\n", encoding="utf-8")
-        radar = self._radar([_buy()], wallets_blacklist_file=str(negra), wallets_rug_drop_pct=90)
+        radar = self._radar([_buy()], wallets_blacklist=True, wallets_rug_drop_pct=90)
         await radar._wallets_once(_FakeClient(pairs=[_pair("TOK", symbol="NGU")]), _FakeAlerter())
         radar._tracker.update_row(self._rows()[0]["id"], {"peor_ret_30m_pct": -96.0})
         radar._wallet_watcher = WalletWatcher(None, "http://rpc", wallets_txt, 0.1, negra)
         radar._wallet_watcher.reload()
         radar._blacklist_ruggers()
         self.assertEqual(list(radar._wallet_watcher.wallets), [OTRA])
-        self.assertIn("rug NGU -96%", negra.read_text(encoding="utf-8"))
+        self.assertIn("rug NGU -96%", _motivos(negra))
         radar._wallet_watcher.reload()
         self.assertEqual(wallets_txt.read_text(encoding="utf-8"), f"{OTRA}  # buena\n")
 
@@ -1086,11 +1151,11 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         la wallet, aunque ese par nunca se iba a avisar. Para la mediana de
         resultados sí cuentan: elegir mal es elegir mal aunque no se avise."""
         tmp = self.path.parent
-        wallets_txt, negra = tmp / "wallets.txt", tmp / "negra.txt"
+        wallets_txt, negra = tmp / "wallets.txt", Blacklist(tmp / "negra.db")
         wallets_txt.write_text(f"{WALLET}  # ballena\n", encoding="utf-8")
         compras = [_buy(mint=f"T{i}") for i in range(3)]
         radar = self._radar(
-            compras, wallets_blacklist_file=str(negra), wallets_rug_drop_pct=90,
+            compras, wallets_blacklist=True, wallets_rug_drop_pct=90,
             wallets_loser_min_signals=3, wallets_loser_max_median_ret_pct=-30,
             wallets_min_pair_age_minutes=120,
         )
@@ -1103,10 +1168,10 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         radar._wallet_watcher.reload()
         radar._blacklist_ruggers()
         self.assertEqual(list(radar._wallet_watcher.wallets), [WALLET])
-        self.assertFalse(negra.exists())
+        self.assertEqual(_motivos(negra), "")
         radar._blacklist_losers()
         self.assertEqual(list(radar._wallet_watcher.wallets), [])
-        self.assertIn("ballena: mediana -90% a 30 min en 3 tokens", negra.read_text(encoding="utf-8"))
+        self.assertIn("ballena: mediana -90% a 30 min en 3 tokens", _motivos(negra))
 
     async def test_descarte_por_confluencia_pasa_los_filtros_del_par(self):
         radar = self._radar([_buy()], wallets_min_wallets=2)

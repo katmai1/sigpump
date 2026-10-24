@@ -32,6 +32,7 @@ _KNOWN_KEYS: dict[str, set[str]] = {
         "max_tokens_per_hour",
         "max_txs_per_hour",
         "max_inactive_days",
+        "blacklist",
         "blacklist_file",
         "rug_drop_pct",
         "loser_min_signals",
@@ -72,6 +73,7 @@ _FIELD_TYPES: dict[str, tuple[str, tuple[type, ...]]] = {
     "wallets_max_tokens_per_hour": ("[wallets].max_tokens_per_hour", (int,)),
     "wallets_max_txs_per_hour": ("[wallets].max_txs_per_hour", (int,)),
     "wallets_max_inactive_days": ("[wallets].max_inactive_days", _NUMBER),
+    "wallets_blacklist": ("[wallets].blacklist", (bool,)),
     "wallets_blacklist_file": ("[wallets].blacklist_file", (str,)),
     "wallets_rug_drop_pct": ("[wallets].rug_drop_pct", _NUMBER),
     "wallets_loser_min_signals": ("[wallets].loser_min_signals", (int,)),
@@ -141,17 +143,21 @@ class Config:
     wallets_token_cooldown_minutes: float = 0.0
     wallets_realert_new_wallets: int = 2
     # Una wallet que compra más tokens distintos que esto en una hora no
-    # avisa ni cuenta para la confluencia de otras, y con blacklist_file va a
+    # avisa ni cuenta para la confluencia de otras, y con blacklist va a
     # la lista negra. 0 = sin tope.
     wallets_max_tokens_per_hour: int = 0
     # Una wallet con más transacciones que esto en una hora es un bot: con
-    # blacklist_file va a la lista negra antes de leerlas. 0 = sin tope.
+    # blacklist va a la lista negra antes de leerlas. 0 = sin tope.
     wallets_max_txs_per_hour: int = 0
     # Una wallet sin ninguna transacción en estos días está abandonada: con
-    # blacklist_file va a la lista negra. 0 = no hacerlo.
+    # blacklist va a la lista negra por max_inactive_days, y al acabar se
+    # comprueba si volvió a operar. 0 = no hacerlo.
     wallets_max_inactive_days: float = 30.0
-    # Lista negra: sus wallets se quitan del fichero y no se vuelven a seguir.
-    # Vacío = sin lista negra.
+    # Lista negra, en la tabla lista_negra de alert_log_path: sus wallets se
+    # quitan del fichero y no se vuelven a seguir.
+    wallets_blacklist: bool = False
+    # Fichero de lista negra de versiones anteriores: al arrancar se pasa a
+    # la base y se renombra a .importado.
     wallets_blacklist_file: str = ""
     # Una wallet cuya compra cae este % (rug) en el seguimiento entra en la
     # lista negra sola. 0 = no hacerlo.
@@ -260,6 +266,8 @@ class Config:
             )
         if not self.wallets_file:
             raise ValueError("[wallets].file no puede estar vacío")
+        if self.wallets_blacklist and not self.alert_log_path:
+            raise ValueError("[wallets].blacklist necesita [radar].alert_log_path: la lista negra se guarda en esa base")
         if self.wallets_full_poll_minutes <= 0:
             raise ValueError(
                 f"[wallets].full_poll_minutes debe ser > 0 ({self.wallets_full_poll_minutes})"
@@ -322,6 +330,8 @@ class Config:
             wallets_max_tokens_per_hour=wallets.get("max_tokens_per_hour", 0),
             wallets_max_txs_per_hour=wallets.get("max_txs_per_hour", 0),
             wallets_max_inactive_days=wallets.get("max_inactive_days", 30.0),
+            # Un config con blacklist_file de antes sigue teniendo lista negra.
+            wallets_blacklist=wallets.get("blacklist", bool(wallets.get("blacklist_file"))),
             wallets_blacklist_file=wallets.get("blacklist_file", ""),
             wallets_rug_drop_pct=wallets.get("rug_drop_pct", 90.0),
             wallets_loser_min_signals=wallets.get("loser_min_signals", 0),

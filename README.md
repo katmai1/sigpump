@@ -84,21 +84,38 @@ un solo aviso por token en esa ventana; solo se vuelve a avisar, marcado como
 último aviso (0 = no reavisar nunca: con los datos, que coincidieran más
 wallets en un token no lo hacía mejor, sino peor). `max_tokens_per_hour` silencia las wallets que compran de todo
 (bots o degens): ni avisan ni cuentan para la confluencia de las demás, y
-con `blacklist_file` entran en la lista negra.
+con `blacklist` entran en la lista negra.
 
 `max_txs_per_hour` detecta los bots: una wallet con más transacciones que
 eso en la última hora (de cualquier tipo, contadas por su firma antes de
-leerlas) entra en la lista negra con `blacklist_file`. Cada transacción
+leerlas) entra en la lista negra con `blacklist`. Cada transacción
 leída es una consulta al RPC, y un bot de trading con cientos por minuto
 agota los créditos de Helius en horas.
 
+La lista negra (`blacklist = true`) se guarda en la tabla `lista_negra` de
+la base del registro (`alert_log_path`): una fila por wallet con su motivo
+y, si es temporal, `hasta` (epoch). Para meter o sacar una a mano:
+
+```
+sqlite3 alertas.db "INSERT OR REPLACE INTO lista_negra (wallet, motivo) VALUES ('<dirección>', 'a mano')"
+sqlite3 alertas.db "DELETE FROM lista_negra WHERE wallet = '<dirección>'"
+```
+
+Se relee en cada vuelta. Las permanentes se quitan del fichero de wallets:
+para volver a seguir una hay que borrarla de la tabla y añadirla al
+fichero. Un `blacklist_file` de versiones anteriores se pasa a la base al
+arrancar y se renombra a `.importado`.
+
 `max_inactive_days` (30 por defecto) manda a la lista negra, con
-`blacklist_file`, las wallets abandonadas: las que llevan más de esos días
+`blacklist`, las wallets abandonadas: las que llevan más de esos días
 sin ninguna transacción. Se mira al empezar a seguirlas (por la hora de su
 última transacción) y en cada pasada completa; una sin historial cuenta
-desde que se empieza a seguir.
+desde que se empieza a seguir. No es para siempre: siguen en el fichero de
+wallets, no se consultan durante otros `max_inactive_days` y al acabar se
+vuelve a mirar su última transacción; si siguen sin operar, vuelven a
+entrar por el mismo tiempo.
 
-Con `blacklist_file`, también entran solas en la lista negra las wallets cuya
+Con `blacklist`, también entran solas en la lista negra las wallets cuya
 compra cae `rug_drop_pct` (90% por defecto) en el seguimiento, y las que con
 al menos `loser_min_signals` tokens medidos tienen una mediana de
 `loser_max_median_ret_pct` o peor en el checkpoint `loser_checkpoint_minutes`
@@ -216,7 +233,7 @@ Secciones disponibles:
   wallet y token, ventana de confluencia, `min_wallets` (cuántas wallets
   tienen que coincidir en un token para avisar), un aviso por token
   (`token_cooldown_minutes`, `realert_new_wallets`), tope de actividad
-  (`max_tokens_per_hour`), bots (`max_txs_per_hour`), abandonadas (`max_inactive_days`), lista negra (`blacklist_file`, `rug_drop_pct`,
+  (`max_tokens_per_hour`), bots (`max_txs_per_hour`), abandonadas (`max_inactive_days`), lista negra (`blacklist`, `rug_drop_pct`,
   `loser_min_signals`, `loser_max_median_ret_pct`, `loser_checkpoint_minutes`) y filtros del par
   (`min_pair_age_minutes`, `max_price_change_h1_pct`, `max_price_change_m5_pct`,
   `min_market_cap_usd`, `min_txns_m5`, `min_volume_h1_usd`, `max_turnover_h1`) y avisos en bonding

@@ -41,9 +41,6 @@ Python 3.11+ (usa `tomllib`); el `.venv` es 3.13. Dependencias en
 `requirements.txt`: solo `aiohttp` y `python-telegram-bot`. No añadir más sin
 consultarlo.
 
-Hay un test que a veces falla y a veces no. Si falla uno que no tiene que ver
-con el cambio, volver a ejecutarlo antes de investigarlo, y avisar de cuál es.
-
 ## Arquitectura
 
 - `run.py`: CLI, logging, SIGTERM → `MemecoinRadar.run()`.

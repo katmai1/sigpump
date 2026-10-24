@@ -119,15 +119,13 @@ class Buyer:
 
 class Rpc(RpcClient):
     """RpcClient con el mismo ritmo máximo que el seguimiento de wallets, y
-    que cuenta las llamadas y los créditos de Helius gastados."""
+    que cuenta además los créditos de Helius gastados."""
 
     def __init__(self, session: aiohttp.ClientSession, url: str):
         super().__init__(session, url, timeout_seconds=REQUEST_TIMEOUT_SECONDS)
-        self.calls = 0
         self.credits = 0
 
     async def call(self, method: str, params: list) -> object:
-        self.calls += 1
         result = await super().call(method, params)
         self.credits += self._credits(method, result)
         return result

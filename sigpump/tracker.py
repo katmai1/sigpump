@@ -14,7 +14,9 @@ import sqlite3
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Mapping
 
+from sigpump.screener import DexScreenerClient
 from sigpump.util import (
     buy_ratio_m5, liquidity_usd, market_cap_usd, normalize_address, to_float, txns_m5, volume_acceleration,
 )
@@ -74,6 +76,10 @@ COLUMNS: dict[str, str] = {
     # aciertan. Su precio se sigue por el token y no por el pool, que
     # cambia al graduarse.
     "bonding_curve": "INTEGER",
+    # Comisión de transferencia del token (Token-2022) en puntos básicos: 0
+    # sin comisión, NULL si no se pudo consultar. Los retornos no la
+    # descuentan. 2026-10-24: 22 de 604 avisos eran de tokens con un 1% o un 3%.
+    "comision_transferencia_bps": "INTEGER",
     "simbolo": "TEXT",
     "token": "TEXT",
     "pool": "TEXT",
@@ -113,13 +119,18 @@ COLUMNS: dict[str, str] = {
 _PENDING = f"precio_usd > 0 AND {_CHECKPOINT_COLUMNS[-1]} IS NULL AND timestamp > :cutoff"
 
 
-def _tracking(row, elapsed_minutes: float) -> bool:
+# Una fila del registro: sqlite3.Row al leerla de la base, o el dict que
+# devuelven unmarked_wallet_rows() y compañía.
+_Row = sqlite3.Row | Mapping[str, Any]
+
+
+def _tracking(row: _Row, elapsed_minutes: float) -> bool:
     """Si `row` sigue en los primeros TRACKING_MINUTES (con su margen), en
     los que se muestrea en cada vuelta y se anotan el mejor y el peor."""
     return row[_TRACKING_COLUMN] is None and elapsed_minutes < TRACKING_MINUTES + CHECKPOINT_TOLERANCE_MINUTES
 
 
-def _open_checkpoints(row, elapsed_minutes: float) -> list[tuple[int, str]]:
+def _open_checkpoints(row: _Row, elapsed_minutes: float) -> list[tuple[int, str]]:
     """(minutos, columna) de los checkpoints de `row` que faltan y cuya
     ventana está abierta ahora."""
     return [
@@ -128,7 +139,7 @@ def _open_checkpoints(row, elapsed_minutes: float) -> list[tuple[int, str]]:
     ]
 
 
-def _due(row, elapsed_minutes: float) -> bool:
+def _due(row: _Row, elapsed_minutes: float) -> bool:
     """Si hay que muestrear el precio de `row` ahora: en cada vuelta hasta
     anotar el de TRACKING_MINUTES, y después solo dentro de la ventana de un
     checkpoint largo que falte."""
@@ -142,7 +153,7 @@ def _round(value: float | None) -> float | None:
 
 
 
-def pair_from_row(row, dex_id: str = "") -> dict:
+def pair_from_row(row: _Row, dex_id: str = "") -> dict:
     """Un par con la forma de DexScreener armado con lo que record() guardó
     de él, para volver a pasarle los filtros. El dex no se guarda: va
     `dex_id`. Las transacciones de 5 min se guardaron sumadas, y van todas
@@ -403,7 +414,7 @@ class AlertTracker:
             returns.setdefault(row["wallet"], []).append(row["ret"])
         return returns
 
-    async def update(self, client, chain_id: str) -> None:
+    async def update(self, client: DexScreenerClient, chain_id: str) -> None:
         """Muestrea el precio actual de las filas a las que les toca (un
         request a DexScreener cada 30 tokens) y anota los checkpoints
         alcanzados."""

@@ -16,16 +16,17 @@ from pathlib import Path
 
 import aiohttp  # type: ignore[import-not-found]
 
-from sigpump.blacklist import Blacklist
+from sigpump.blacklist import Blacklist, import_blacklist_file
 from sigpump.config import Config
 from sigpump.cooldowns import Cooldowns
-from sigpump.filters import pair_rejection, venue_reason
+from sigpump.filters import first_failing, pair_rejection, venue_reason
 from sigpump.screener import DexScreenerClient
 from sigpump.solana import RpcClient, TokenAuthorities
+from sigpump.summary import Summary
 from sigpump.telegram import TelegramAlerter
 from sigpump.tracker import AlertTracker, format_minutes, pair_from_row
 from sigpump.util import liquidity_usd, normalize_address
-from sigpump.wallets import WalletBuy, WalletSignal, WalletWatcher, import_blacklist_file, ws_url
+from sigpump.wallets import WalletBuy, WalletSignal, WalletWatcher, ws_url
 
 log = logging.getLogger()
 
@@ -53,8 +54,10 @@ class _Decision:
     """Qué hacer con una compra: `reason` es el motivo para no avisar (None =
     se avisa), `pair_ok` si pasó los filtros del par y las autoridades (lo
     usa la lista negra por rug) y `update` si es un reaviso de un token ya
-    avisado al que entraron más wallets."""
+    avisado al que entraron más wallets. `kind` agrupa el motivo en el
+    resumen del log: la clave del filtro del par, "autoridades"..."""
     reason: str | None
+    kind: str = ""
     pair_ok: bool = True
     update: bool = False
 
@@ -67,8 +70,11 @@ class MemecoinRadar:
         self._authorities: TokenAuthorities | None = None
         self._wallet_watcher: WalletWatcher | None = None
         self._cooldowns = Cooldowns(config)
+        self._summary = Summary()
+        # Se crea en run(), con la sesión HTTP; el resumen cuenta sus llamadas.
+        self._rpc: RpcClient | None = None
 
-    def _restore_cooldowns(self) -> None:
+    def restore_cooldowns(self) -> None:
         """Recupera del registro las compras recientes de wallets. Sin esto un
         reinicio olvidaba los cooldowns y la confluencia."""
         if not self._tracker:
@@ -102,7 +108,7 @@ class MemecoinRadar:
         pair = pair_from_row(row, self._config.dex_ids[0] if self._config.dex_ids else "")
         return pair_rejection(self._config, pair, now=row["timestamp"] or 0.0) is None
 
-    def _best_pair_per_token(self, pairs: list[dict], addresses: list[str]) -> list[dict]:
+    def best_pair_per_token(self, pairs: list[dict], addresses: list[str]) -> list[dict]:
         """
         Un token suele cotizar en varios pools. Se queda con el par de mayor
         liquidez por token, que es el que mejor representa su mercado real.
@@ -190,7 +196,7 @@ class MemecoinRadar:
         info = self._wallet_watcher.wallets.get(buy.wallet) if self._wallet_watcher else None
         return info.trusted if info else buy.trusted
 
-    async def _wallets_once(self, client: DexScreenerClient, alerter: TelegramAlerter) -> None:
+    async def run_once(self, client: DexScreenerClient, alerter: TelegramAlerter) -> None:
         """
         Vuelta del seguimiento de wallets: busca sus compras nuevas y avisa
         de cada una, salvo tokens en bonding curve (sin pool en un AMM, si
@@ -216,6 +222,8 @@ class MemecoinRadar:
         buys = await self._wallet_watcher.poll()
         if not buys:
             return
+        summary = self._summary
+        summary.buys += len(buys)
         for buy in buys:
             cooldowns.add_activity(buy)
         for buy in buys:
@@ -224,6 +232,7 @@ class MemecoinRadar:
             WalletSignal(buy, cooldowns.confluence(buy, self._trusted)) for buy in buys
             if not cooldowns.wallet_cooldown_active(buy)
         ]
+        summary.in_cooldown += len(buys) - len(signals)
         if not signals:
             return
 
@@ -235,19 +244,23 @@ class MemecoinRadar:
             pair = pairs.get(buy.mint)
             if pair is None:
                 log.info("Compra de %s en %s ignorada: sin pool fuera de bonding curve", buy.label, buy.mint)
+                summary.no_pool += 1
                 continue
-            if buy.mint in curve_mints:
-                signal = dataclasses.replace(signal, bonding_curve=True)
+            signal = dataclasses.replace(
+                signal, bonding_curve=buy.mint in curve_mints, transfer_fee_bps=self._transfer_fee_bps(buy.mint)
+            )
             # Una wallet que compra en varias tx seguidas da una señal por tx
             # en la misma vuelta: solo cuenta la primera.
             if cooldowns.wallet_cooldown_active(buy):
+                summary.in_cooldown += 1
                 continue
             # Se marca también al descartar, para no registrar una fila por
             # cada compra repetida del mismo token peligroso.
             cooldowns.start_wallet_cooldown(buy)
-            decision = self._decide(signal, pair, unsafe.get(buy.mint))
+            decision = self.decide(signal, pair, unsafe.get(buy.mint))
             if decision.reason:
                 log.info("Compra de %s en %s descartada: %s", buy.label, _symbol(pair), decision.reason)
+                summary.discarded[decision.kind] += 1
                 self._record_wallet(pair, signal, sent=False, reason=decision.reason, pair_ok=decision.pair_ok)
                 continue
             if decision.update:
@@ -261,17 +274,22 @@ class MemecoinRadar:
         mints = list(dict.fromkeys(mints))
         all_pairs = await client.get_pairs_for_tokens(self._config.chain_id, mints)
         amm_pairs = [p for p in all_pairs if p.get("dexId") not in BONDING_CURVE_DEX_IDS]
-        pairs = {_mint(p): p for p in self._best_pair_per_token(amm_pairs, mints)}
+        pairs = {_mint(p): p for p in self.best_pair_per_token(amm_pairs, mints)}
         curve_mints: set[str] = set()
         if self._config.wallets_bonding_curve:
             curve_pairs = [p for p in all_pairs if p.get("dexId") in BONDING_CURVE_DEX_IDS]
-            for pair in self._best_pair_per_token(curve_pairs, [m for m in mints if m not in pairs]):
+            for pair in self.best_pair_per_token(curve_pairs, [m for m in mints if m not in pairs]):
                 mint = _mint(pair)
                 pairs[mint] = pair
                 curve_mints.add(mint)
         return pairs, curve_mints
 
-    def _decide(self, signal: WalletSignal, pair: dict, unsafe_reason: str | None = None) -> _Decision:
+    def _transfer_fee_bps(self, mint: str) -> int | None:
+        """Comisión de transferencia del token, de la consulta de autoridades
+        de esta misma vuelta. None si está apagada o no se pudo consultar."""
+        return self._authorities.transfer_fee_bps(mint) if self._authorities else None
+
+    def decide(self, signal: WalletSignal, pair: dict, unsafe_reason: str | None = None) -> _Decision:
         """Si se avisa de la compra de `signal` en `pair`, y si no, por qué. En
         orden: autoridades del mint (`unsafe_reason`), filtros del par, wallet
         hiperactiva, [wallets].min_wallets (salvo las de confianza) y un aviso
@@ -280,20 +298,24 @@ class MemecoinRadar:
         buy = signal.buy
         cfg = self._config
         cooldowns = self._cooldowns
-        pair_reason = unsafe_reason or pair_rejection(cfg, pair, curve=signal.bonding_curve, trusted=buy.trusted)
-        if pair_reason:
-            return _Decision(pair_reason, pair_ok=False)
+        if unsafe_reason:
+            return _Decision(unsafe_reason, "autoridades", pair_ok=False)
+        failing = first_failing(cfg, pair, curve=signal.bonding_curve, trusted=buy.trusted)
+        if failing:
+            return _Decision(failing[1], failing[0], pair_ok=False)
         if cooldowns.hyperactive(buy.wallet):
-            return _Decision(f"wallet hiperactiva ({cooldowns.tokens_last_hour(buy.wallet)} tokens en 1h)")
+            return _Decision(
+                f"wallet hiperactiva ({cooldowns.tokens_last_hour(buy.wallet)} tokens en 1h)", "hiperactiva"
+            )
         wallets = 1 + len(signal.others)
         if wallets < cfg.wallets_min_wallets and not buy.trusted:
-            return _Decision(f"{wallets} de {cfg.wallets_min_wallets} wallets")
+            return _Decision(f"{wallets} de {cfg.wallets_min_wallets} wallets", "min_wallets")
         previous = cooldowns.last_token_alert(buy.mint)
         if previous is None:
             return _Decision(None)
         realert = cfg.wallets_realert_new_wallets
         if not realert or wallets < previous + realert:
-            return _Decision(f"token ya avisado con {previous} wallets")
+            return _Decision(f"token ya avisado con {previous} wallets", "token ya avisado")
         return _Decision(None, update=True)
 
     async def _alert(self, alerter: TelegramAlerter, pair: dict, signal: WalletSignal) -> None:
@@ -314,7 +336,9 @@ class MemecoinRadar:
         except Exception:
             log.exception("Error enviando aviso de wallet para %s", buy.mint)
             self._cooldowns.cancel_wallet_cooldown(buy)
+            self._summary.send_errors += 1
             return
+        self._summary.sent += 1
         self._cooldowns.mark_token_alerted(buy.mint, 1 + len(signal.others))
         self._record_wallet(pair, signal, sent=True, pair_ok=True)
 
@@ -335,6 +359,7 @@ class MemecoinRadar:
             "tx": buy.signature,
             "pasa_filtros_par": int(pair_ok),
             "bonding_curve": int(signal.bonding_curve),
+            "comision_transferencia_bps": signal.transfer_fee_bps,
         })
 
     async def run(self) -> None:
@@ -348,7 +373,7 @@ class MemecoinRadar:
                 # problema con el archivo se vea enseguida en el log.
                 self._tracker.open()
                 self._mark_old_rows()
-                self._restore_cooldowns()
+                self.restore_cooldowns()
             blacklist = self._open_blacklist()
             await self._follow(blacklist)
         finally:
@@ -389,7 +414,7 @@ class MemecoinRadar:
             client = DexScreenerClient(session)
             # Uno para todo el RPC: el tope de peticiones es por API key, y
             # la comprobación de autoridades iba por fuera de él.
-            rpc = RpcClient(session, self._config.solana_rpc_url)
+            rpc = self._rpc = RpcClient(session, self._config.solana_rpc_url)
             if self._config.check_token_authorities:
                 self._authorities = TokenAuthorities(rpc)
             self._wallet_watcher = WalletWatcher(
@@ -409,12 +434,28 @@ class MemecoinRadar:
             await asyncio.gather(*loops)
 
     async def _wallets_loop(self, client: DexScreenerClient, alerter: TelegramAlerter) -> None:
-        """Una vuelta de _wallets_once cada [wallets].interval_seconds. Errores
+        """Una vuelta de run_once cada [wallets].interval_seconds. Errores
         inesperados (red, parsing, etc.) no deben matar el proceso: se loguean
         y se reintenta en la próxima vuelta."""
         while True:
             try:
-                await self._wallets_once(client, alerter)
+                await self.run_once(client, alerter)
             except Exception:
                 log.exception("Error siguiendo las wallets")
+            if self._summary.due():
+                self._log_summary()
             await asyncio.sleep(self._config.wallets_interval_seconds)
+
+    def _log_summary(self) -> None:
+        watcher = self._wallet_watcher
+        wallets = watcher.wallets if watcher else {}
+        if not self._config.wallets_websocket:
+            websocket = "apagado"
+        else:
+            websocket = "conectado" if watcher and watcher.connected else "caído"
+        log.info(self._summary.take(
+            wallets=len(wallets),
+            banned=sum(watcher.banned(w) for w in wallets) if watcher else 0,
+            websocket=websocket,
+            rpc_calls=self._rpc.calls if self._rpc else 0,
+        ))

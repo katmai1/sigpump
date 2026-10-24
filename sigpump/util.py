@@ -6,6 +6,12 @@ campos numéricos como número, como string o directamente ausentes/null
 según el par, así que la conversión defensiva se centraliza acá.
 """
 
+import re
+
+# Direcciones de Solana: base58 de 32 bytes. La usan el fichero de wallets
+# y el de lista negra de versiones anteriores.
+SOLANA_ADDRESS_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
+
 # Fallos transitorios del lado del servidor: se reintentan igual que el 429.
 # Un 4xx distinto de 429 es un error nuestro (URL mal armada) y no se
 # reintenta. Lo usan DexScreener y el RPC de Solana.

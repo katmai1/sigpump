@@ -18,7 +18,7 @@ def _alerter(chain_id="solana"):
     return TelegramAlerter(TOKEN_FALSO, "-100123", chain_id=chain_id)
 
 
-# Compra de wallet de ejemplo: el contenido del encabezado se prueba en test_wallets.py.
+# Compra de wallet de ejemplo: el contenido del encabezado se prueba en test_avisos.py.
 _SIGNAL = WalletSignal(WalletBuy(
     wallet="W", label="ballena", mint="AbC123", sol_spent=1.0, stable_spent=0.0,
     new_position=True, signature="SIG", ts=0.0,
@@ -41,6 +41,14 @@ def _pair(**overrides):
 
 
 class TestFormatMessage(unittest.TestCase):
+    def test_comision_de_transferencia(self):
+        con = _alerter().format_message(_pair(), dataclasses.replace(_SIGNAL, transfer_fee_bps=150))
+        self.assertIn("Comisión de transferencia: 1.5%</b> al comprar y al vender", con)
+        for fee in (0, None):
+            with self.subTest(fee=fee):
+                texto = _alerter().format_message(_pair(), dataclasses.replace(_SIGNAL, transfer_fee_bps=fee))
+                self.assertNotIn("Comisión", texto)
+
     def test_mensaje_completo(self):
         texto = _alerter().format_message(_pair(), _SIGNAL)
         self.assertIn("compró Pepe Coin (PEPE)</b>", texto)

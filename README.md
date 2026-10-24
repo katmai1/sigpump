@@ -21,7 +21,9 @@ Para cada compra:
    [sigpump/screener.py](sigpump/screener.py)), quedándose con el de más
    liquidez entre los que cumplen `dex_ids` y `quote_tokens`.
 2. Se comprueba en la blockchain que el token no se pueda acuñar ni congelar
-   ([sigpump/solana.py](sigpump/solana.py)).
+   ([sigpump/solana.py](sigpump/solana.py)). De paso se lee su comisión de
+   transferencia (Token-2022): si tiene, el aviso la muestra con un ⚠️, porque
+   se cobra al comprar y al vender y los retornos del registro no la descuentan.
 3. Se aplican los filtros y cooldowns de `[wallets]`.
 4. Si pasa, se avisa por Telegram ([sigpump/telegram.py](sigpump/telegram.py))
    y se registra en `alert_log_path` ([sigpump/tracker.py](sigpump/tracker.py))
@@ -175,6 +177,9 @@ después:
 - `txns_m5`, `aceleracion_volumen`, `compras_m5_pct`, `moneda_par` y
   `edad_par_min`: actividad del momento, contra qué cotiza el par y cuánto
   llevaba vivo al avisar.
+- `comision_transferencia_bps`: comisión de transferencia del token en
+  puntos básicos (300 = 3%), 0 si no tiene y NULL si no se pudo consultar o
+  `check_token_authorities` está apagado.
 
 Las bases creadas por versiones anteriores conservan las filas y columnas
 del radar de trending (`tipo` 'alerta' o 'prealerta', `score`, velas...):
@@ -255,6 +260,16 @@ python run.py --config config.toml
 
 El proceso corre indefinidamente hasta que se lo interrumpa (Ctrl+C).
 
+Cada hora deja en el log un resumen ([sigpump/summary.py](sigpump/summary.py)):
+compras vistas, avisos enviados, descartes agrupados por motivo (la clave del
+filtro que los tiró, `min_wallets`, `token ya avisado`...), compras sin pool
+o repetidas en cooldown, wallets seguidas y castigadas, estado del WebSocket
+y llamadas al RPC desde el resumen anterior:
+
+```
+Resumen de 1 h: 42 compras de wallets seguidas, 5 avisos, 30 descartadas (dex_ids 12, min_txns_m5 8, ...), 4 sin pool, 3 repetidas en cooldown | 48 wallets (2 castigadas), WebSocket conectado | 3120 llamadas al RPC
+```
+
 ## Tests
 
 Los tests usan solo `unittest` de la stdlib (no hace falta instalar nada
@@ -275,6 +290,8 @@ sigpump/
   filters.py                Filtros del par y a qué compras se aplica cada uno
   cooldowns.py              Cooldowns, confluencia y actividad de las compras recientes
   wallets.py                 Detección de las compras de las wallets (RPC y WebSocket)
+  wallet_list.py            Fichero de wallets, lista negra y castigos temporales
+  summary.py                Resumen periódico en el log
   screener.py                 Cliente HTTP async de DexScreener
   solana.py                   Cliente del RPC y comprobación de mint/freeze authority
   telegram.py                 Formateo y envío de los avisos por Telegram

@@ -104,6 +104,13 @@ class TelegramAlerter:
             header += "⭐ <b>Wallet de las buenas</b>\n"
         if signal.bonding_curve:
             header += f"🧪 <b>En bonding curve</b> ({pool}): sin graduar, más riesgo\n"
+        if signal.transfer_fee_bps:
+            # Los retornos del registro no la descuentan: con un 3% se pierde
+            # un 6% entre la compra y la venta antes de que el precio se mueva.
+            header += (
+                f"⚠️ <b>Comisión de transferencia: {signal.transfer_fee_bps / 100:g}%</b>"
+                " al comprar y al vender\n"
+            )
         if signal.others:
             header += (
                 f"👛 También entraron: <b>{html.escape(', '.join(signal.others))}</b>\n"

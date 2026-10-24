@@ -32,7 +32,7 @@ Reglas:
 
 ```bash
 .venv/bin/python -m unittest discover -s tests -t .   # todos los tests (stdlib, sin red)
-.venv/bin/python -m unittest tests.test_wallets        # un módulo
+.venv/bin/python -m unittest tests.test_avisos         # un módulo
 .venv/bin/python run.py --config config.toml           # el bot (no lanzarlo sin pedirlo)
 .venv/bin/python buyers.py <MINT> --minutes 10         # quién compró un token (gasta créditos)
 ```
@@ -49,10 +49,13 @@ consultarlo.
   `tipo` 'alerta'/'prealerta' son restos del antiguo radar de trending.
 - `sigpump/wallets.py`: detección de compras por saldos antes/después
   (polling RPC + WebSocket, pasada completa cada `full_poll_minutes`).
-  `WalletList` lleva el fichero, la lista negra y los castigos temporales;
   `WalletWatcher` sondea, lee transacciones y echa bots y abandonadas.
+- `sigpump/wallet_list.py`: `WalletList`, el fichero de wallets menos la
+  lista negra y los castigos temporales.
 - `sigpump/cooldowns.py`: `Cooldowns`, lo que el radar recuerda de las
   compras recientes (cooldowns, confluencia, actividad por wallet).
+- `sigpump/summary.py`: resumen horario en el log (avisos, descartes por
+  motivo, WebSocket, llamadas al RPC).
 - `sigpump/filters.py`: tabla `PAIR_FILTERS` con los filtros del par y si
   cada uno se aplica en bonding curve y a las wallets de confianza.
 - `sigpump/screener.py` (DexScreener), `solana.py` (`RpcClient`, compartido

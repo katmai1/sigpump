@@ -141,10 +141,10 @@ def venue_reason(cfg: Config, pair: dict) -> str | None:
     return _dex(cfg, pair, 0.0) or _quote(cfg, pair, 0.0)
 
 
-def pair_rejection(
+def first_failing(
     cfg: Config, pair: dict, now: float | None = None, curve: bool = False, trusted: bool = False
-) -> str | None:
-    """Motivo para no avisar de una compra de wallet por cómo está el par, o
+) -> tuple[str, str] | None:
+    """(clave, motivo) del primer filtro del par que descarta la compra, o
     None si pasa. `now` es la hora contra la que se mide la edad del par
     (ahora si no se da). Con `curve` (token en bonding curve) y `trusted`
     (wallet de confianza) solo se aplican los filtros de PAIR_FILTERS que
@@ -154,5 +154,13 @@ def pair_rejection(
         if (curve and not f.curve) or (trusted and not f.trusted):
             continue
         if reason := f.check(cfg, pair, now):
-            return reason
+            return f.key, reason
     return None
+
+
+def pair_rejection(
+    cfg: Config, pair: dict, now: float | None = None, curve: bool = False, trusted: bool = False
+) -> str | None:
+    """Motivo de first_failing(), sin la clave del filtro."""
+    failing = first_failing(cfg, pair, now, curve, trusted)
+    return failing[1] if failing else None

@@ -1,8 +1,9 @@
 """
 sigpump/wallets.py
 
-Seguimiento de wallets: lee una lista de direcciones de un fichero, consulta
-en el RPC de Solana sus transacciones nuevas y detecta en qué tokens entran.
+Seguimiento de wallets: consulta en el RPC de Solana las transacciones
+nuevas de las wallets seguidas (las de wallet_list.WalletList) y detecta en
+qué tokens entran.
 
 Una compra se reconoce por los saldos antes y después de la transacción
 (preTokenBalances/postTokenBalances y los lamports de la wallet), no por el
@@ -22,13 +23,13 @@ import re
 import time
 import traceback
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 
 import aiohttp  # type: ignore[import-not-found]
 
-from sigpump.blacklist import Blacklist
+from sigpump.blacklist import ABANDONED_REASON, Blacklist
 from sigpump.solana import RpcClient, redact
+from sigpump.wallet_list import FollowedWallet, WalletList
 
 log = logging.getLogger()
 
@@ -75,25 +76,8 @@ TRANSFER_PROGRAMS = {
     "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo",
 }
 _INVOKE_RE = re.compile(r"^Program (\S+) invoke \[")
-# Direcciones de Solana: base58 de 32 bytes.
-_ADDRESS_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
-# Marca de wallet de confianza en el fichero, detrás de la dirección.
-TRUSTED_MARK = "*"
-# Entrada temporal del fichero de lista negra de versiones anteriores: el
-# motivo empieza por "hasta <fecha ISO>".
-UNTIL_PREFIX = "hasta "
-# Motivo de las wallets abandonadas en la lista negra.
-ABANDONED_REASON = "abandonada"
 # Ventana del tope [wallets].max_txs_per_hour.
 ACTIVITY_WINDOW_SECONDS = 3600
-
-
-@dataclass(frozen=True)
-class FollowedWallet:
-    """Wallet del fichero: su etiqueta y si es de confianza (avisa sola,
-    aunque no llegue a [wallets].min_wallets)."""
-    label: str
-    trusted: bool = False
 
 
 @dataclass(frozen=True)
@@ -116,108 +100,13 @@ class WalletSignal:
     """Lo que se avisa: la compra y las otras wallets seguidas que entraron
     en el mismo token hace poco (confluencia). `update` marca un token ya
     avisado al que se sumaron wallets nuevas y `bonding_curve` uno que
-    todavía no se graduó a un AMM."""
+    todavía no se graduó a un AMM. `transfer_fee_bps` es la comisión de
+    transferencia del token (Token-2022), None si no se sabe."""
     buy: WalletBuy
     others: tuple[str, ...] = field(default_factory=tuple)
     update: bool = False
     bonding_curve: bool = False
-
-
-def _until(reason: str) -> float | None:
-    """Fin (epoch) de una entrada temporal del fichero de lista negra de
-    versiones anteriores, por su motivo; None si es permanente."""
-    reason = reason.strip()
-    if not reason.startswith(UNTIL_PREFIX):
-        return None
-    stamp = reason.removeprefix(UNTIL_PREFIX).partition(" ")[0]
-    try:
-        return datetime.fromisoformat(stamp).timestamp()
-    except ValueError:
-        return None
-
-
-def import_blacklist_file(blacklist: Blacklist, path: Path, wallets_path: Path) -> None:
-    """Pasa a la base la lista negra del fichero de versiones anteriores y lo
-    renombra a .importado. Las abandonadas, que el fichero había quitado del
-    de wallets, vuelven a él con una entrada que vence ya: la primera vuelta
-    comprueba si volvieron a operar. Lanza OSError si no se puede."""
-    try:
-        text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return
-    now = time.time()
-    revived: list[str] = []
-    count = 0
-    for line in text.splitlines():
-        address, _, reason = line.partition("#")
-        address = address.strip()
-        if not _ADDRESS_RE.match(address):
-            continue
-        reason = reason.strip()
-        until = _until(reason)
-        if until is not None and until <= now:
-            continue
-        if until is None and ABANDONED_REASON in reason:
-            label = reason.partition(":")[0].strip() if ":" in reason else ""
-            revived.append(f"{address}  # {label or address[:4] + '…' + address[-4:]}\n")
-            until = now
-        blacklist.add(address, reason, until)
-        count += 1
-    if revived:
-        current = wallets_path.read_text(encoding="utf-8")
-        if current and not current.endswith("\n"):
-            current += "\n"
-        wallets_path.write_text(current + "".join(revived), encoding="utf-8")
-    path.rename(path.with_name(path.name + ".importado"))
-    log.warning(
-        "Lista negra: %d wallets de %s pasadas a la base (%d abandonadas vuelven a %s para "
-        "comprobarlas); el fichero queda como %s.importado y [wallets].blacklist_file ya no hace falta",
-        count, path, len(revived), wallets_path, path.name,
-    )
-
-
-def load_wallets(path: Path, blacklist: set[str] | frozenset[str] = frozenset()) -> dict[str, FollowedWallet]:
-    """
-    Dirección -> wallet, desde un fichero con una wallet por línea. Lo que
-    va detrás de `#` es la etiqueta; un `*` detrás de la dirección la marca
-    de confianza. Las líneas que empiezan por `#` y las vacías se ignoran.
-    Una línea que no es una dirección se avisa y se salta, para que un typo
-    no tire el resto de la lista. Una dirección repetida se queda con su
-    primera aparición y las demás se borran del fichero, igual que las que
-    están en `blacklist`.
-    """
-    wallets: dict[str, FollowedWallet] = {}
-    kept: list[str] = []
-    removed = False
-    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(keepends=True), start=1):
-        address, _, label = line.partition("#")
-        address = address.strip()
-        trusted = address.endswith(TRUSTED_MARK)
-        address = address.removesuffix(TRUSTED_MARK).strip()
-        if address in wallets:
-            log.warning("%s:%d wallet duplicada, se elimina: %s", path, number, address)
-            removed = True
-            continue
-        if address in blacklist:
-            log.warning("%s:%d wallet en la lista negra, se elimina: %s", path, number, address)
-            removed = True
-            continue
-        kept.append(line)
-        if not address:
-            continue
-        if not _ADDRESS_RE.match(address):
-            log.warning("%s:%d no es una dirección de Solana, se ignora: %r", path, number, address)
-            continue
-        wallets[address] = FollowedWallet(label.strip() or f"{address[:4]}…{address[-4:]}", trusted)
-    if removed:
-        # Se escribe aparte y se renombra para no dejar el fichero a medias.
-        tmp = path.with_name(path.name + ".tmp")
-        try:
-            tmp.write_text("".join(kept), encoding="utf-8")
-            tmp.replace(path)
-        except OSError as exc:
-            log.warning("No se pudieron quitar wallets de %s: %s", path, exc)
-    return wallets
+    transfer_fee_bps: int | None = None
 
 
 def _token_amounts(balances: object, owner: str) -> dict[str, float]:
@@ -323,70 +212,6 @@ def ws_url(rpc_url: str) -> str:
     return rpc_url
 
 
-class WalletList:
-    """Las wallets seguidas: las del fichero menos las de la lista negra, y
-    hasta cuándo está castigada cada una de las temporales (siguen en el
-    fichero, pero no se consultan). Relee el fichero cuando cambia, y la
-    lista negra en cada vuelta, sin reiniciar."""
-
-    def __init__(self, path: Path, blacklist: Blacklist | None = None):
-        self._path = path
-        self._blacklist = blacklist
-        self._wallets: dict[str, FollowedWallet] = {}
-        # Wallet -> fin (epoch) de su entrada temporal en la lista negra.
-        self._banned_until: dict[str, float] = {}
-        # Fecha del fichero y lista negra con los que se cargaron las wallets.
-        self._loaded: tuple[float, dict[str, float | None]] | None = None
-
-    @property
-    def wallets(self) -> dict[str, FollowedWallet]:
-        return self._wallets
-
-    @property
-    def has_blacklist(self) -> bool:
-        return self._blacklist is not None
-
-    def banned(self, address: str) -> bool:
-        """True si `address` tiene una entrada temporal vigente en la lista negra."""
-        return self._banned_until.get(address, 0.0) > time.time()
-
-    def blacklist(self, address: str, reason: str, until: float | None = None) -> None:
-        """Mete `address` en la lista negra; con `until` (epoch), solo hasta
-        entonces. Lanza OSError si no se puede escribir la lista."""
-        if self._blacklist is None:
-            return
-        self._blacklist.add(address, reason, until)
-        if until is None:
-            self._wallets.pop(address, None)
-        else:
-            self._banned_until[address] = until
-        # Fuerza la relectura, que la quita también del fichero de wallets.
-        self._loaded = None
-
-    def reload(self) -> None:
-        """Relee el fichero si cambió él o la lista negra desde la última
-        vez. Si no se puede leer se sigue con la lista anterior."""
-        try:
-            entries = self._blacklist.entries() if self._blacklist else {}
-            mtime = self._path.stat().st_mtime
-            if (mtime, entries) == self._loaded:
-                return
-            blacklist = {address for address, until in entries.items() if until is None}
-            wallets = load_wallets(self._path, blacklist)
-            # Quitar wallets reescribe el fichero y cambia su fecha.
-            mtime = self._path.stat().st_mtime
-        except OSError as exc:
-            if self._loaded is not None or not self._wallets:
-                log.warning("No se pudo leer el fichero de wallets %s: %s", self._path, exc)
-            self._loaded = None
-            return
-        self._loaded = (mtime, entries)
-        self._banned_until = {address: until for address, until in entries.items() if until is not None}
-        if wallets != self._wallets:
-            log.info("Siguiendo %d wallets de %s", len(wallets), self._path)
-        self._wallets = wallets
-
-
 class _Subscriptions:
     """Las suscripciones logsSubscribe de una conexión del WebSocket. Hay una
     por conexión: al reconectar, los ids de la anterior ya no valen."""
@@ -399,7 +224,7 @@ class _Subscriptions:
         self._requests: dict[int, str] = {}
         self._next_id = 0
 
-    async def sync(self, ws, wanted: set[str]) -> None:
+    async def sync(self, ws: aiohttp.ClientWebSocketResponse, wanted: set[str]) -> None:
         """Suscribe las wallets de `wanted` que faltan y quita las demás."""
         for wallet in wanted - self._by_wallet.keys():
             self._next_id += 1
@@ -482,6 +307,11 @@ class WalletWatcher:
     @property
     def wallets(self) -> dict[str, FollowedWallet]:
         return self._list.wallets
+
+    @property
+    def connected(self) -> bool:
+        """Si el WebSocket está conectado (con él solo se leen las avisadas)."""
+        return self._connected
 
     def banned(self, address: str) -> bool:
         """True si `address` tiene una entrada temporal vigente en la lista negra."""
@@ -727,30 +557,30 @@ class WalletWatcher:
             await asyncio.sleep(delay)
             delay = min(delay * 2, WS_RECONNECT_MAX_SECONDS)
 
-    async def _serve(self, ws) -> None:
+    async def _serve(self, ws: aiohttp.ClientWebSocketResponse) -> None:
         """Atiende una conexión hasta que se cierra."""
         self._subs = _Subscriptions()
         self._connected = True
         # Lo que pasó mientras estaba caído no llega por aquí: pasada completa.
         self._next_full_poll = 0.0
         while True:
-            await self._sync_subscriptions(ws)
+            await self.sync_subscriptions(ws)
             try:
                 msg = await ws.receive(timeout=WS_SYNC_SECONDS)
             except asyncio.TimeoutError:
                 continue
             if msg.type == aiohttp.WSMsgType.TEXT:
-                self._handle(json.loads(msg.data))
+                self.handle_message(json.loads(msg.data))
             elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING,
                               aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                 return
 
-    async def _sync_subscriptions(self, ws) -> None:
+    async def sync_subscriptions(self, ws: aiohttp.ClientWebSocketResponse) -> None:
         """Suscribe las wallets nuevas del fichero y quita las que ya no están
         o tienen una entrada temporal en la lista negra (no se consultan)."""
         await self._subs.sync(ws, {wallet for wallet in self.wallets if not self.banned(wallet)})
 
-    def _handle(self, data: object) -> None:
+    def handle_message(self, data: object) -> None:
         """Respuesta a una suscripción o aviso de una transacción."""
         if not isinstance(data, dict):
             return

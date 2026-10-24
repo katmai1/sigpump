@@ -6,7 +6,8 @@ autoridades peligrosas: mintAuthority (pueden acuñar más y diluir a los que
 compraron) o freezeAuthority (pueden congelar tus tokens y dejarte sin poder
 vender). Las autoridades solo se pueden renunciar, nunca volver a poner, así
 que un token limpio se recuerda para siempre y uno con autoridades se vuelve
-a mirar cada tanto por si las renunció.
+a mirar cada tanto por si las renunció. De paso lee la comisión de
+transferencia de los Token-2022, que se cobra al comprar y al vender.
 
 También tiene lo común a todas las llamadas al RPC (RpcClient): el ritmo
 máximo, los reintentos ante 429/5xx y quitar la API key de lo que se
@@ -14,6 +15,7 @@ escribe en el log.
 """
 
 import asyncio
+import dataclasses
 import logging
 import re
 import time
@@ -111,30 +113,69 @@ class RpcClient:
         self.url = url
         self._limiter = limiter or RateLimiter(MAX_REQUESTS_PER_SECOND)
         self._timeout_seconds = timeout_seconds
+        # Llamadas hechas (sin contar reintentos), para el resumen del log y buyers.py.
+        self.calls = 0
 
     async def call(self, method: str, params: list) -> object:
         """Resultado de la llamada. Lanza ValueError si el RPC devuelve un
         error, y los de red de aiohttp tal cual."""
+        self.calls += 1
         return await rpc_call(self.session, self.url, method, params, self._limiter, self._timeout_seconds)
 
 
+@dataclasses.dataclass(frozen=True)
+class MintCheck:
+    """Lo que se sabe del mint de un token: por qué es peligroso (None si
+    está limpio), su comisión de transferencia en puntos básicos (None si
+    no tiene la extensión) y cuándo se consultó."""
+    reason: str | None
+    transfer_fee_bps: int | None
+    checked_at: float
+
+
+def _transfer_fee_bps(info: dict) -> int | None:
+    """Comisión de transferencia de un mint Token-2022 (puntos básicos), o
+    None si no tiene la extensión. Se toma la mayor entre la vigente y la
+    programada: saber cuál rige pide consultar la época actual, y el aviso
+    es para no subestimarla."""
+    for extension in info.get("extensions") or []:
+        if not isinstance(extension, dict) or extension.get("extension") != "transferFeeConfig":
+            continue
+        state = extension.get("state") or {}
+        fees = [
+            (state.get(key) or {}).get("transferFeeBasisPoints") for key in ("olderTransferFee", "newerTransferFee")
+        ]
+        return max((int(f) for f in fees if isinstance(f, int)), default=0)
+    return None
+
+
 class TokenAuthorities:
-    """Autoridades del mint de cada token, cacheadas entre consultas."""
+    """Autoridades y comisión del mint de cada token, cacheadas entre consultas."""
 
     def __init__(self, rpc: RpcClient):
         self._rpc = rpc
-        # dirección -> (motivo, o None si el token está limpio; momento de la consulta)
-        self._cache: dict[str, tuple[str | None, float]] = {}
+        self._cache: dict[str, MintCheck] = {}
 
-    def _cached(self, address: str) -> tuple[str | None, float] | None:
+    def _cached(self, address: str) -> MintCheck | None:
         """Lo que se sabe del token, o None si hay que consultarlo."""
         entry = self._cache.get(address)
         if entry is None:
             return None
-        reason, checked_at = entry
-        if reason is not None and time.time() - checked_at > UNSAFE_TTL_SECONDS:
+        # Las autoridades se pueden renunciar y la comisión, cambiar: esos se
+        # vuelven a mirar. Un token limpio y sin comisión no puede cambiar.
+        mutable = entry.reason is not None or entry.transfer_fee_bps is not None
+        if mutable and time.time() - entry.checked_at > UNSAFE_TTL_SECONDS:
             return None
         return entry
+
+    def transfer_fee_bps(self, address: str) -> int | None:
+        """Comisión de transferencia del token según la última consulta: 0 si
+        no tiene, None si no se pudo consultar. Se llama después de
+        unsafe_reasons(), que es la que consulta al RPC."""
+        entry = self._cache.get(address)
+        if entry is None:
+            return None
+        return entry.transfer_fee_bps or 0
 
     async def unsafe_reasons(self, addresses: list[str]) -> dict[str, str]:
         """
@@ -149,8 +190,8 @@ class TokenAuthorities:
         reasons = {}
         for address in wanted:
             entry = self._cached(address)
-            if entry is not None and entry[0] is not None:
-                reasons[address] = entry[0]
+            if entry is not None and entry.reason is not None:
+                reasons[address] = entry.reason
         return reasons
 
     async def _fetch(self, addresses: list[str]) -> None:
@@ -185,4 +226,4 @@ class TokenAuthorities:
             if info.get("freezeAuthority"):
                 problems.append("se pueden congelar")
             reason = "el creador conserva autoridades: " + " y ".join(problems) if problems else None
-            self._cache[address] = (reason, now)
+            self._cache[address] = MintCheck(reason, _transfer_fee_bps(info), now)

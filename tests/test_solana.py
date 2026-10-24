@@ -1,6 +1,7 @@
 """Tests de la comprobación de autoridades del mint: qué se considera
 peligroso, el cacheo y la tolerancia a fallos del RPC."""
 
+import dataclasses
 import logging
 import time
 import unittest
@@ -20,8 +21,18 @@ from sigpump.solana import (
 )
 
 
-def _cuenta(mint=None, freeze=None):
-    return {"data": {"parsed": {"info": {"mintAuthority": mint, "freezeAuthority": freeze}}}}
+def _cuenta(mint=None, freeze=None, fee_bps=None, nueva_fee_bps=None):
+    info = {"mintAuthority": mint, "freezeAuthority": freeze}
+    if fee_bps is not None:
+        info["extensions"] = [
+            {"extension": "metadataPointer", "state": {}},
+            {"extension": "transferFeeConfig", "state": {
+                "olderTransferFee": {"epoch": 1, "maximumFee": 10**15, "transferFeeBasisPoints": fee_bps},
+                "newerTransferFee": {"epoch": 2, "maximumFee": 10**15,
+                                     "transferFeeBasisPoints": fee_bps if nueva_fee_bps is None else nueva_fee_bps},
+            }},
+        ]
+    return {"data": {"parsed": {"info": info}}}
 
 
 class _FakeResponse:
@@ -93,8 +104,9 @@ class TestTokenAuthorities(unittest.IsolatedAsyncioTestCase):
         authorities = TokenAuthorities(RpcClient(session))
         self.assertIn("MINT", await authorities.unsafe_reasons(["MINT"]))
         # Pasado el TTL puede haberlas renunciado.
-        reason, _ = authorities._cache["MINT"]
-        authorities._cache["MINT"] = (reason, time.time() - UNSAFE_TTL_SECONDS - 1)
+        authorities._cache["MINT"] = dataclasses.replace(
+            authorities._cache["MINT"], checked_at=time.time() - UNSAFE_TTL_SECONDS - 1
+        )
         self.assertEqual(await authorities.unsafe_reasons(["MINT"]), {})
         self.assertEqual(len(session.peticiones), 2)
 
@@ -151,6 +163,28 @@ class TestTokenAuthorities(unittest.IsolatedAsyncioTestCase):
         await TokenAuthorities(RpcClient(_FakeSession(_respuesta(_cuenta())), limiter=limiter)).unsafe_reasons(["TOK"])
         self.assertEqual(llamadas, [1])
 
+    async def test_comision_de_transferencia(self):
+        session = _FakeSession(_respuesta(_cuenta(fee_bps=300), _cuenta(), _cuenta(fee_bps=100, nueva_fee_bps=500)))
+        authorities = TokenAuthorities(RpcClient(session))
+        await authorities.unsafe_reasons(["FEE", "SIN", "SUBE"])
+        # De la vigente y la programada, la mayor: el aviso no debe subestimarla.
+        self.assertEqual(
+            [authorities.transfer_fee_bps(m) for m in ("FEE", "SIN", "SUBE", "NO_CONSULTADO")], [300, 0, 500, None]
+        )
+
+    async def test_un_token_con_comision_se_revisa_de_nuevo(self):
+        # La autoridad de la comisión puede cambiarla: no se cachea para siempre.
+        session = _FakeSession(_respuesta(_cuenta(fee_bps=100)), _respuesta(_cuenta(fee_bps=300)))
+        authorities = TokenAuthorities(RpcClient(session))
+        await authorities.unsafe_reasons(["FEE"])
+        await authorities.unsafe_reasons(["FEE"])
+        self.assertEqual(len(session.peticiones), 1)
+        authorities._cache["FEE"] = dataclasses.replace(
+            authorities._cache["FEE"], checked_at=time.time() - UNSAFE_TTL_SECONDS - 1
+        )
+        await authorities.unsafe_reasons(["FEE"])
+        self.assertEqual(authorities.transfer_fee_bps("FEE"), 300)
+
     async def test_pide_el_mint_parseado_al_rpc(self):
         session = _FakeSession(_respuesta(_cuenta()))
         await TokenAuthorities(RpcClient(session, "https://rpc.ejemplo")).unsafe_reasons(["TOK", "TOK"])
@@ -165,6 +199,13 @@ class TestRpcCall(unittest.IsolatedAsyncioTestCase):
 
     async def _llamar(self, session):
         return await rpc_call(session, "https://rpc/?api-key=SECRETO", "getX", ["a"], RateLimiter(1000), 15)
+
+    async def test_rpc_client_cuenta_las_llamadas_sin_los_reintentos(self):
+        session = _FakeSession(_FakeResponse({}, 429), _FakeResponse({"result": 1}), _FakeResponse({"result": 2}))
+        rpc = RpcClient(session, limiter=RateLimiter(1000))
+        await rpc.call("getX", ["a"])
+        await rpc.call("getX", ["b"])
+        self.assertEqual((rpc.calls, len(session.peticiones)), (2, 3))
 
     async def test_429_se_reintenta_y_devuelve_el_resultado(self):
         session = _FakeSession(_FakeResponse({}, 429), _FakeResponse({}, 503), _FakeResponse({"result": 7}))

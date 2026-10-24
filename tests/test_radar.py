@@ -97,8 +97,29 @@ class TestBestPairPerToken(unittest.TestCase):
         sin_direccion = {"baseToken": {}, "liquidity": {"usd": 1}}
         self.assertEqual(self.radar._best_pair_per_token([sin_direccion], ["TOK"]), [])
 
+    def test_direccion_null_no_se_vuelve_el_texto_none(self):
+        # Con .get("address", "") un null quedaba como None y la clave era "None".
+        self.assertEqual(self.radar._best_pair_per_token([{"baseToken": {"address": None}}], ["None"]), [])
+
     def test_conserva_un_par_por_cada_token(self):
         elegidos = self.radar._best_pair_per_token(
             [_pair("A"), _pair("B"), _pair("A")], ["A", "B"]
         )
         self.assertEqual({p["baseToken"]["address"] for p in elegidos}, {"A", "B"})
+
+
+class _Autoridades:
+    def __init__(self):
+        self.pedidas: list[str] = []
+
+    async def unsafe_reasons(self, addresses):
+        self.pedidas += addresses
+        return {}
+
+
+class TestUnsafeReasons(unittest.IsolatedAsyncioTestCase):
+    async def test_par_con_direccion_null_se_pide_vacia(self):
+        radar = MemecoinRadar(_config())
+        radar._authorities = _Autoridades()
+        await radar._unsafe_reasons([{"baseToken": {"address": None}}, _pair("TOK")])
+        self.assertEqual(radar._authorities.pedidas, ["", "TOK"])

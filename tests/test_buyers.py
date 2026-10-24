@@ -259,6 +259,20 @@ class FindBuyersHeliusTest(unittest.TestCase):
         self.assertEqual([b.wallet for b in buyers], [BALLENA])
         self.assertEqual(len(rpc.calls), 1)
 
+    def test_el_tope_es_del_total_entre_el_mint_y_los_pools(self):
+        """Antes cada dirección tenía su propio tope, y un swap que menciona el
+        mint y el pool se pagaba por las dos."""
+        now = time.time()
+        rpc = _HeliusRpc({
+            MINT: [[_compra(BALLENA, 3, now - 60, "a"), _compra(PEZ, 3, now - 90, "b")]],
+            POOL: [[_compra(BALLENA, 3, now - 60, "a")]],
+        })
+        _find(rpc, [MINT, POOL], now - 600, max_txs=3)
+        self.assertEqual([(a, o["limit"]) for _, a, o in rpc.calls], [(MINT, 3), (POOL, 1)])
+        rpc.calls.clear()
+        _find(rpc, [MINT, POOL], now - 600, max_txs=2)
+        self.assertEqual([a for _, a, _ in rpc.calls], [MINT])
+
     def test_sin_el_metodo_usa_el_rpc_estandar(self):
         now = time.time()
         rpc = _FakeRpc(

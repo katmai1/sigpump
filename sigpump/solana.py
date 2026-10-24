@@ -27,6 +27,11 @@ MAINNET_RPC_URL = "https://api.mainnet-beta.solana.com"
 # getMultipleAccounts acepta como máximo 100 cuentas por llamada.
 MAX_ACCOUNTS_PER_CALL = 100
 REQUEST_TIMEOUT_SECONDS = 15
+# Ritmo máximo de peticiones al RPC, por proceso: el seguimiento de wallets y
+# la comprobación de autoridades comparten limitador. El plan gratuito de
+# Helius corta a 10 por segundo: con el radar y buyers.py a la vez son 5 + 5,
+# y los 429 sueltos se reintentan.
+MAX_REQUESTS_PER_SECOND = 5
 # Un token con autoridades puede renunciarlas después: se vuelve a consultar
 # pasado este tiempo. Uno limpio ya no puede volver atrás y no caduca.
 UNSAFE_TTL_SECONDS = 30 * 60
@@ -91,9 +96,16 @@ async def rpc_call(
 class TokenAuthorities:
     """Autoridades del mint de cada token, cacheadas entre consultas."""
 
-    def __init__(self, session: aiohttp.ClientSession, rpc_url: str = MAINNET_RPC_URL):
+    def __init__(
+        self,
+        session: aiohttp.ClientSession,
+        rpc_url: str = MAINNET_RPC_URL,
+        limiter: RateLimiter | None = None,
+    ):
         self._session = session
         self._rpc_url = rpc_url
+        # El del seguimiento de wallets, si se da: el tope del RPC es por API key.
+        self._limiter = limiter or RateLimiter(MAX_REQUESTS_PER_SECOND)
         # dirección -> (motivo, o None si el token está limpio; momento de la consulta)
         self._cache: dict[str, tuple[str | None, float]] = {}
 
@@ -127,24 +139,17 @@ class TokenAuthorities:
     async def _fetch(self, addresses: list[str]) -> None:
         """Consulta un lote de mints y guarda lo que devuelva. Ante cualquier
         fallo no cachea nada: se reintenta en la próxima señal."""
-        body = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getMultipleAccounts",
-            "params": [addresses, {"encoding": "jsonParsed"}],
-        }
         try:
-            timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
-            async with self._session.post(self._rpc_url, json=body, timeout=timeout) as resp:
-                resp.raise_for_status()
-                data = await resp.json(content_type=None)
+            # Por rpc_call y no un POST suelto: sin sus reintentos, un 429
+            # dejaba el lote sin comprobar y el aviso salía como limpio.
+            result = await rpc_call(
+                self._session, self._rpc_url, "getMultipleAccounts",
+                [addresses, {"encoding": "jsonParsed"}], self._limiter, REQUEST_TIMEOUT_SECONDS,
+            )
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
             log.warning("No se pudieron consultar las autoridades en %s: %s", redact(self._rpc_url), redact(exc))
             return
-        if not isinstance(data, dict) or data.get("error"):
-            log.warning("El RPC de Solana devolvió un error: %s", (data or {}).get("error"))
-            return
-        accounts = (data.get("result") or {}).get("value")
+        accounts = result.get("value") if isinstance(result, dict) else None
         if not isinstance(accounts, list) or len(accounts) != len(addresses):
             log.warning("Respuesta inesperada del RPC de Solana para %d mints", len(addresses))
             return

@@ -19,7 +19,7 @@ import aiohttp  # type: ignore[import-not-found]
 from sigpump.blacklist import Blacklist
 from sigpump.config import Config
 from sigpump.screener import DexScreenerClient
-from sigpump.solana import TokenAuthorities
+from sigpump.solana import MAX_REQUESTS_PER_SECOND, RateLimiter, TokenAuthorities
 from sigpump.telegram import TelegramAlerter
 from sigpump.tracker import AlertTracker, format_minutes
 from sigpump.util import normalize_address, to_float
@@ -41,6 +41,12 @@ _NOT_PAIR_REASON_RE = re.compile(r"\d+ de \d+ wallets$|token ya avisado|wallet h
 def _liquidity_usd(pair: dict) -> float:
     """Liquidez en USD del par, 0.0 si la API no la informa."""
     return to_float((pair.get("liquidity") or {}).get("usd"))
+
+
+def _mint(pair: dict) -> str:
+    """Dirección del token del par, "" si la API no la informa (o la manda
+    como null: con .get(..., "") quedaba None y la clave era "None")."""
+    return str(normalize_address((pair.get("baseToken") or {}).get("address") or ""))
 
 
 def _symbol(pair: dict) -> object:
@@ -188,7 +194,7 @@ class MemecoinRadar:
         wanted = set(addresses)
         best: dict[str, dict] = {}
         for pair in pairs:
-            address = normalize_address((pair.get("baseToken") or {}).get("address") or "")
+            address = _mint(pair)
             if address not in wanted:
                 continue
             current = best.get(address)
@@ -217,10 +223,7 @@ class MemecoinRadar:
         """
         if self._authorities is None:
             return {}
-        addresses = [
-            str(normalize_address((p.get("baseToken") or {}).get("address", ""))) for p in pairs
-        ]
-        return await self._authorities.unsafe_reasons(addresses)
+        return await self._authorities.unsafe_reasons([_mint(p) for p in pairs])
 
     def _wallet_cooldown_active(self, buy: WalletBuy) -> bool:
         """True si ya se avisó de esta wallet en este token hace menos de
@@ -371,11 +374,18 @@ class MemecoinRadar:
         recent = [b for b in self._wallet_buys.get(buy.mint, []) if b.ts >= since]
         # Una por wallet: dos wallets con la misma etiqueta cuentan como dos.
         others = tuple({
-            b.wallet: f"⭐ {b.label}" if b.trusted else b.label for b in recent
+            b.wallet: f"⭐ {b.label}" if self._trusted(b) else b.label for b in recent
             if b.wallet != buy.wallet and not self._hyperactive(b.wallet)
         }.values())
         self._wallet_buys[buy.mint] = recent + [buy]
         return others
+
+    def _trusted(self, buy: WalletBuy) -> bool:
+        """Si la wallet de `buy` es de confianza según el fichero de ahora. Las
+        compras recuperadas del registro tras un reinicio no lo guardan, y
+        sin esto perdían la ⭐ en la confluencia."""
+        info = self._wallet_watcher.wallets.get(buy.wallet) if self._wallet_watcher else None
+        return info.trusted if info else buy.trusted
 
     async def _wallets_once(self, client: DexScreenerClient, alerter: TelegramAlerter) -> None:
         """
@@ -416,16 +426,13 @@ class MemecoinRadar:
         mints = list(dict.fromkeys(s.buy.mint for s in signals))
         all_pairs = await client.get_pairs_for_tokens(self._config.chain_id, mints)
         amm_pairs = [p for p in all_pairs if p.get("dexId") not in BONDING_CURVE_DEX_IDS]
-        pairs = {
-            normalize_address((p.get("baseToken") or {}).get("address", "")): p
-            for p in self._best_pair_per_token(amm_pairs, mints)
-        }
+        pairs = {_mint(p): p for p in self._best_pair_per_token(amm_pairs, mints)}
         # Los que siguen en la bonding curve: solo si no tienen pool en un AMM.
         curve_mints: set[str] = set()
         if self._config.wallets_bonding_curve:
             curve_pairs = [p for p in all_pairs if p.get("dexId") in BONDING_CURVE_DEX_IDS]
             for pair in self._best_pair_per_token(curve_pairs, [m for m in mints if m not in pairs]):
-                mint = normalize_address((pair.get("baseToken") or {}).get("address", ""))
+                mint = _mint(pair)
                 pairs[mint] = pair
                 curve_mints.add(mint)
         unsafe = await self._unsafe_reasons(list(pairs.values()))
@@ -533,8 +540,11 @@ class MemecoinRadar:
                     log.error("No se pudo pasar la lista negra a la base: %s", exc)
         async with aiohttp.ClientSession() as session, alerter:
             client = DexScreenerClient(session)
+            # Uno para todo el RPC: el tope de peticiones es por API key, y
+            # la comprobación de autoridades iba por fuera de él.
+            limiter = RateLimiter(MAX_REQUESTS_PER_SECOND)
             if self._config.check_token_authorities:
-                self._authorities = TokenAuthorities(session, self._config.solana_rpc_url)
+                self._authorities = TokenAuthorities(session, self._config.solana_rpc_url, limiter)
             self._wallet_watcher = WalletWatcher(
                 session,
                 self._config.solana_rpc_url,
@@ -544,6 +554,7 @@ class MemecoinRadar:
                 self._config.wallets_full_poll_minutes * 60,
                 self._config.wallets_max_txs_per_hour,
                 self._config.wallets_max_inactive_days * 86400,
+                limiter,
             )
             loops = [
                 self._loop(

@@ -39,6 +39,31 @@ class _FakeClient:
         ]
 
 
+class _ConexionQueFalla:
+    """Conexión que falla en la UPDATE número `fallar_en`, para ver qué queda guardado."""
+
+    def __init__(self, conn, fallar_en):
+        self._conn = conn
+        self._fallar_en = fallar_en
+        self._updates = 0
+
+    def execute(self, sql, *args):
+        if sql.startswith("UPDATE"):
+            self._updates += 1
+            if self._updates == self._fallar_en:
+                raise sqlite3.OperationalError("disk I/O error")
+        return self._conn.execute(sql, *args)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def __enter__(self):
+        return self._conn.__enter__()
+
+    def __exit__(self, *exc_info):
+        return self._conn.__exit__(*exc_info)
+
+
 class TestAlertTracker(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -121,6 +146,22 @@ class TestAlertTracker(unittest.IsolatedAsyncioTestCase):
         # Terminada: no se vuelve a pedir su precio.
         await tracker.update(client, "solana")
         self.assertEqual(len(client.requested), 3)
+
+    async def test_un_error_a_mitad_no_deja_cambios_a_medias(self):
+        """Antes la primera fila quedaba actualizada sin commit y se guardaba
+        con la siguiente escritura, aunque la vuelta hubiera fallado."""
+        tracker = self._tracker()
+        tracker.record(_pair(pool="P1"), sent=True)
+        tracker.record(_pair(pool="P2"), sent=True)
+        self._age(6)
+        real = tracker._conn
+        tracker._conn = _ConexionQueFalla(real, fallar_en=2)
+        logging.disable(logging.CRITICAL)
+        self.addCleanup(logging.disable, logging.NOTSET)
+        await tracker.update(_FakeClient({"P1": 2.0, "P2": 2.0}), "solana")
+        tracker._conn = real
+        tracker.record(_pair(pool="P3"), sent=True)
+        self.assertEqual([r["ret_5m_pct"] for r in self._rows()], [None, None, None])
 
     async def test_antes_del_primer_checkpoint_solo_actualiza_mejor_peor(self):
         tracker = self._tracker()

@@ -43,15 +43,16 @@ import aiohttp  # type: ignore[import-not-found]
 
 from sigpump.config import Config
 from sigpump.screener import DexScreenerClient
-from sigpump.solana import RateLimiter, rpc_call
-from sigpump.wallets import COMMITMENT, MAX_REQUESTS_PER_SECOND, MAX_TRANSACTION_VERSION, parse_buys
+from sigpump.solana import MAX_REQUESTS_PER_SECOND, RateLimiter, rpc_call
+from sigpump.wallets import COMMITMENT, MAX_TRANSACTION_VERSION, parse_buys
 
 log = logging.getLogger()
 
 DEFAULT_MINUTES = 20.0
 DEFAULT_MIN_SOL = 2.0
-# Transacciones leídas como máximo: un token con mucho volumen hace miles en
-# 10 minutos, y cada una cuesta 0.1 créditos con "helius" o 1 con "rpc".
+# Transacciones leídas como máximo, entre el mint y todos sus pools: un token
+# con mucho volumen hace miles en 10 minutos, y cada una cuesta 0.1 créditos
+# con "helius" o 1 con "rpc".
 DEFAULT_MAX_TXS = 5000
 # Máximo que acepta getSignaturesForAddress por llamada.
 SIGNATURES_PAGE = 1000
@@ -184,13 +185,6 @@ class TransactionReader:
                 log.warning("getTransactionsForAddress falló (%s), se usa --method rpc", exc)
         return await self._read_rpc(addresses, since, until)
 
-    def _warn_truncated(self, total: int | None = None) -> None:
-        found = f"{total}" if total is not None else f"Más de {self._max_txs}"
-        log.warning(
-            "%s transacciones en la ventana, solo se leen las %d más recientes (--max-txs)",
-            found, self._max_txs,
-        )
-
     # --- helius: getTransactionsForAddress ---
 
     async def _read_helius(
@@ -198,24 +192,34 @@ class TransactionReader:
     ) -> list[dict | None]:
         by_signature: dict[str, dict] = {}
         truncated = False
+        # El tope es del total y no de cada dirección: cada una se paga
+        # aparte, y un swap que menciona el mint y el pool llega (y se cobra)
+        # por las dos. Por dirección, con 3 pools se gastaba hasta 4 veces el tope.
+        budget = self._max_txs
         for address in addresses:
-            txs, more = await self._helius_pages(address, since, until)
+            if budget <= 0:
+                truncated = True
+                break
+            txs, more = await self._helius_pages(address, since, until, budget)
+            budget -= len(txs)
             truncated |= more
             for tx in txs:
                 if (signature := tx_signature(tx)) is not None:
                     by_signature[signature] = tx
         newest = sorted(by_signature.values(), key=lambda tx: tx.get("blockTime") or 0, reverse=True)
-        if truncated or len(newest) > self._max_txs:
-            self._warn_truncated()
-        newest = newest[: self._max_txs]
+        if truncated:
+            log.warning(
+                "Más de %d transacciones en la ventana entre el mint y sus pools: "
+                "faltan las demás (--max-txs)", self._max_txs,
+            )
         log.info("Leídas %d transacciones", len(newest))
         return list(newest)
 
     async def _helius_pages(
-        self, address: str, since: float, until: float | None
+        self, address: str, since: float, until: float | None, limit: int
     ) -> tuple[list[dict], bool]:
-        """Transacciones de `address` en la ventana y True si quedaron más
-        allá de max_txs. Lanza ValueError si el RPC no tiene el método."""
+        """Transacciones de `address` en la ventana, como mucho `limit`, y True
+        si quedaron más. Lanza ValueError si el RPC no tiene el método."""
         txs: list[dict] = []
         token = None
         # Helius filtra por tiempo en el servidor: una ventana antigua no
@@ -223,11 +227,11 @@ class TransactionReader:
         block_time = {"gte": int(since)}
         if until is not None:
             block_time["lte"] = int(until)
-        while len(txs) < self._max_txs:
+        while len(txs) < limit:
             options: dict = {
                 "transactionDetails": "full",
                 "sortOrder": "desc",
-                "limit": min(HELIUS_PAGE, self._max_txs - len(txs)),
+                "limit": min(HELIUS_PAGE, limit - len(txs)),
                 "commitment": COMMITMENT,
                 "encoding": "jsonParsed",
                 "maxSupportedTransactionVersion": MAX_TRANSACTION_VERSION,
@@ -261,7 +265,10 @@ class TransactionReader:
                 log.warning("No se pudieron pedir las firmas de %s: %s", address, exc)
         newest = sorted(signatures, key=signatures.__getitem__, reverse=True)
         if len(newest) > self._max_txs:
-            self._warn_truncated(len(newest))
+            log.warning(
+                "%d transacciones en la ventana, solo se leen las %d más recientes (--max-txs)",
+                len(newest), self._max_txs,
+            )
             newest = newest[: self._max_txs]
         log.info("Leyendo %d transacciones...", len(newest))
         return list(await asyncio.gather(*(self._transaction(s) for s in newest)))
@@ -551,7 +558,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--to", dest="end", metavar="HORA",
                         help="fin del rango (por defecto, ahora)")
     parser.add_argument("--min-sol", type=float, default=DEFAULT_MIN_SOL)
-    parser.add_argument("--max-txs", type=int, default=DEFAULT_MAX_TXS)
+    parser.add_argument("--max-txs", type=int, default=DEFAULT_MAX_TXS,
+                        help="transacciones leídas como máximo, entre el mint y sus pools")
     parser.add_argument("--method", choices=METHODS, default=DEFAULT_METHOD,
                         help="helius: getTransactionsForAddress (10 créditos/100 tx); "
                              "rpc: getTransaction por firma (1 crédito/tx), cualquier RPC")

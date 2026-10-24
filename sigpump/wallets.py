@@ -20,6 +20,7 @@ import json
 import logging
 import re
 import time
+import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -27,7 +28,7 @@ from pathlib import Path
 import aiohttp  # type: ignore[import-not-found]
 
 from sigpump.blacklist import Blacklist
-from sigpump.solana import RateLimiter, redact, rpc_call
+from sigpump.solana import MAX_REQUESTS_PER_SECOND, RateLimiter, redact, rpc_call
 
 log = logging.getLogger()
 
@@ -43,10 +44,6 @@ QUOTE_MINTS = STABLE_MINTS | {WSOL_MINT}
 # dos vueltas solo se miran las últimas: es un bot, no alguien a quien copiar.
 MAX_SIGNATURES_PER_POLL = 25
 REQUEST_TIMEOUT_SECONDS = 15
-# Ritmo máximo de peticiones al RPC, por proceso. El plan gratuito de Helius
-# corta a 10 por segundo: con el radar y buyers.py a la vez son 5 + 5, y los
-# 429 sueltos (p. ej. por la comprobación de autoridades) se reintentan.
-MAX_REQUESTS_PER_SECOND = 5
 # Versión de transacción más alta que se acepta. Si llega una más nueva, el
 # RPC da error y esa transacción se salta tras MAX_TX_ATTEMPTS intentos.
 MAX_TRANSACTION_VERSION = 1
@@ -261,7 +258,9 @@ def parse_buys(
     Compras de `wallet` en la transacción `tx` (getTransaction con
     jsonParsed): tokens cuyo saldo sube mientras la wallet paga SOL (al menos
     `min_sol`) o una stablecoin. Recibir un token sin pagar nada (airdrops de
-    spam, transferencias) no cuenta.
+    spam, transferencias) no cuenta. Si suben varios tokens en la misma
+    transacción, lo pagado se reparte entre ellos a partes iguales: no se
+    sabe cuánto fue a cada uno, y asignarlo entero a todos lo contaba dos veces.
     """
     meta = tx.get("meta") or {}
     if meta.get("err") is not None:
@@ -283,21 +282,22 @@ def parse_buys(
 
     if sol_spent < min_sol and stable_spent <= 0:
         return []
+    bought = [mint for mint, delta in deltas.items() if delta > 0 and mint not in QUOTE_MINTS]
+    share = max(1, len(bought))
     ts = tx.get("blockTime") or time.time()
     return [
         WalletBuy(
             wallet=wallet,
             label=label,
             mint=mint,
-            sol_spent=round(max(0.0, sol_spent), 4),
-            stable_spent=round(max(0.0, stable_spent), 2),
+            sol_spent=round(max(0.0, sol_spent) / share, 4),
+            stable_spent=round(max(0.0, stable_spent) / share, 2),
             new_position=pre.get(mint, 0.0) <= 0,
             signature=signature,
             ts=float(ts),
             trusted=trusted,
         )
-        for mint, delta in deltas.items()
-        if delta > 0 and mint not in QUOTE_MINTS
+        for mint in bought
     ]
 
 
@@ -339,6 +339,7 @@ class WalletWatcher:
         full_poll_seconds: float = 600.0,
         max_txs_per_hour: int = 0,
         max_inactive_seconds: float = 0.0,
+        limiter: RateLimiter | None = None,
     ):
         self._session = session
         self._rpc_url = rpc_url
@@ -357,7 +358,8 @@ class WalletWatcher:
         self._last_signature: dict[str, str | None] = {}
         # Firma -> intentos fallidos de leerla.
         self._attempts: dict[str, int] = {}
-        self._limiter = RateLimiter(MAX_REQUESTS_PER_SECOND)
+        # Compartido con la comprobación de autoridades: el tope del RPC es por API key.
+        self._limiter = limiter or RateLimiter(MAX_REQUESTS_PER_SECOND)
         # Wallet -> firmas avisadas por el WebSocket pendientes de leer.
         self._pending: dict[str, list[str]] = {}
         # Firmas ya leídas o descartadas, por orden de llegada (las más
@@ -509,8 +511,6 @@ class WalletWatcher:
                 self._last_signature.pop(wallet, None)
             else:
                 active[wallet] = info
-        for gone in set(self._pending) - set(active):
-            del self._pending[gone]
         buys: list[WalletBuy] = []
         now = time.monotonic()
         if not self._connected or now >= self._next_full_poll:
@@ -520,9 +520,15 @@ class WalletWatcher:
                 *(self._poll_wallet(wallet, info) for wallet, info in active.items())
             ):
                 buys += wallet_buys
+        # Se limpia después de la pasada completa: mientras corre, el
+        # WebSocket puede apuntar firmas de una wallet que esa misma pasada
+        # echó por bot, y leerlas tiraba un KeyError que perdía las compras
+        # de toda la vuelta.
+        for gone in [w for w in self._pending if w not in self._wallets or self.banned(w)]:
+            del self._pending[gone]
         # Después de la pasada completa: las que ya leyó se saltan.
         for wallet_buys in await asyncio.gather(
-            *(self._read_pending(wallet, active[wallet]) for wallet in list(self._pending))
+            *(self._read_pending(wallet, self._wallets[wallet]) for wallet in list(self._pending))
         ):
             buys += wallet_buys
         return buys
@@ -649,6 +655,10 @@ class WalletWatcher:
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError) as exc:
                 # La URL lleva la API key: no se escribe en el log.
                 log.warning("WebSocket de wallets caído: %s", redact(exc) or type(exc).__name__)
+            except Exception:
+                # Un mensaje con una forma inesperada no debe tumbar el bot:
+                # el gather() de radar.run() pararía todo el proceso.
+                log.error("Error inesperado en el WebSocket de wallets:\n%s", redact(traceback.format_exc()))
             finally:
                 self._connected = False
             if time.monotonic() - started > WS_RECONNECT_MAX_SECONDS:
@@ -675,8 +685,9 @@ class WalletWatcher:
                 return
 
     async def _sync_subscriptions(self, ws) -> None:
-        """Suscribe las wallets nuevas del fichero y quita las que ya no están."""
-        wanted = set(self._wallets)
+        """Suscribe las wallets nuevas del fichero y quita las que ya no están
+        o tienen una entrada temporal en la lista negra (no se consultan)."""
+        wanted = {wallet for wallet in self._wallets if not self.banned(wallet)}
         for wallet in wanted - self._ws_wallets.keys():
             self._ws_next_id += 1
             self._ws_requests[self._ws_next_id] = wallet
@@ -720,6 +731,10 @@ class WalletWatcher:
         value = (params.get("result") or {}).get("value") or {}
         signature = value.get("signature")
         if wallet is None or not isinstance(signature, str) or signature in self._seen:
+            return
+        # Una wallet ya quitada (o castigada) sigue suscrita hasta la próxima
+        # sincronización: sus avisos no se apuntan.
+        if wallet not in self._wallets or self.banned(wallet):
             return
         self._last_active[wallet] = time.time()
         # Se cuentan todas, también las que no se van a leer: un bot se nota

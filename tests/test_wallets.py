@@ -8,7 +8,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from sigpump.blacklist import Blacklist
 from sigpump.radar import MemecoinRadar
@@ -226,6 +226,14 @@ class TestParseBuys(unittest.TestCase):
         tx = _tx(post_tokens=[_saldo(TOKEN, 1_000)], sol_gastado=1, err={"InstructionError": []})
         self.assertEqual(parse_buys(tx, WALLET, "ballena", "SIG", min_sol=0.1), [])
 
+    def test_varios_tokens_se_reparten_lo_pagado(self):
+        # Antes cada token llevaba los 2 SOL enteros: 4 SOL gastados en total.
+        otro = "OtroMint111111111111111111111111111111111pump"
+        tx = _tx(post_tokens=[_saldo(TOKEN, 1_000), _saldo(otro, 50)], sol_gastado=2)
+        buys = parse_buys(tx, WALLET, "ballena", "SIG", min_sol=0.1)
+        self.assertEqual({b.mint for b in buys}, {TOKEN, otro})
+        self.assertEqual([b.sol_spent for b in buys], [1.0, 1.0])
+
 
 class _FakeResponse:
     status = 200
@@ -356,6 +364,23 @@ class TestWalletWatcher(unittest.IsolatedAsyncioTestCase):
 
 
 
+class _RpcPorWallet(_FakeRpc):
+    """_FakeRpc con firmas distintas por wallet; `al_leer` se llama en cada
+    getTransaction (para simular lo que llega por el WebSocket mientras)."""
+
+    def __init__(self, por_wallet, txs=None, al_leer=None):
+        super().__init__(txs=txs)
+        self.por_wallet = por_wallet
+        self.al_leer = al_leer
+
+    def post(self, url, json=None, timeout=None):
+        if json["method"] == "getSignaturesForAddress":
+            self.firmas = self.por_wallet[json["params"][0]]
+        elif self.al_leer:
+            self.al_leer()
+        return super().post(url, json, timeout)
+
+
 class _FakeWs:
     def __init__(self):
         self.enviados: list[dict] = []
@@ -424,6 +449,48 @@ class TestWebSocket(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rpc.llamadas, [])
         await watcher._sync_subscriptions(ws)
         self.assertEqual(ws.enviados[-1]["method"], "logsUnsubscribe")
+
+    async def test_bot_echado_en_la_pasada_completa_no_pierde_las_demas_compras(self):
+        """Mientras la pasada completa lee otras wallets, el WebSocket aún
+        apunta firmas del bot que esa pasada acaba de echar: leerlas daba un
+        KeyError que perdía las compras de toda la vuelta."""
+        self.path.write_text(f"{WALLET}  # bot\n{OTRA}  # ballena\n", encoding="utf-8")
+        negra = Blacklist(self.path.with_name("negra.db"))
+        rpc = _RpcPorWallet({WALLET: ["VIEJA"], OTRA: ["VIEJA2"]})
+        watcher = WalletWatcher(rpc, "http://rpc", self.path, 0.1, negra, max_txs_per_hour=3)
+        await watcher.poll()
+        rpc.por_wallet = {WALLET: ["D", "C", "B", "A", "VIEJA"], OTRA: ["NUEVA", "VIEJA2"]}
+        rpc.txs["NUEVA"] = _tx(post_tokens=[_saldo(TOKEN, 1, owner=OTRA)], sol_gastado=1, wallet=OTRA)
+        rpc.al_leer = lambda: watcher._pending.setdefault(WALLET, []).append("TARDE")
+        [buy] = await watcher.poll()
+        self.assertEqual((buy.wallet, buy.signature), (OTRA, "NUEVA"))
+        self.assertIn(WALLET, _permanentes(negra))
+        self.assertEqual(watcher._pending, {})
+
+    async def test_una_wallet_castigada_no_apunta_avisos_y_se_desuscribe(self):
+        rpc = _FakeRpc(firmas=["VIEJA"])
+        watcher, ws = await self._conectado(rpc)
+        watcher._banned_until[WALLET] = time.time() + 3600
+        watcher._handle(_aviso(77, "NUEVA"))
+        self.assertEqual(watcher._pending, {})
+        await watcher._sync_subscriptions(ws)
+        self.assertEqual(ws.enviados[-1]["method"], "logsUnsubscribe")
+
+    async def test_un_error_inesperado_no_para_el_websocket(self):
+        """Antes salía de listen() y el gather() de radar.run() paraba el bot."""
+        class _Sesion:
+            intentos = 0
+
+            def ws_connect(self, url, heartbeat=None):
+                self.intentos += 1
+                raise RuntimeError("mensaje con forma rara")
+
+        sesion = _Sesion()
+        watcher = WalletWatcher(sesion, "http://rpc", self.path, 0.1)
+        with patch("sigpump.wallets.asyncio.sleep", side_effect=[None, asyncio.CancelledError()]):
+            with self.assertRaises(asyncio.CancelledError):
+                await watcher.listen("wss://rpc/?api-key=SECRETO")
+        self.assertEqual(sesion.intentos, 2)
 
     async def test_bot_sin_tope_se_sigue(self):
         negra = Blacklist(self.path.with_name("negra.db"))
@@ -688,6 +755,7 @@ def _buy(wallet=WALLET, label="ballena", mint="TOK", ts=None, new=True, trusted=
 class _FakeWatcher:
     def __init__(self, *rondas):
         self.rondas = list(rondas)
+        self.wallets: dict[str, FollowedWallet] = {}
 
     async def poll(self):
         return self.rondas.pop(0) if self.rondas else []
@@ -913,6 +981,19 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         await reiniciado._wallets_once(client, alerter)
         [(_, signal)] = alerter.wallet
         self.assertEqual(signal.others, ("ballena",))
+
+    async def test_la_estrella_de_confianza_sobrevive_a_un_reinicio(self):
+        # Las compras recuperadas del registro no guardan si la wallet es de
+        # confianza: se mira en el fichero de ahora.
+        radar = self._radar([_buy(trusted=True)])
+        client = _FakeClient(pairs=[_pair("TOK")])
+        await radar._wallets_once(client, _FakeAlerter())
+        reiniciado = self._radar([_buy(wallet=OTRA, label="ballena 2")])
+        reiniciado._wallet_watcher.wallets = {WALLET: FollowedWallet("ballena", trusted=True)}
+        reiniciado._restore_cooldowns()
+        alerter = _FakeAlerter()
+        await reiniciado._wallets_once(client, alerter)
+        self.assertEqual(alerter.wallet[-1][1].others, ("⭐ ballena",))
 
     async def test_wallet_de_confianza_avisa_sola(self):
         radar = self._radar([_buy(trusted=True)], wallets_min_wallets=2)

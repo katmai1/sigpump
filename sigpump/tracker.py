@@ -399,46 +399,48 @@ class AlertTracker:
             if price and (token not in token_prices or liquidity > token_prices[token][0]):
                 token_prices[token] = (liquidity, price)
         try:
-            for row in pending:
-                if row["bonding_curve"]:
-                    price = token_prices.get(row["token"], (0.0, 0.0))[1]
-                else:
-                    price = prices.get(row["pool"])
-                if not price:
-                    continue
-                ret = round((price / row["precio_usd"] - 1) * 100, 2)
-                elapsed_minutes = (now - row["timestamp"]) / 60
-                changes = {}
-                if row[_TRACKING_COLUMN] is None and elapsed_minutes < TRACKING_MINUTES + CHECKPOINT_TOLERANCE_MINUTES:
-                    changes[_BEST] = ret if row[_BEST] is None else max(row[_BEST], ret)
-                    changes[_WORST] = ret if row[_WORST] is None else min(row[_WORST], ret)
-                logged = None
-                for minutes, column in zip(CHECKPOINTS_MINUTES, _CHECKPOINT_COLUMNS):
-                    in_window = minutes <= elapsed_minutes < minutes + checkpoint_tolerance(minutes)
-                    if in_window and row[column] is None:
-                        changes[column] = ret
-                        if minutes >= TRACKING_MINUTES:
-                            logged = minutes
-                if not changes:
-                    continue
-                conn.execute(
-                    f"UPDATE alertas SET {', '.join(f'{c} = :{c}' for c in changes)} WHERE id = :id",
-                    {**changes, "id": row["id"]},
-                )
-                if logged is not None:
-                    final = {**dict(row), **changes}
-                    log.info(
-                        "Seguimiento de %s (%s): %s | mejor %s, peor %s",
-                        row["simbolo"],
-                        (row["tipo"] or "alerta") if row["enviada"] else "descartado",
-                        ", ".join(
-                            f"+{format_minutes(m)} {final[c]:+.1f}%" if final[c] is not None
-                            else f"+{format_minutes(m)} s/d"
-                            for m, c in zip(CHECKPOINTS_MINUTES, _CHECKPOINT_COLUMNS)
-                            if m <= logged
-                        ),
-                        *(f"{final[c]:+.1f}%" if final[c] is not None else "s/d" for c in (_BEST, _WORST)),
+            # Todo o nada: con un error a mitad, lo ya actualizado quedaba
+            # pendiente y se guardaba con el commit de la siguiente escritura.
+            with conn:
+                for row in pending:
+                    if row["bonding_curve"]:
+                        price = token_prices.get(row["token"], (0.0, 0.0))[1]
+                    else:
+                        price = prices.get(row["pool"])
+                    if not price:
+                        continue
+                    ret = round((price / row["precio_usd"] - 1) * 100, 2)
+                    elapsed_minutes = (now - row["timestamp"]) / 60
+                    changes = {}
+                    if row[_TRACKING_COLUMN] is None and elapsed_minutes < TRACKING_MINUTES + CHECKPOINT_TOLERANCE_MINUTES:
+                        changes[_BEST] = ret if row[_BEST] is None else max(row[_BEST], ret)
+                        changes[_WORST] = ret if row[_WORST] is None else min(row[_WORST], ret)
+                    logged = None
+                    for minutes, column in zip(CHECKPOINTS_MINUTES, _CHECKPOINT_COLUMNS):
+                        in_window = minutes <= elapsed_minutes < minutes + checkpoint_tolerance(minutes)
+                        if in_window and row[column] is None:
+                            changes[column] = ret
+                            if minutes >= TRACKING_MINUTES:
+                                logged = minutes
+                    if not changes:
+                        continue
+                    conn.execute(
+                        f"UPDATE alertas SET {', '.join(f'{c} = :{c}' for c in changes)} WHERE id = :id",
+                        {**changes, "id": row["id"]},
                     )
-            conn.commit()
+                    if logged is not None:
+                        final = {**dict(row), **changes}
+                        log.info(
+                            "Seguimiento de %s (%s): %s | mejor %s, peor %s",
+                            row["simbolo"],
+                            (row["tipo"] or "alerta") if row["enviada"] else "descartado",
+                            ", ".join(
+                                f"+{format_minutes(m)} {final[c]:+.1f}%" if final[c] is not None
+                                else f"+{format_minutes(m)} s/d"
+                                for m, c in zip(CHECKPOINTS_MINUTES, _CHECKPOINT_COLUMNS)
+                                if m <= logged
+                            ),
+                            *(f"{final[c]:+.1f}%" if final[c] is not None else "s/d" for c in (_BEST, _WORST)),
+                        )
         except sqlite3.Error as exc:
             log.warning("No se pudo actualizar %s: %s", self._path, exc)

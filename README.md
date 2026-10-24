@@ -33,7 +33,9 @@ Para cada compra:
 Una compra se detecta por los saldos de la wallet antes y después de la
 transacción: sube el de un token mientras gasta SOL (al menos `min_sol`) o
 USDC/USDT. No depende del DEX ni del agregador por el que se haga, y recibir
-un token sin pagar (airdrops de spam) no cuenta. El aviso indica si es una
+un token sin pagar (airdrops de spam) no cuenta. Si en una misma
+transacción entra en varios tokens, lo pagado se reparte entre ellos a
+partes iguales. El aviso indica si es una
 entrada nueva o amplía una posición, cuánto pagó y qué otras wallets
 seguidas entraron en el mismo token en los últimos `confluence_minutes`.
 

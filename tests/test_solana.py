@@ -129,6 +129,27 @@ class TestTokenAuthorities(unittest.IsolatedAsyncioTestCase):
                 # No se cacheó: al siguiente intento se vuelve a preguntar.
                 self.assertIn("TOK", await authorities.unsafe_reasons(["TOK"]))
 
+    async def test_un_429_se_reintenta_y_no_deja_pasar_el_token(self):
+        """Antes un 429 dejaba el lote sin comprobar y el aviso salía como limpio."""
+        session = _FakeSession(_FakeResponse({}, 429), _respuesta(_cuenta(mint="Alguien")))
+        with patch("sigpump.solana.asyncio.sleep"):
+            reasons = await TokenAuthorities(session).unsafe_reasons(["TOK"])
+        self.assertIn("TOK", reasons)
+        self.assertEqual(len(session.peticiones), 2)
+
+    async def test_usa_el_limitador_que_se_le_da(self):
+        limiter = RateLimiter(1000)
+        llamadas = []
+        original = limiter.wait
+
+        async def wait():
+            llamadas.append(1)
+            await original()
+
+        limiter.wait = wait
+        await TokenAuthorities(_FakeSession(_respuesta(_cuenta())), limiter=limiter).unsafe_reasons(["TOK"])
+        self.assertEqual(llamadas, [1])
+
     async def test_pide_el_mint_parseado_al_rpc(self):
         session = _FakeSession(_respuesta(_cuenta()))
         await TokenAuthorities(session, "https://rpc.ejemplo").unsafe_reasons(["TOK", "TOK"])

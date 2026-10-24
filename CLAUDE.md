@@ -49,6 +49,8 @@ consultarlo.
   `tipo` 'alerta'/'prealerta' son restos del antiguo radar de trending.
 - `sigpump/wallets.py`: detección de compras por saldos antes/después
   (polling RPC + WebSocket, pasada completa cada `full_poll_minutes`).
+- `sigpump/filters.py`: tabla `PAIR_FILTERS` con los filtros del par y si
+  cada uno se aplica en bonding curve y a las wallets de confianza.
 - `sigpump/screener.py` (DexScreener), `solana.py` (mint/freeze authority),
   `telegram.py` (formato y envío), `tracker.py` (SQLite y retornos a
   +5m…+24h), `blacklist.py` (tabla `lista_negra`), `config.py` (carga y
@@ -83,7 +85,9 @@ un umbral:
 
 Tener en cuenta las excepciones existentes: wallets de confianza (`*` en
 `wallets.txt`) y compras en bonding curve tienen sus propios subconjuntos de
-filtros (ver README).
+filtros (ver README). Esos subconjuntos se definen solo en `PAIR_FILTERS`;
+`tests/test_filters.py` comprueba que README, `config.example.toml` y
+`config.py` digan lo mismo, así que al cambiar uno hay que ajustar los textos.
 
 ## Un cambio completo incluye
 

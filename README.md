@@ -272,6 +272,7 @@ run.py                    CLI: parsea argumentos y arranca el seguimiento
 sigpump/
   config.py                Carga y validación de config.toml
   radar.py                  Orquesta el ciclo compra -> filtros -> aviso -> registro
+  filters.py                Filtros del par y a qué compras se aplica cada uno
   wallets.py                 Detección de las compras de las wallets (RPC y WebSocket)
   screener.py                 Cliente HTTP async de DexScreener
   solana.py                   Comprobación de mint/freeze authority y llamadas al RPC

@@ -18,11 +18,12 @@ import aiohttp  # type: ignore[import-not-found]
 
 from sigpump.blacklist import Blacklist
 from sigpump.config import Config
+from sigpump.filters import pair_rejection, venue_reason
 from sigpump.screener import DexScreenerClient
 from sigpump.solana import MAX_REQUESTS_PER_SECOND, RateLimiter, TokenAuthorities
 from sigpump.telegram import TelegramAlerter
 from sigpump.tracker import AlertTracker, format_minutes
-from sigpump.util import liquidity_usd, market_cap_usd, normalize_address, to_float, txns_m5
+from sigpump.util import liquidity_usd, normalize_address
 from sigpump.wallets import WalletBuy, WalletSignal, WalletWatcher, import_blacklist_file, ws_url
 
 log = logging.getLogger()
@@ -46,15 +47,6 @@ def _mint(pair: dict) -> str:
 
 def _symbol(pair: dict) -> object:
     return (pair.get("baseToken") or {}).get("symbol")
-
-
-def _matches_quote(pair: dict, wanted: list[str]) -> bool:
-    """True si el par cotiza contra una de las monedas pedidas, comparando por
-    símbolo o por dirección del quote."""
-    quote = pair.get("quoteToken") or {}
-    symbol = str(quote.get("symbol") or "").upper()
-    address = str(normalize_address(quote.get("address") or ""))
-    return any(str(w).upper() == symbol or str(normalize_address(w)) == address for w in wanted)
 
 
 class MemecoinRadar:
@@ -145,7 +137,7 @@ class MemecoinRadar:
             "txns": {"m5": {"buys": txns, "sells": 0}} if txns is not None else {},
             "volume": {"h1": row["volumen_h1_usd"]},
         }
-        return self._wallet_pair_rejection(pair, now=ts) is None
+        return pair_rejection(self._config, pair, now=ts) is None
 
     def _prune_alerted(self) -> None:
         """Elimina los cooldowns expirados, para que la memoria no crezca
@@ -184,7 +176,7 @@ class MemecoinRadar:
         se queda el de más liquidez, que luego se descarta por eso.
         """
         def rank(pair: dict) -> tuple[bool, float]:
-            return self._venue_reason(pair) is None, liquidity_usd(pair)
+            return venue_reason(self._config, pair) is None, liquidity_usd(pair)
 
         wanted = set(addresses)
         best: dict[str, dict] = {}
@@ -196,25 +188,6 @@ class MemecoinRadar:
             if current is None or rank(pair) > rank(current):
                 best[address] = pair
         return list(best.values())
-
-    def _venue_reason(self, pair: dict) -> str | None:
-        """Motivo para descartar un par por dónde cotiza ([dexscreener].dex_ids
-        y quote_tokens), o None si pasa."""
-        cfg = self._config
-        if cfg.dex_ids:
-            dex_id = str(pair.get("dexId") or "")
-            if dex_id.lower() not in {d.lower() for d in cfg.dex_ids}:
-                return f"par en {dex_id or '?'}, no en {' o '.join(cfg.dex_ids)}"
-        return self._quote_reason(pair)
-
-    def _quote_reason(self, pair: dict) -> str | None:
-        """Motivo para descartar un par por la moneda contra la que cotiza
-        ([dexscreener].quote_tokens), o None si pasa."""
-        quote_tokens = self._config.quote_tokens
-        if quote_tokens and not _matches_quote(pair, quote_tokens):
-            quote = (pair.get("quoteToken") or {}).get("symbol") or "?"
-            return f"par contra {quote}, no contra {' o '.join(quote_tokens)}"
-        return None
 
     async def _unsafe_reasons(self, pairs: list[dict]) -> dict[str, str]:
         """
@@ -283,59 +256,6 @@ class MemecoinRadar:
             watcher.ban(
                 wallet, info.label, f"mediana {median:+.0f}% a {format_minutes(minutes)} en {len(returns)} tokens"
             )
-
-    def _wallet_pair_rejection(
-        self, pair: dict, now: float | None = None, curve: bool = False, trusted: bool = False
-    ) -> str | None:
-        """Motivo para no avisar de una compra de wallet por cómo está el par
-        ([dexscreener].dex_ids y quote_tokens; [wallets].min_pair_age_minutes,
-        max_price_change_h1_pct, max_price_change_m5_pct, min_market_cap_usd, min_txns_m5,
-        min_volume_h1_usd y max_turnover_h1), o None si pasa. `now` es la hora contra la que se
-        mide la edad del par (ahora si no se da). Con `curve` (token en
-        bonding curve) no se miran el dex, la edad, el market cap ni el
-        turnover: un token sin graduar los incumple siempre. Con `trusted`
-        (wallet de confianza) no se miran el cambio en 1h, el market cap, el
-        turnover ni min_txns_m5: en pares de más de un día, sus compras que
-        esos filtros descartaban eran las mejores del registro (+18% de
-        mediana a 1 h), y en octubre las de 4y2T…dvE1 que min_txns_m5 tiraba
-        (0-2 txns en 5 min) acabaron todas en positivo a 24 h.
-        max_price_change_m5_pct se mira siempre: comprar lo que acaba de
-        subir mucho es llegar tarde, sea quien sea quien compra. Igual
-        min_volume_h1_usd: un token sin volumen no se mueve."""
-        cfg = self._config
-        venue_reason = self._quote_reason(pair) if curve else self._venue_reason(pair)
-        if venue_reason:
-            return venue_reason
-        created_at = to_float(pair.get("pairCreatedAt"))
-        # Sin pairCreatedAt no se puede evaluar la edad: no se descarta por ella.
-        if cfg.wallets_min_pair_age_minutes and created_at > 0 and not curve:
-            age_minutes = ((time.time() if now is None else now) - created_at / 1000) / 60
-            if age_minutes < cfg.wallets_min_pair_age_minutes:
-                return f"par creado hace {age_minutes:.0f} min"
-        change_h1 = to_float((pair.get("priceChange") or {}).get("h1"))
-        if cfg.wallets_max_price_change_h1_pct and change_h1 > cfg.wallets_max_price_change_h1_pct and not trusted:
-            return f"cambio 1h {change_h1:+,.0f}% > {cfg.wallets_max_price_change_h1_pct:,.0f}%"
-        change_m5 = to_float((pair.get("priceChange") or {}).get("m5"))
-        if cfg.wallets_max_price_change_m5_pct and change_m5 > cfg.wallets_max_price_change_m5_pct:
-            return f"cambio 5m {change_m5:+,.0f}% > {cfg.wallets_max_price_change_m5_pct:,.0f}%"
-        market_cap = market_cap_usd(pair)
-        if market_cap < cfg.wallets_min_market_cap_usd and not curve and not trusted:
-            return f"market cap ${market_cap:,.0f} < ${cfg.wallets_min_market_cap_usd:,.0f}"
-        # Sin txns o volume no se puede evaluar la actividad: no se descarta por ella.
-        has_txns = isinstance((pair.get("txns") or {}).get("m5"), dict)
-        if cfg.wallets_min_txns_m5 and has_txns and not trusted:
-            count = int(txns_m5(pair))
-            if count < cfg.wallets_min_txns_m5:
-                return f"{count} txns en 5 min < {cfg.wallets_min_txns_m5}"
-        volume_h1 = (pair.get("volume") or {}).get("h1")
-        if cfg.wallets_min_volume_h1_usd and volume_h1 is not None:
-            if to_float(volume_h1) < cfg.wallets_min_volume_h1_usd:
-                return f"volumen 1h ${to_float(volume_h1):,.0f} < ${cfg.wallets_min_volume_h1_usd:,.0f}"
-        if cfg.wallets_max_turnover_h1 and volume_h1 is not None and market_cap > 0 and not curve and not trusted:
-            turnover = to_float(volume_h1) / market_cap
-            if turnover > cfg.wallets_max_turnover_h1:
-                return f"volumen 1h {turnover:.0%} del market cap > {cfg.wallets_max_turnover_h1:.0%}"
-        return None
 
     def _blacklist_hyperactive(self, buy: WalletBuy) -> None:
         """Mete en la lista negra la wallet de `buy` si pasó de
@@ -435,7 +355,9 @@ class MemecoinRadar:
             # Se marca también al descartar, para no registrar una fila por
             # cada compra repetida del mismo token peligroso.
             self._wallet_alerted[key] = time.time()
-            pair_reason = unsafe.get(buy.mint) or self._wallet_pair_rejection(pair, curve=curve, trusted=buy.trusted)
+            pair_reason = unsafe.get(buy.mint) or pair_rejection(
+                self._config, pair, curve=curve, trusted=buy.trusted
+            )
             reason = pair_reason
             wallets = 1 + len(signal.others)
             if not reason and self._hyperactive(buy.wallet):

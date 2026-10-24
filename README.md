@@ -273,9 +273,10 @@ sigpump/
   config.py                Carga y validación de config.toml
   radar.py                  Orquesta el ciclo compra -> filtros -> aviso -> registro
   filters.py                Filtros del par y a qué compras se aplica cada uno
+  cooldowns.py              Cooldowns, confluencia y actividad de las compras recientes
   wallets.py                 Detección de las compras de las wallets (RPC y WebSocket)
   screener.py                 Cliente HTTP async de DexScreener
-  solana.py                   Comprobación de mint/freeze authority y llamadas al RPC
+  solana.py                   Cliente del RPC y comprobación de mint/freeze authority
   telegram.py                 Formateo y envío de los avisos por Telegram
   tracker.py                  Registro SQLite de las compras y su resultado
   blacklist.py                Lista negra de wallets (tabla lista_negra)

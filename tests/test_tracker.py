@@ -8,7 +8,9 @@ import time
 import unittest
 from pathlib import Path
 
-from sigpump.tracker import CHECKPOINT_TOLERANCE_MINUTES, COLUMNS, AlertTracker
+from sigpump.config import Config
+from sigpump.filters import pair_rejection
+from sigpump.tracker import CHECKPOINT_TOLERANCE_MINUTES, COLUMNS, AlertTracker, pair_from_row
 
 
 def _pair(address="TOK", pool="POOL", price="1.0"):
@@ -117,6 +119,23 @@ class TestAlertTracker(unittest.IsolatedAsyncioTestCase):
     def test_sin_fecha_de_creacion_la_edad_queda_vacia(self):
         self._tracker().record(_pair(), sent=True)
         self.assertIsNone(self._rows()[0]["edad_par_min"])
+
+    def test_el_par_de_una_fila_da_lo_mismo_en_los_filtros(self):
+        par = {**_pair(), "dexId": "pumpswap", "quoteToken": {"symbol": "SOL"},
+               "pairCreatedAt": (time.time() - 3 * 3600) * 1000}
+        self._tracker().record(par, sent=True)
+        [row] = self._rows()
+        reconstruido = pair_from_row(row, "pumpswap")
+        for cfg in (
+            Config(alert_log_path=""),
+            Config(alert_log_path="", wallets_min_pair_age_minutes=240),     # lo descarta por edad
+            Config(alert_log_path="", wallets_min_txns_m5=41),               # 40 txns: lo descarta
+            Config(alert_log_path="", wallets_min_market_cap_usd=900_000),   # justo en el límite: pasa
+            Config(alert_log_path="", wallets_max_price_change_h1_pct=30),   # +40%: lo descarta
+        ):
+            with self.subTest(cfg=cfg):
+                original = pair_rejection(cfg, par, now=row["timestamp"])
+                self.assertEqual(pair_rejection(cfg, reconstruido, now=row["timestamp"]) is None, original is None)
 
     def test_descarte_guarda_el_motivo(self):
         self._tracker().record(_pair(), sent=False, reason="llega tarde")

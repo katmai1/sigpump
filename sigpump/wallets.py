@@ -28,7 +28,7 @@ from pathlib import Path
 import aiohttp  # type: ignore[import-not-found]
 
 from sigpump.blacklist import Blacklist
-from sigpump.solana import MAX_REQUESTS_PER_SECOND, RateLimiter, redact, rpc_call
+from sigpump.solana import RpcClient, redact
 
 log = logging.getLogger()
 
@@ -43,7 +43,6 @@ QUOTE_MINTS = STABLE_MINTS | {WSOL_MINT}
 # Firmas nuevas que se piden por wallet y vuelta. Si una wallet hace más entre
 # dos vueltas solo se miran las últimas: es un bot, no alguien a quien copiar.
 MAX_SIGNATURES_PER_POLL = 25
-REQUEST_TIMEOUT_SECONDS = 15
 # Versión de transacción más alta que se acepta. Si llega una más nueva, el
 # RPC da error y esa transacción se salta tras MAX_TX_ATTEMPTS intentos.
 MAX_TRANSACTION_VERSION = 1
@@ -324,141 +323,45 @@ def ws_url(rpc_url: str) -> str:
     return rpc_url
 
 
-class WalletWatcher:
-    """Consulta las transacciones nuevas de las wallets del fichero y
-    devuelve sus compras. Relee el fichero cuando cambia, y la lista negra
-    en cada vuelta, sin reiniciar."""
+class WalletList:
+    """Las wallets seguidas: las del fichero menos las de la lista negra, y
+    hasta cuándo está castigada cada una de las temporales (siguen en el
+    fichero, pero no se consultan). Relee el fichero cuando cambia, y la
+    lista negra en cada vuelta, sin reiniciar."""
 
-    def __init__(
-        self,
-        session: aiohttp.ClientSession,
-        rpc_url: str,
-        path: Path,
-        min_sol: float,
-        blacklist: Blacklist | None = None,
-        full_poll_seconds: float = 600.0,
-        max_txs_per_hour: int = 0,
-        max_inactive_seconds: float = 0.0,
-        limiter: RateLimiter | None = None,
-    ):
-        self._session = session
-        self._rpc_url = rpc_url
+    def __init__(self, path: Path, blacklist: Blacklist | None = None):
         self._path = path
-        self._min_sol = min_sol
         self._blacklist = blacklist
         self._wallets: dict[str, FollowedWallet] = {}
-        # Wallet -> fin (epoch) de su entrada temporal en la lista negra: no
-        # se consulta hasta entonces, pero sigue en el fichero de wallets.
+        # Wallet -> fin (epoch) de su entrada temporal en la lista negra.
         self._banned_until: dict[str, float] = {}
         # Fecha del fichero y lista negra con los que se cargaron las wallets.
         self._loaded: tuple[float, dict[str, float | None]] | None = None
-        # Wallet -> última firma procesada. Una wallet sin entrada todavía no
-        # tiene punto de partida: su primera vuelta solo lo fija, para no
-        # avisar de su historial al arrancar.
-        self._last_signature: dict[str, str | None] = {}
-        # Firma -> intentos fallidos de leerla.
-        self._attempts: dict[str, int] = {}
-        # Compartido con la comprobación de autoridades: el tope del RPC es por API key.
-        self._limiter = limiter or RateLimiter(MAX_REQUESTS_PER_SECOND)
-        # Wallet -> firmas avisadas por el WebSocket pendientes de leer.
-        self._pending: dict[str, list[str]] = {}
-        # Firmas ya leídas o descartadas, por orden de llegada (las más
-        # viejas se olvidan al pasar de SEEN_SIGNATURES_MAX).
-        self._seen: dict[str, None] = {}
-        # Con el WebSocket conectado solo se leen las avisadas, y todas las
-        # wallets se consultan cada full_poll_seconds por si se perdió algún aviso.
-        self._connected = False
-        self._full_poll_seconds = full_poll_seconds
-        self._next_full_poll = 0.0
-        # Wallet -> firma -> hora de sus transacciones de la última hora, para
-        # detectar los bots antes de gastar una consulta en cada una. 0 = sin tope.
-        self._max_txs_per_hour = max_txs_per_hour
-        self._activity: dict[str, dict[str, float]] = {}
-        # Wallet -> hora de su última transacción conocida, para mandar a la
-        # lista negra las abandonadas. 0 = no hacerlo.
-        self._max_inactive_seconds = max_inactive_seconds
-        self._last_active: dict[str, float] = {}
-        # Estado de la conexión actual: wallet -> id de su suscripción (None
-        # mientras no llega la respuesta), id de suscripción -> wallet, e id
-        # de petición -> wallet de las suscripciones pedidas.
-        self._ws_wallets: dict[str, int | None] = {}
-        self._ws_subs: dict[int, str] = {}
-        self._ws_requests: dict[int, str] = {}
-        self._ws_next_id = 0
 
     @property
     def wallets(self) -> dict[str, FollowedWallet]:
         return self._wallets
 
+    @property
+    def has_blacklist(self) -> bool:
+        return self._blacklist is not None
+
     def banned(self, address: str) -> bool:
         """True si `address` tiene una entrada temporal vigente en la lista negra."""
         return self._banned_until.get(address, 0.0) > time.time()
 
-    def blacklist(self, address: str, reason: str, seconds: float | None = None) -> None:
-        """Mete `address` en la lista negra y deja de seguirla ya. Con
-        `seconds`, solo durante ese tiempo: sigue en el fichero de wallets y
-        se vuelve a consultar al acabar. Lanza OSError si no se puede
-        escribir la lista."""
+    def blacklist(self, address: str, reason: str, until: float | None = None) -> None:
+        """Mete `address` en la lista negra; con `until` (epoch), solo hasta
+        entonces. Lanza OSError si no se puede escribir la lista."""
         if self._blacklist is None:
             return
-        until = None if seconds is None else time.time() + seconds
         self._blacklist.add(address, reason, until)
         if until is None:
             self._wallets.pop(address, None)
         else:
             self._banned_until[address] = until
-        self._last_signature.pop(address, None)
-        self._activity.pop(address, None)
-        self._last_active.pop(address, None)
-        self._pending.pop(address, None)
         # Fuerza la relectura, que la quita también del fichero de wallets.
         self._loaded = None
-
-    def ban(self, address: str, label: str, reason: str, seconds: float | None = None) -> bool:
-        """blacklist() con su aviso en el log, con el motivo "etiqueta: motivo".
-        True si la metió; si no se pudo escribir la lista, lo avisa y False."""
-        try:
-            self.blacklist(address, f"{label}: {reason}", seconds)
-        except OSError as exc:
-            log.warning("No se pudo añadir %s a la lista negra: %s", label, exc)
-            return False
-        log.warning("Wallet %s a la lista negra: %s", label, reason)
-        return True
-
-    def _blacklist_bot(self, wallet: str, signatures: list[tuple[str, float]]) -> bool:
-        """Apunta las transacciones (firma, hora) de `wallet` y, si en la
-        última hora pasa de max_txs_per_hour, la mete en la lista negra: es un
-        bot, y leer cada una de sus transacciones agota los créditos del RPC.
-        True si la quitó."""
-        if not self._max_txs_per_hour or self._blacklist is None or wallet not in self._wallets:
-            return False
-        recent = self._activity.setdefault(wallet, {})
-        for signature, ts in signatures:
-            recent.setdefault(signature, ts)
-        cutoff = time.time() - ACTIVITY_WINDOW_SECONDS
-        for signature in [s for s, ts in recent.items() if ts < cutoff]:
-            del recent[signature]
-        if len(recent) <= self._max_txs_per_hour:
-            return False
-        return self.ban(wallet, self._wallets[wallet].label, f"bot, {len(recent)} tx en 1h")
-
-    def _blacklist_abandoned(self, wallet: str) -> bool:
-        """Mete `wallet` en la lista negra si lleva más de max_inactive_seconds
-        sin ninguna transacción: está abandonada y solo gasta consultas. Es
-        por otros max_inactive_seconds: al acabar se vuelve a consultar y,
-        si sigue sin operar, vuelve a entrar. True si la quitó."""
-        last = self._last_active.get(wallet)
-        if not self._max_inactive_seconds or self._blacklist is None or last is None:
-            return False
-        idle = time.time() - last
-        if idle <= self._max_inactive_seconds or wallet not in self._wallets:
-            return False
-        label = self._wallets[wallet].label
-        reason = f"{ABANDONED_REASON}, {idle / 86400:.0f} días sin actividad"
-        if not self.ban(wallet, label, reason, seconds=self._max_inactive_seconds):
-            return False
-        log.info("%s se vuelve a comprobar en %.0f días", label, self._max_inactive_seconds / 86400)
-        return True
 
     def reload(self) -> None:
         """Relee el fichero si cambió él o la lista negra desde la última
@@ -482,17 +385,179 @@ class WalletWatcher:
         if wallets != self._wallets:
             log.info("Siguiendo %d wallets de %s", len(wallets), self._path)
         self._wallets = wallets
-        for gone in set(self._last_signature) - set(wallets):
+
+
+class _Subscriptions:
+    """Las suscripciones logsSubscribe de una conexión del WebSocket. Hay una
+    por conexión: al reconectar, los ids de la anterior ya no valen."""
+
+    def __init__(self) -> None:
+        # Wallet -> id de su suscripción (None mientras no llega la respuesta).
+        self._by_wallet: dict[str, int | None] = {}
+        self._wallet_by_sub: dict[int, str] = {}
+        # Id de petición -> wallet de las suscripciones pedidas.
+        self._requests: dict[int, str] = {}
+        self._next_id = 0
+
+    async def sync(self, ws, wanted: set[str]) -> None:
+        """Suscribe las wallets de `wanted` que faltan y quita las demás."""
+        for wallet in wanted - self._by_wallet.keys():
+            self._next_id += 1
+            self._requests[self._next_id] = wallet
+            self._by_wallet[wallet] = None
+            await ws.send_json({
+                "jsonrpc": "2.0", "id": self._next_id, "method": "logsSubscribe",
+                "params": [{"mentions": [wallet]}, {"commitment": COMMITMENT}],
+            })
+        for wallet in self._by_wallet.keys() - wanted:
+            sub = self._by_wallet.pop(wallet)
+            if sub is None:
+                continue
+            self._wallet_by_sub.pop(sub, None)
+            self._next_id += 1
+            await ws.send_json({
+                "jsonrpc": "2.0", "id": self._next_id, "method": "logsUnsubscribe", "params": [sub],
+            })
+
+    def take_request(self, request_id: object) -> str | None:
+        """Wallet de la suscripción pedida con `request_id`, si es una."""
+        return self._requests.pop(request_id, None) if isinstance(request_id, int) else None
+
+    def confirm(self, wallet: str, sub: int) -> None:
+        # Si mientras tanto se quitó del fichero, la respuesta ya no sirve.
+        if wallet in self._by_wallet:
+            self._by_wallet[wallet] = sub
+            self._wallet_by_sub[sub] = wallet
+
+    def wallet_of(self, sub: object) -> str | None:
+        return self._wallet_by_sub.get(sub) if isinstance(sub, int) else None
+
+
+class WalletWatcher:
+    """Consulta las transacciones nuevas de las wallets de una WalletList y
+    devuelve sus compras: por sondeo y, con listen(), por los avisos del
+    WebSocket. Echa a la lista negra los bots y las abandonadas."""
+
+    def __init__(
+        self,
+        rpc: RpcClient,
+        path: Path,
+        min_sol: float,
+        blacklist: Blacklist | None = None,
+        full_poll_seconds: float = 600.0,
+        max_txs_per_hour: int = 0,
+        max_inactive_seconds: float = 0.0,
+    ):
+        # Compartido con la comprobación de autoridades: el tope del RPC es por API key.
+        self._rpc_client = rpc
+        self._list = WalletList(path, blacklist)
+        self._min_sol = min_sol
+        # Wallet -> última firma procesada. Una wallet sin entrada todavía no
+        # tiene punto de partida: su primera vuelta solo lo fija, para no
+        # avisar de su historial al arrancar.
+        self._last_signature: dict[str, str | None] = {}
+        # Firma -> intentos fallidos de leerla.
+        self._attempts: dict[str, int] = {}
+        # Wallet -> firmas avisadas por el WebSocket pendientes de leer.
+        self._pending: dict[str, list[str]] = {}
+        # Firmas ya leídas o descartadas, por orden de llegada (las más
+        # viejas se olvidan al pasar de SEEN_SIGNATURES_MAX).
+        self._seen: dict[str, None] = {}
+        # Con el WebSocket conectado solo se leen las avisadas, y todas las
+        # wallets se consultan cada full_poll_seconds por si se perdió algún aviso.
+        self._connected = False
+        self._full_poll_seconds = full_poll_seconds
+        self._next_full_poll = 0.0
+        # Wallet -> firma -> hora de sus transacciones de la última hora, para
+        # detectar los bots antes de gastar una consulta en cada una. 0 = sin tope.
+        self._max_txs_per_hour = max_txs_per_hour
+        self._activity: dict[str, dict[str, float]] = {}
+        # Wallet -> hora de su última transacción conocida, para mandar a la
+        # lista negra las abandonadas. 0 = no hacerlo.
+        self._max_inactive_seconds = max_inactive_seconds
+        self._last_active: dict[str, float] = {}
+        # Suscripciones de la conexión actual del WebSocket.
+        self._subs = _Subscriptions()
+
+    @property
+    def wallets(self) -> dict[str, FollowedWallet]:
+        return self._list.wallets
+
+    def banned(self, address: str) -> bool:
+        """True si `address` tiene una entrada temporal vigente en la lista negra."""
+        return self._list.banned(address)
+
+    def blacklist(self, address: str, reason: str, seconds: float | None = None) -> None:
+        """Mete `address` en la lista negra y deja de seguirla ya. Con
+        `seconds`, solo durante ese tiempo: sigue en el fichero de wallets y
+        se vuelve a consultar al acabar. Lanza OSError si no se puede
+        escribir la lista."""
+        if not self._list.has_blacklist:
+            return
+        self._list.blacklist(address, reason, None if seconds is None else time.time() + seconds)
+        self._last_signature.pop(address, None)
+        self._activity.pop(address, None)
+        self._last_active.pop(address, None)
+        self._pending.pop(address, None)
+
+    def ban(self, address: str, label: str, reason: str, seconds: float | None = None) -> bool:
+        """blacklist() con su aviso en el log, con el motivo "etiqueta: motivo".
+        True si la metió; si no se pudo escribir la lista, lo avisa y False."""
+        try:
+            self.blacklist(address, f"{label}: {reason}", seconds)
+        except OSError as exc:
+            log.warning("No se pudo añadir %s a la lista negra: %s", label, exc)
+            return False
+        log.warning("Wallet %s a la lista negra: %s", label, reason)
+        return True
+
+    def _blacklist_bot(self, wallet: str, signatures: list[tuple[str, float]]) -> bool:
+        """Apunta las transacciones (firma, hora) de `wallet` y, si en la
+        última hora pasa de max_txs_per_hour, la mete en la lista negra: es un
+        bot, y leer cada una de sus transacciones agota los créditos del RPC.
+        True si la quitó."""
+        if not self._max_txs_per_hour or not self._list.has_blacklist or wallet not in self.wallets:
+            return False
+        recent = self._activity.setdefault(wallet, {})
+        for signature, ts in signatures:
+            recent.setdefault(signature, ts)
+        cutoff = time.time() - ACTIVITY_WINDOW_SECONDS
+        for signature in [s for s, ts in recent.items() if ts < cutoff]:
+            del recent[signature]
+        if len(recent) <= self._max_txs_per_hour:
+            return False
+        return self.ban(wallet, self.wallets[wallet].label, f"bot, {len(recent)} tx en 1h")
+
+    def _blacklist_abandoned(self, wallet: str) -> bool:
+        """Mete `wallet` en la lista negra si lleva más de max_inactive_seconds
+        sin ninguna transacción: está abandonada y solo gasta consultas. Es
+        por otros max_inactive_seconds: al acabar se vuelve a consultar y,
+        si sigue sin operar, vuelve a entrar. True si la quitó."""
+        last = self._last_active.get(wallet)
+        if not self._max_inactive_seconds or not self._list.has_blacklist or last is None:
+            return False
+        idle = time.time() - last
+        if idle <= self._max_inactive_seconds or wallet not in self.wallets:
+            return False
+        label = self.wallets[wallet].label
+        reason = f"{ABANDONED_REASON}, {idle / 86400:.0f} días sin actividad"
+        if not self.ban(wallet, label, reason, seconds=self._max_inactive_seconds):
+            return False
+        log.info("%s se vuelve a comprobar en %.0f días", label, self._max_inactive_seconds / 86400)
+        return True
+
+    def reload(self) -> None:
+        """Relee la lista de wallets y olvida lo que se sabía de las que ya no están."""
+        self._list.reload()
+        for gone in set(self._last_signature) - set(self.wallets):
             del self._last_signature[gone]
-        for gone in set(self._last_active) - set(wallets):
+        for gone in set(self._last_active) - set(self.wallets):
             del self._last_active[gone]
 
     async def _rpc(self, method: str, params: list) -> object:
         """Resultado de una llamada al RPC. Lanza ValueError si el RPC
         devuelve un error, y los de red de aiohttp tal cual."""
-        return await rpc_call(
-            self._session, self._rpc_url, method, params, self._limiter, REQUEST_TIMEOUT_SECONDS
-        )
+        return await self._rpc_client.call(method, params)
 
     async def poll(self) -> list[WalletBuy]:
         """Compras nuevas desde la vuelta anterior: las de las transacciones
@@ -500,7 +565,7 @@ class WalletWatcher:
         todas las wallets."""
         self.reload()
         active = {}
-        for wallet, info in self._wallets.items():
+        for wallet, info in self.wallets.items():
             if self.banned(wallet):
                 # Al acabar el castigo se empieza desde su última firma, sin
                 # avisar de lo que compró mientras tanto.
@@ -520,11 +585,11 @@ class WalletWatcher:
         # WebSocket puede apuntar firmas de una wallet que esa misma pasada
         # echó por bot, y leerlas tiraba un KeyError que perdía las compras
         # de toda la vuelta.
-        for gone in [w for w in self._pending if w not in self._wallets or self.banned(w)]:
+        for gone in [w for w in self._pending if w not in self.wallets or self.banned(w)]:
             del self._pending[gone]
         # Después de la pasada completa: las que ya leyó se saltan.
         for wallet_buys in await asyncio.gather(
-            *(self._read_pending(wallet, self._wallets[wallet]) for wallet in list(self._pending))
+            *(self._read_pending(wallet, self.wallets[wallet]) for wallet in list(self._pending))
         ):
             buys += wallet_buys
         return buys
@@ -644,7 +709,7 @@ class WalletWatcher:
         while True:
             started = time.monotonic()
             try:
-                async with self._session.ws_connect(url, heartbeat=WS_HEARTBEAT_SECONDS) as ws:
+                async with self._rpc_client.session.ws_connect(url, heartbeat=WS_HEARTBEAT_SECONDS) as ws:
                     log.info("WebSocket de wallets conectado")
                     await self._serve(ws)
                 log.warning("El WebSocket de wallets se cerró")
@@ -664,7 +729,7 @@ class WalletWatcher:
 
     async def _serve(self, ws) -> None:
         """Atiende una conexión hasta que se cierra."""
-        self._ws_wallets, self._ws_subs, self._ws_requests = {}, {}, {}
+        self._subs = _Subscriptions()
         self._connected = True
         # Lo que pasó mientras estaba caído no llega por aquí: pasada completa.
         self._next_full_poll = 0.0
@@ -683,54 +748,36 @@ class WalletWatcher:
     async def _sync_subscriptions(self, ws) -> None:
         """Suscribe las wallets nuevas del fichero y quita las que ya no están
         o tienen una entrada temporal en la lista negra (no se consultan)."""
-        wanted = {wallet for wallet in self._wallets if not self.banned(wallet)}
-        for wallet in wanted - self._ws_wallets.keys():
-            self._ws_next_id += 1
-            self._ws_requests[self._ws_next_id] = wallet
-            self._ws_wallets[wallet] = None
-            await ws.send_json({
-                "jsonrpc": "2.0", "id": self._ws_next_id, "method": "logsSubscribe",
-                "params": [{"mentions": [wallet]}, {"commitment": COMMITMENT}],
-            })
-        for wallet in self._ws_wallets.keys() - wanted:
-            sub = self._ws_wallets.pop(wallet)
-            if sub is None:
-                continue
-            self._ws_subs.pop(sub, None)
-            self._ws_next_id += 1
-            await ws.send_json({
-                "jsonrpc": "2.0", "id": self._ws_next_id, "method": "logsUnsubscribe", "params": [sub],
-            })
+        await self._subs.sync(ws, {wallet for wallet in self.wallets if not self.banned(wallet)})
 
     def _handle(self, data: object) -> None:
         """Respuesta a una suscripción o aviso de una transacción."""
         if not isinstance(data, dict):
             return
-        wallet = self._ws_requests.pop(data.get("id"), None) if isinstance(data.get("id"), int) else None
+        wallet = self._subs.take_request(data.get("id"))
         if wallet is not None:
             sub = data.get("result")
             if data.get("error") or not isinstance(sub, int):
                 # Se queda sin suscripción: solo la cubre la pasada completa.
-                info = self._wallets.get(wallet)
+                info = self.wallets.get(wallet)
                 log.warning(
                     "No se pudo suscribir a %s en el WebSocket: %s",
                     info.label if info else wallet, data.get("error"),
                 )
-            elif wallet in self._ws_wallets:
-                self._ws_wallets[wallet] = sub
-                self._ws_subs[sub] = wallet
+            else:
+                self._subs.confirm(wallet, sub)
             return
         if data.get("method") != "logsNotification":
             return
         params = data.get("params") or {}
-        wallet = self._ws_subs.get(params.get("subscription"))
+        wallet = self._subs.wallet_of(params.get("subscription"))
         value = (params.get("result") or {}).get("value") or {}
         signature = value.get("signature")
         if wallet is None or not isinstance(signature, str) or signature in self._seen:
             return
         # Una wallet ya quitada (o castigada) sigue suscrita hasta la próxima
         # sincronización: sus avisos no se apuntan.
-        if wallet not in self._wallets or self.banned(wallet):
+        if wallet not in self.wallets or self.banned(wallet):
             return
         self._last_active[wallet] = time.time()
         # Se cuentan todas, también las que no se van a leer: un bot se nota

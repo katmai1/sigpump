@@ -43,7 +43,7 @@ import aiohttp  # type: ignore[import-not-found]
 
 from sigpump.config import Config
 from sigpump.screener import DexScreenerClient
-from sigpump.solana import MAX_REQUESTS_PER_SECOND, RateLimiter, rpc_call
+from sigpump.solana import RpcClient
 from sigpump.wallets import COMMITMENT, MAX_TRANSACTION_VERSION, parse_buys
 
 log = logging.getLogger()
@@ -117,22 +117,18 @@ class Buyer:
         return date if self.history_complete else f"antes de {date}"
 
 
-class Rpc:
-    """Cliente mínimo del RPC con el mismo ritmo máximo que el seguimiento de
-    wallets, y que cuenta las llamadas y los créditos de Helius gastados."""
+class Rpc(RpcClient):
+    """RpcClient con el mismo ritmo máximo que el seguimiento de wallets, y
+    que cuenta las llamadas y los créditos de Helius gastados."""
 
     def __init__(self, session: aiohttp.ClientSession, url: str):
-        self._session = session
-        self._url = url
-        self._limiter = RateLimiter(MAX_REQUESTS_PER_SECOND)
+        super().__init__(session, url, timeout_seconds=REQUEST_TIMEOUT_SECONDS)
         self.calls = 0
         self.credits = 0
 
     async def call(self, method: str, params: list) -> object:
-        """Resultado de la llamada. Lanza ValueError si el RPC devuelve un
-        error, y los de red de aiohttp tal cual."""
         self.calls += 1
-        result = await rpc_call(self._session, self._url, method, params, self._limiter, REQUEST_TIMEOUT_SECONDS)
+        result = await super().call(method, params)
         self.credits += self._credits(method, result)
         return result
 

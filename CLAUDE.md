@@ -49,9 +49,14 @@ consultarlo.
   `tipo` 'alerta'/'prealerta' son restos del antiguo radar de trending.
 - `sigpump/wallets.py`: detección de compras por saldos antes/después
   (polling RPC + WebSocket, pasada completa cada `full_poll_minutes`).
+  `WalletList` lleva el fichero, la lista negra y los castigos temporales;
+  `WalletWatcher` sondea, lee transacciones y echa bots y abandonadas.
+- `sigpump/cooldowns.py`: `Cooldowns`, lo que el radar recuerda de las
+  compras recientes (cooldowns, confluencia, actividad por wallet).
 - `sigpump/filters.py`: tabla `PAIR_FILTERS` con los filtros del par y si
   cada uno se aplica en bonding curve y a las wallets de confianza.
-- `sigpump/screener.py` (DexScreener), `solana.py` (mint/freeze authority),
+- `sigpump/screener.py` (DexScreener), `solana.py` (`RpcClient`, compartido
+  por todo lo que llama al RPC, y mint/freeze authority),
   `telegram.py` (formato y envío), `tracker.py` (SQLite y retornos a
   +5m…+24h), `blacklist.py` (tabla `lista_negra`), `config.py` (carga y
   validación del TOML), `util.py` (conversión defensiva de campos de la API).

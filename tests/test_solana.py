@@ -13,6 +13,7 @@ from sigpump.solana import (
     RPC_MAX_RETRIES,
     UNSAFE_TTL_SECONDS,
     RateLimiter,
+    RpcClient,
     TokenAuthorities,
     redact,
     rpc_call,
@@ -73,7 +74,7 @@ class TestTokenAuthorities(unittest.IsolatedAsyncioTestCase):
             _cuenta(freeze="Alguien"),
             _cuenta(mint="Alguien", freeze="Alguien"),
         ))
-        reasons = await TokenAuthorities(session).unsafe_reasons(["LIMPIO", "MINT", "FREEZE", "AMBAS"])
+        reasons = await TokenAuthorities(RpcClient(session)).unsafe_reasons(["LIMPIO", "MINT", "FREEZE", "AMBAS"])
         self.assertEqual(set(reasons), {"MINT", "FREEZE", "AMBAS"})
         self.assertIn("acuñar", reasons["MINT"])
         self.assertIn("congelar", reasons["FREEZE"])
@@ -81,7 +82,7 @@ class TestTokenAuthorities(unittest.IsolatedAsyncioTestCase):
 
     async def test_no_vuelve_a_consultar_un_token_limpio(self):
         session = _FakeSession(_respuesta(_cuenta()))
-        authorities = TokenAuthorities(session)
+        authorities = TokenAuthorities(RpcClient(session))
         self.assertEqual(await authorities.unsafe_reasons(["LIMPIO"]), {})
         # Las autoridades solo se pueden renunciar: limpio es para siempre.
         self.assertEqual(await authorities.unsafe_reasons(["LIMPIO"]), {})
@@ -89,7 +90,7 @@ class TestTokenAuthorities(unittest.IsolatedAsyncioTestCase):
 
     async def test_un_token_con_autoridades_se_revisa_de_nuevo(self):
         session = _FakeSession(_respuesta(_cuenta(mint="Alguien")), _respuesta(_cuenta()))
-        authorities = TokenAuthorities(session)
+        authorities = TokenAuthorities(RpcClient(session))
         self.assertIn("MINT", await authorities.unsafe_reasons(["MINT"]))
         # Pasado el TTL puede haberlas renunciado.
         reason, _ = authorities._cache["MINT"]
@@ -99,7 +100,7 @@ class TestTokenAuthorities(unittest.IsolatedAsyncioTestCase):
 
     async def test_cuenta_inexistente_o_rara_no_bloquea_ni_se_cachea(self):
         session = _FakeSession(_respuesta(None, {"data": "no parseado"}), _respuesta(_cuenta(), _cuenta()))
-        authorities = TokenAuthorities(session)
+        authorities = TokenAuthorities(RpcClient(session))
         self.assertEqual(await authorities.unsafe_reasons(["NADA", "RARO"]), {})
         await authorities.unsafe_reasons(["NADA", "RARO"])
         self.assertEqual(len(session.peticiones), 2)
@@ -109,7 +110,7 @@ class TestTokenAuthorities(unittest.IsolatedAsyncioTestCase):
         session = _FakeSession(
             _respuesta(*[_cuenta()] * MAX_ACCOUNTS_PER_CALL), _respuesta(*[_cuenta()] * 10)
         )
-        await TokenAuthorities(session).unsafe_reasons(direcciones)
+        await TokenAuthorities(RpcClient(session)).unsafe_reasons(direcciones)
         self.assertEqual([len(p) for p in session.peticiones], [MAX_ACCOUNTS_PER_CALL, 10])
 
     async def test_rpc_caido_deja_pasar_y_no_cachea(self):
@@ -124,7 +125,7 @@ class TestTokenAuthorities(unittest.IsolatedAsyncioTestCase):
         for caso in casos:
             with self.subTest(caso=type(caso).__name__):
                 session = _FakeSession(caso, _respuesta(_cuenta(mint="Alguien")))
-                authorities = TokenAuthorities(session)
+                authorities = TokenAuthorities(RpcClient(session))
                 self.assertEqual(await authorities.unsafe_reasons(["TOK"]), {})
                 # No se cacheó: al siguiente intento se vuelve a preguntar.
                 self.assertIn("TOK", await authorities.unsafe_reasons(["TOK"]))
@@ -133,7 +134,7 @@ class TestTokenAuthorities(unittest.IsolatedAsyncioTestCase):
         """Antes un 429 dejaba el lote sin comprobar y el aviso salía como limpio."""
         session = _FakeSession(_FakeResponse({}, 429), _respuesta(_cuenta(mint="Alguien")))
         with patch("sigpump.solana.asyncio.sleep"):
-            reasons = await TokenAuthorities(session).unsafe_reasons(["TOK"])
+            reasons = await TokenAuthorities(RpcClient(session)).unsafe_reasons(["TOK"])
         self.assertIn("TOK", reasons)
         self.assertEqual(len(session.peticiones), 2)
 
@@ -147,12 +148,12 @@ class TestTokenAuthorities(unittest.IsolatedAsyncioTestCase):
             await original()
 
         limiter.wait = wait
-        await TokenAuthorities(_FakeSession(_respuesta(_cuenta())), limiter=limiter).unsafe_reasons(["TOK"])
+        await TokenAuthorities(RpcClient(_FakeSession(_respuesta(_cuenta())), limiter=limiter)).unsafe_reasons(["TOK"])
         self.assertEqual(llamadas, [1])
 
     async def test_pide_el_mint_parseado_al_rpc(self):
         session = _FakeSession(_respuesta(_cuenta()))
-        await TokenAuthorities(session, "https://rpc.ejemplo").unsafe_reasons(["TOK", "TOK"])
+        await TokenAuthorities(RpcClient(session, "https://rpc.ejemplo")).unsafe_reasons(["TOK", "TOK"])
         self.assertEqual(session.peticiones, [["TOK"]])
 
 

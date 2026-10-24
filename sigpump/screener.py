@@ -11,6 +11,8 @@ import aiohttp  # type: ignore[import-not-found]
 from typing import Any
 import logging
 
+from sigpump.util import RETRYABLE_STATUSES
+
 log = logging.getLogger()
 
 API_BASE = "https://api.dexscreener.com"
@@ -18,9 +20,6 @@ MAX_ADDRESSES_PER_CALL = 30  # límite de la API para /tokens/v1/{chainId}/{addr
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 2.0
 REQUEST_TIMEOUT_SECONDS = 15
-# Fallos transitorios del lado del servidor: se reintentan igual que el 429.
-# Un 4xx distinto de 429 es un error nuestro (URL mal armada) y no se reintenta.
-RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 
 class DexScreenerClient:

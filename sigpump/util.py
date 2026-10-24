@@ -6,6 +6,11 @@ campos numéricos como número, como string o directamente ausentes/null
 según el par, así que la conversión defensiva se centraliza acá.
 """
 
+# Fallos transitorios del lado del servidor: se reintentan igual que el 429.
+# Un 4xx distinto de 429 es un error nuestro (URL mal armada) y no se
+# reintenta. Lo usan DexScreener y el RPC de Solana.
+RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+
 
 def to_float(value: object, default: float = 0.0) -> float:
     """Convierte `value` a float; devuelve `default` si es None, no numérico
@@ -42,8 +47,9 @@ def market_cap_usd(pair: dict) -> float:
 
 
 # Por debajo de esto las compras/ventas de 5 min son ruido: 3 compras y
-# 1 venta dan 75% sin decir nada del mercado.
-MIN_TXNS_M5 = 5
+# 1 venta dan 75% sin decir nada del mercado. No es el filtro
+# [wallets].min_txns_m5: este solo decide si el aviso muestra el % de compras.
+MIN_TXNS_FOR_BUY_RATIO = 5
 
 
 def volume_acceleration(pair: dict) -> float:
@@ -70,9 +76,9 @@ def txns_m5(pair: dict) -> float:
 
 def buy_ratio_m5(pair: dict) -> float | None:
     """Fracción de compras sobre el total de txns de los últimos 5 min (0-1).
-    None si hubo menos de MIN_TXNS_M5 txns, porque con tan pocas no dice nada."""
+    None si hubo menos de MIN_TXNS_FOR_BUY_RATIO txns, porque con tan pocas no dice nada."""
     total = txns_m5(pair)
-    if total < MIN_TXNS_M5:
+    if total < MIN_TXNS_FOR_BUY_RATIO:
         return None
     buys = to_float(((pair.get("txns") or {}).get("m5") or {}).get("buys"))
     return buys / total

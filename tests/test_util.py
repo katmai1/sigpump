@@ -3,7 +3,7 @@ de volumen y presión compradora) que se muestran en el aviso y se registran."""
 
 import unittest
 
-from sigpump.util import MIN_TXNS_M5, buy_ratio_m5, volume_acceleration
+from sigpump.util import MIN_TXNS_FOR_BUY_RATIO, buy_ratio_m5, volume_acceleration
 
 
 class TestVolumeAcceleration(unittest.TestCase):
@@ -27,7 +27,7 @@ class TestBuyRatioM5(unittest.TestCase):
         self.assertAlmostEqual(buy_ratio_m5({"txns": {"m5": {"buys": 30, "sells": 10}}}), 0.75)
 
     def test_pocas_txns_no_dicen_nada(self):
-        pocas = {"txns": {"m5": {"buys": MIN_TXNS_M5 - 1, "sells": 0}}}
+        pocas = {"txns": {"m5": {"buys": MIN_TXNS_FOR_BUY_RATIO - 1, "sells": 0}}}
         self.assertIsNone(buy_ratio_m5(pocas))
 
     def test_sin_datos_de_5m(self):

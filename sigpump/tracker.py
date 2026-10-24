@@ -113,22 +113,52 @@ COLUMNS: dict[str, str] = {
 _PENDING = f"precio_usd > 0 AND {_CHECKPOINT_COLUMNS[-1]} IS NULL AND timestamp > :cutoff"
 
 
+def _tracking(row, elapsed_minutes: float) -> bool:
+    """Si `row` sigue en los primeros TRACKING_MINUTES (con su margen), en
+    los que se muestrea en cada vuelta y se anotan el mejor y el peor."""
+    return row[_TRACKING_COLUMN] is None and elapsed_minutes < TRACKING_MINUTES + CHECKPOINT_TOLERANCE_MINUTES
+
+
+def _open_checkpoints(row, elapsed_minutes: float) -> list[tuple[int, str]]:
+    """(minutos, columna) de los checkpoints de `row` que faltan y cuya
+    ventana está abierta ahora."""
+    return [
+        (minutes, column) for minutes, column in zip(CHECKPOINTS_MINUTES, _CHECKPOINT_COLUMNS)
+        if row[column] is None and minutes <= elapsed_minutes < minutes + checkpoint_tolerance(minutes)
+    ]
+
+
 def _due(row, elapsed_minutes: float) -> bool:
     """Si hay que muestrear el precio de `row` ahora: en cada vuelta hasta
     anotar el de TRACKING_MINUTES, y después solo dentro de la ventana de un
     checkpoint largo que falte."""
-    if row[_TRACKING_COLUMN] is None and elapsed_minutes < TRACKING_MINUTES + CHECKPOINT_TOLERANCE_MINUTES:
-        return True
-    return any(
-        row[column] is None and minutes <= elapsed_minutes < minutes + checkpoint_tolerance(minutes)
-        for minutes, column in zip(CHECKPOINTS_MINUTES, _CHECKPOINT_COLUMNS)
-        if minutes > TRACKING_MINUTES
+    return _tracking(row, elapsed_minutes) or any(
+        minutes > TRACKING_MINUTES for minutes, _ in _open_checkpoints(row, elapsed_minutes)
     )
 
 
 def _round(value: float | None) -> float | None:
     return None if value is None else round(value, 2)
 
+
+
+def pair_from_row(row, dex_id: str = "") -> dict:
+    """Un par con la forma de DexScreener armado con lo que record() guardó
+    de él, para volver a pasarle los filtros. El dex no se guarda: va
+    `dex_id`. Las transacciones de 5 min se guardaron sumadas, y van todas
+    como compras (los filtros solo miran el total)."""
+    ts = row["timestamp"] or 0.0
+    age = row["edad_par_min"]
+    txns = row["txns_m5"]
+    return {
+        "dexId": dex_id,
+        "quoteToken": {"symbol": row["moneda_par"]},
+        "pairCreatedAt": (ts - age * 60) * 1000 if age is not None else 0,
+        "priceChange": {"m5": row["cambio_m5_pct"], "h1": row["cambio_h1_pct"]},
+        "marketCap": row["market_cap_usd"],
+        "txns": {"m5": {"buys": txns, "sells": 0}} if txns is not None else {},
+        "volume": {"h1": row["volumen_h1_usd"]},
+    }
 
 
 class AlertTracker:
@@ -422,16 +452,14 @@ class AlertTracker:
                     ret = round((price / row["precio_usd"] - 1) * 100, 2)
                     elapsed_minutes = (now - row["timestamp"]) / 60
                     changes = {}
-                    if row[_TRACKING_COLUMN] is None and elapsed_minutes < TRACKING_MINUTES + CHECKPOINT_TOLERANCE_MINUTES:
+                    if _tracking(row, elapsed_minutes):
                         changes[_BEST] = ret if row[_BEST] is None else max(row[_BEST], ret)
                         changes[_WORST] = ret if row[_WORST] is None else min(row[_WORST], ret)
                     logged = None
-                    for minutes, column in zip(CHECKPOINTS_MINUTES, _CHECKPOINT_COLUMNS):
-                        in_window = minutes <= elapsed_minutes < minutes + checkpoint_tolerance(minutes)
-                        if in_window and row[column] is None:
-                            changes[column] = ret
-                            if minutes >= TRACKING_MINUTES:
-                                logged = minutes
+                    for minutes, column in _open_checkpoints(row, elapsed_minutes):
+                        changes[column] = ret
+                        if minutes >= TRACKING_MINUTES:
+                            logged = minutes
                     if not changes:
                         continue
                     conn.execute(

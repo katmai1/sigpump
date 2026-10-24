@@ -8,8 +8,9 @@ vender). Las autoridades solo se pueden renunciar, nunca volver a poner, así
 que un token limpio se recuerda para siempre y uno con autoridades se vuelve
 a mirar cada tanto por si las renunció.
 
-También tiene lo común a todas las llamadas al RPC: el ritmo máximo, los
-reintentos ante 429/5xx y quitar la API key de lo que se escribe en el log.
+También tiene lo común a todas las llamadas al RPC (RpcClient): el ritmo
+máximo, los reintentos ante 429/5xx y quitar la API key de lo que se
+escribe en el log.
 """
 
 import asyncio
@@ -19,7 +20,7 @@ import time
 
 import aiohttp  # type: ignore[import-not-found]
 
-from sigpump.screener import RETRYABLE_STATUSES
+from sigpump.util import RETRYABLE_STATUSES
 
 log = logging.getLogger()
 
@@ -93,19 +94,35 @@ async def rpc_call(
     return data.get("result")
 
 
-class TokenAuthorities:
-    """Autoridades del mint de cada token, cacheadas entre consultas."""
+class RpcClient:
+    """Llamadas JSON-RPC a un nodo de Solana. Lo comparten el seguimiento de
+    wallets y la comprobación de autoridades: el tope de peticiones es por
+    API key, y cada uno con su limitador lo pasaban entre los dos."""
 
     def __init__(
         self,
         session: aiohttp.ClientSession,
-        rpc_url: str = MAINNET_RPC_URL,
+        url: str = MAINNET_RPC_URL,
         limiter: RateLimiter | None = None,
+        timeout_seconds: float = REQUEST_TIMEOUT_SECONDS,
     ):
-        self._session = session
-        self._rpc_url = rpc_url
-        # El del seguimiento de wallets, si se da: el tope del RPC es por API key.
+        # La sesión queda a la vista para el WebSocket del mismo nodo.
+        self.session = session
+        self.url = url
         self._limiter = limiter or RateLimiter(MAX_REQUESTS_PER_SECOND)
+        self._timeout_seconds = timeout_seconds
+
+    async def call(self, method: str, params: list) -> object:
+        """Resultado de la llamada. Lanza ValueError si el RPC devuelve un
+        error, y los de red de aiohttp tal cual."""
+        return await rpc_call(self.session, self.url, method, params, self._limiter, self._timeout_seconds)
+
+
+class TokenAuthorities:
+    """Autoridades del mint de cada token, cacheadas entre consultas."""
+
+    def __init__(self, rpc: RpcClient):
+        self._rpc = rpc
         # dirección -> (motivo, o None si el token está limpio; momento de la consulta)
         self._cache: dict[str, tuple[str | None, float]] = {}
 
@@ -142,12 +159,9 @@ class TokenAuthorities:
         try:
             # Por rpc_call y no un POST suelto: sin sus reintentos, un 429
             # dejaba el lote sin comprobar y el aviso salía como limpio.
-            result = await rpc_call(
-                self._session, self._rpc_url, "getMultipleAccounts",
-                [addresses, {"encoding": "jsonParsed"}], self._limiter, REQUEST_TIMEOUT_SECONDS,
-            )
+            result = await self._rpc.call("getMultipleAccounts", [addresses, {"encoding": "jsonParsed"}])
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
-            log.warning("No se pudieron consultar las autoridades en %s: %s", redact(self._rpc_url), redact(exc))
+            log.warning("No se pudieron consultar las autoridades en %s: %s", redact(self._rpc.url), redact(exc))
             return
         accounts = result.get("value") if isinstance(result, dict) else None
         if not isinstance(accounts, list) or len(accounts) != len(addresses):

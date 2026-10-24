@@ -8,10 +8,14 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+
+import aiohttp
 
 from sigpump.blacklist import Blacklist
 from sigpump.radar import MemecoinRadar
+from sigpump.solana import RpcClient
 from sigpump.telegram import TelegramAlerter
 from sigpump.wallets import (
     LAMPORTS_PER_SOL,
@@ -34,6 +38,14 @@ WALLET = "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1"
 OTRA = "7Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j9"
 USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 TOKEN = "TokenMint1111111111111111111111111111111pump"
+
+
+def _abrir_negra(test, path):
+    """Blacklist que se cierra al acabar el test (sin esto quedaban
+    conexiones abiertas y avisos de ResourceWarning)."""
+    negra = Blacklist(path)
+    test.addCleanup(negra.close)
+    return negra
 
 
 def _permanentes(negra):
@@ -128,7 +140,7 @@ class TestBlacklist(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.dir = Path(tmp.name)
-        self.negra = Blacklist(self.dir / "alertas.db")
+        self.negra = _abrir_negra(self, self.dir / "alertas.db")
         self.addCleanup(self.negra.close)
 
     def test_vacia(self):
@@ -284,8 +296,8 @@ class _FakeRpc:
 
 class TestWalletWatcher(unittest.IsolatedAsyncioTestCase):
     async def test_blacklist_deja_de_seguir_y_quita_del_fichero(self):
-        negra = Blacklist(self.path.with_name("negra.db"))
-        watcher = WalletWatcher(_FakeRpc(firmas=[]), "http://rpc", self.path, 0.1, negra)
+        negra = _abrir_negra(self, self.path.with_name("negra.db"))
+        watcher = WalletWatcher(RpcClient(_FakeRpc(firmas=[]), "http://rpc"), self.path, 0.1, negra)
         watcher.reload()
         watcher.blacklist(WALLET, "ballena: rug NGU -96%")
         self.assertEqual(watcher.wallets, {})
@@ -295,9 +307,9 @@ class TestWalletWatcher(unittest.IsolatedAsyncioTestCase):
         self.assertIn(WALLET, _permanentes(negra))
 
     async def test_blacklist_temporal_deja_de_consultarla_hasta_que_acaba(self):
-        negra = Blacklist(self.path.with_name("negra.db"))
+        negra = _abrir_negra(self, self.path.with_name("negra.db"))
         rpc = _FakeRpc(firmas=["VIEJA"])
-        watcher = WalletWatcher(rpc, "http://rpc", self.path, 0.1, negra)
+        watcher = WalletWatcher(RpcClient(rpc, "http://rpc"), self.path, 0.1, negra)
         await watcher.poll()
         watcher.blacklist(WALLET, "ballena: 12 tokens en 1h", seconds=3600)
         rpc.llamadas.clear()
@@ -306,7 +318,7 @@ class TestWalletWatcher(unittest.IsolatedAsyncioTestCase):
         self.assertIn(WALLET, watcher.wallets)
         self.assertEqual(self.path.read_text(encoding="utf-8"), f"{WALLET}  # ballena\n")
         # Al acabar vuelve a consultarse, desde su última firma.
-        watcher._banned_until[WALLET] = time.time() - 1
+        watcher._list._banned_until[WALLET] = time.time() - 1
         rpc.firmas = ["NUEVA", "VIEJA"]
         rpc.txs["NUEVA"] = _tx(post_tokens=[_saldo(TOKEN, 1)], sol_gastado=1)
         self.assertEqual(await watcher.poll(), [])
@@ -315,7 +327,7 @@ class TestWalletWatcher(unittest.IsolatedAsyncioTestCase):
     async def test_la_confianza_llega_a_la_compra(self):
         self.path.write_text(f"{WALLET} *  # ballena\n", encoding="utf-8")
         rpc = _FakeRpc(firmas=["VIEJA"], txs={})
-        watcher = WalletWatcher(rpc, "http://rpc", self.path, min_sol=0.1)
+        watcher = WalletWatcher(RpcClient(rpc, "http://rpc"), self.path, min_sol=0.1)
         await watcher.poll()
         rpc.firmas = ["NUEVA", "VIEJA"]
         rpc.txs["NUEVA"] = _tx(post_tokens=[_saldo(TOKEN, 1)], sol_gastado=1)
@@ -332,13 +344,13 @@ class TestWalletWatcher(unittest.IsolatedAsyncioTestCase):
 
     async def test_la_primera_vuelta_no_avisa_del_historial(self):
         rpc = _FakeRpc(firmas=["VIEJA"], txs={"VIEJA": _tx(post_tokens=[_saldo(TOKEN, 1)], sol_gastado=1)})
-        watcher = WalletWatcher(rpc, "http://rpc", self.path, min_sol=0.1)
+        watcher = WalletWatcher(RpcClient(rpc, "http://rpc"), self.path, min_sol=0.1)
         self.assertEqual(await watcher.poll(), [])
         self.assertNotIn("getTransaction", [m for m, _ in rpc.llamadas])
 
     async def test_procesa_solo_las_firmas_nuevas_en_orden(self):
         rpc = _FakeRpc(firmas=["VIEJA"])
-        watcher = WalletWatcher(rpc, "http://rpc", self.path, min_sol=0.1)
+        watcher = WalletWatcher(RpcClient(rpc, "http://rpc"), self.path, min_sol=0.1)
         await watcher.poll()
         rpc.firmas = ["NUEVA2", "NUEVA1", "VIEJA"]
         rpc.txs = {
@@ -354,7 +366,7 @@ class TestWalletWatcher(unittest.IsolatedAsyncioTestCase):
 
     async def test_una_tx_aun_no_disponible_se_reintenta(self):
         rpc = _FakeRpc(firmas=["VIEJA"])
-        watcher = WalletWatcher(rpc, "http://rpc", self.path, min_sol=0.1)
+        watcher = WalletWatcher(RpcClient(rpc, "http://rpc"), self.path, min_sol=0.1)
         await watcher.poll()
         rpc.firmas = ["NUEVA", "VIEJA"]
         # getTransaction devuelve null: el nodo todavía no la tiene.
@@ -417,7 +429,7 @@ class TestWebSocket(unittest.IsolatedAsyncioTestCase):
 
     async def _conectado(self, rpc, **kwargs):
         """Watcher con la wallet ya suscrita (suscripción 77) y su punto de partida fijado."""
-        watcher = WalletWatcher(rpc, "http://rpc", self.path, min_sol=0.1, **kwargs)
+        watcher = WalletWatcher(RpcClient(rpc, "http://rpc"), self.path, min_sol=0.1, **kwargs)
         await watcher.poll()
         watcher._connected = True
         watcher._next_full_poll = time.monotonic() + 600
@@ -431,7 +443,7 @@ class TestWebSocket(unittest.IsolatedAsyncioTestCase):
         return watcher, ws
 
     async def test_bot_a_la_lista_negra_sin_leer_sus_transacciones(self):
-        negra = Blacklist(self.path.with_name("negra.db"))
+        negra = _abrir_negra(self, self.path.with_name("negra.db"))
         rpc = _FakeRpc(firmas=["VIEJA"])
         watcher, ws = await self._conectado(rpc, blacklist=negra, max_txs_per_hour=3)
         for i in range(3):
@@ -455,9 +467,9 @@ class TestWebSocket(unittest.IsolatedAsyncioTestCase):
         apunta firmas del bot que esa pasada acaba de echar: leerlas daba un
         KeyError que perdía las compras de toda la vuelta."""
         self.path.write_text(f"{WALLET}  # bot\n{OTRA}  # ballena\n", encoding="utf-8")
-        negra = Blacklist(self.path.with_name("negra.db"))
+        negra = _abrir_negra(self, self.path.with_name("negra.db"))
         rpc = _RpcPorWallet({WALLET: ["VIEJA"], OTRA: ["VIEJA2"]})
-        watcher = WalletWatcher(rpc, "http://rpc", self.path, 0.1, negra, max_txs_per_hour=3)
+        watcher = WalletWatcher(RpcClient(rpc, "http://rpc"), self.path, 0.1, negra, max_txs_per_hour=3)
         await watcher.poll()
         rpc.por_wallet = {WALLET: ["D", "C", "B", "A", "VIEJA"], OTRA: ["NUEVA", "VIEJA2"]}
         rpc.txs["NUEVA"] = _tx(post_tokens=[_saldo(TOKEN, 1, owner=OTRA)], sol_gastado=1, wallet=OTRA)
@@ -470,7 +482,7 @@ class TestWebSocket(unittest.IsolatedAsyncioTestCase):
     async def test_una_wallet_castigada_no_apunta_avisos_y_se_desuscribe(self):
         rpc = _FakeRpc(firmas=["VIEJA"])
         watcher, ws = await self._conectado(rpc)
-        watcher._banned_until[WALLET] = time.time() + 3600
+        watcher._list._banned_until[WALLET] = time.time() + 3600
         watcher._handle(_aviso(77, "NUEVA"))
         self.assertEqual(watcher._pending, {})
         await watcher._sync_subscriptions(ws)
@@ -486,14 +498,14 @@ class TestWebSocket(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError("mensaje con forma rara")
 
         sesion = _Sesion()
-        watcher = WalletWatcher(sesion, "http://rpc", self.path, 0.1)
+        watcher = WalletWatcher(RpcClient(sesion, "http://rpc"), self.path, 0.1)
         with patch("sigpump.wallets.asyncio.sleep", side_effect=[None, asyncio.CancelledError()]):
             with self.assertRaises(asyncio.CancelledError):
                 await watcher.listen("wss://rpc/?api-key=SECRETO")
         self.assertEqual(sesion.intentos, 2)
 
     async def test_bot_sin_tope_se_sigue(self):
-        negra = Blacklist(self.path.with_name("negra.db"))
+        negra = _abrir_negra(self, self.path.with_name("negra.db"))
         rpc = _FakeRpc(firmas=["VIEJA"])
         watcher, _ = await self._conectado(rpc, blacklist=negra)
         for i in range(50):
@@ -501,7 +513,7 @@ class TestWebSocket(unittest.IsolatedAsyncioTestCase):
         self.assertIn(WALLET, watcher.wallets)
 
     async def test_bot_cuenta_solo_la_ultima_hora(self):
-        negra = Blacklist(self.path.with_name("negra.db"))
+        negra = _abrir_negra(self, self.path.with_name("negra.db"))
         rpc = _FakeRpc(firmas=["VIEJA"])
         watcher, _ = await self._conectado(rpc, blacklist=negra, max_txs_per_hour=3)
         watcher._activity[WALLET] = {f"VIEJA{i}": time.time() - 3700 for i in range(10)}
@@ -509,9 +521,9 @@ class TestWebSocket(unittest.IsolatedAsyncioTestCase):
         self.assertIn(WALLET, watcher.wallets)
 
     async def test_bot_detectado_en_la_pasada_completa(self):
-        negra = Blacklist(self.path.with_name("negra.db"))
+        negra = _abrir_negra(self, self.path.with_name("negra.db"))
         rpc = _FakeRpc(firmas=["VIEJA"])
-        watcher = WalletWatcher(rpc, "http://rpc", self.path, 0.1, negra, max_txs_per_hour=3)
+        watcher = WalletWatcher(RpcClient(rpc, "http://rpc"), self.path, 0.1, negra, max_txs_per_hour=3)
         await watcher.poll()
         rpc.firmas = ["D", "C", "B", "A", "VIEJA"]
         rpc.llamadas.clear()
@@ -520,9 +532,9 @@ class TestWebSocket(unittest.IsolatedAsyncioTestCase):
         self.assertIn(WALLET, _permanentes(negra))
 
     async def test_abandonada_a_la_lista_negra(self):
-        negra = Blacklist(self.path.with_name("negra.db"))
+        negra = _abrir_negra(self, self.path.with_name("negra.db"))
         rpc = _FakeRpc(firmas=["VIEJA"], horas={"VIEJA": time.time() - 31 * 86400})
-        watcher = WalletWatcher(rpc, "http://rpc", self.path, 0.1, negra, max_inactive_seconds=30 * 86400)
+        watcher = WalletWatcher(RpcClient(rpc, "http://rpc"), self.path, 0.1, negra, max_inactive_seconds=30 * 86400)
         await watcher.poll()
         # Por otros 30 días: sigue en el fichero, pero no se consulta.
         self.assertIn(WALLET, watcher.wallets)
@@ -534,9 +546,9 @@ class TestWebSocket(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rpc.llamadas, [])
 
     async def test_abandonada_se_vuelve_a_comprobar_al_acabar(self):
-        negra = Blacklist(self.path.with_name("negra.db"))
+        negra = _abrir_negra(self, self.path.with_name("negra.db"))
         rpc = _FakeRpc(firmas=["VIEJA"], horas={"VIEJA": time.time() - 31 * 86400})
-        watcher = WalletWatcher(rpc, "http://rpc", self.path, 0.1, negra, max_inactive_seconds=30 * 86400)
+        watcher = WalletWatcher(RpcClient(rpc, "http://rpc"), self.path, 0.1, negra, max_inactive_seconds=30 * 86400)
         await watcher.poll()
         # Al acabar sigue sin operar: vuelve a entrar.
         negra._db().execute("UPDATE lista_negra SET hasta = ?", (time.time() - 1,))
@@ -557,16 +569,16 @@ class TestWebSocket(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(await watcher.poll()), 1)
 
     async def test_activa_hace_poco_se_sigue(self):
-        negra = Blacklist(self.path.with_name("negra.db"))
+        negra = _abrir_negra(self, self.path.with_name("negra.db"))
         rpc = _FakeRpc(firmas=["VIEJA"], horas={"VIEJA": time.time() - 29 * 86400})
-        watcher = WalletWatcher(rpc, "http://rpc", self.path, 0.1, negra, max_inactive_seconds=30 * 86400)
+        watcher = WalletWatcher(RpcClient(rpc, "http://rpc"), self.path, 0.1, negra, max_inactive_seconds=30 * 86400)
         await watcher.poll()
         self.assertIn(WALLET, watcher.wallets)
 
     async def test_se_abandona_mientras_se_sigue(self):
-        negra = Blacklist(self.path.with_name("negra.db"))
+        negra = _abrir_negra(self, self.path.with_name("negra.db"))
         rpc = _FakeRpc(firmas=["VIEJA"])
-        watcher = WalletWatcher(rpc, "http://rpc", self.path, 0.1, negra, max_inactive_seconds=30 * 86400)
+        watcher = WalletWatcher(RpcClient(rpc, "http://rpc"), self.path, 0.1, negra, max_inactive_seconds=30 * 86400)
         await watcher.poll()
         self.assertIn(WALLET, watcher.wallets)
         watcher._last_active[WALLET] = time.time() - 31 * 86400
@@ -574,7 +586,7 @@ class TestWebSocket(unittest.IsolatedAsyncioTestCase):
         self.assertIn(WALLET, negra.entries())
 
     async def test_un_aviso_del_websocket_cuenta_como_actividad(self):
-        negra = Blacklist(self.path.with_name("negra.db"))
+        negra = _abrir_negra(self, self.path.with_name("negra.db"))
         rpc = _FakeRpc(firmas=["VIEJA"])
         watcher, _ = await self._conectado(rpc, blacklist=negra, max_inactive_seconds=30 * 86400)
         watcher._last_active[WALLET] = time.time() - 31 * 86400
@@ -585,7 +597,7 @@ class TestWebSocket(unittest.IsolatedAsyncioTestCase):
 
     async def test_abandonada_sin_lista_negra_se_sigue(self):
         rpc = _FakeRpc(firmas=["VIEJA"], horas={"VIEJA": time.time() - 365 * 86400})
-        watcher = WalletWatcher(rpc, "http://rpc", self.path, 0.1, max_inactive_seconds=30 * 86400)
+        watcher = WalletWatcher(RpcClient(rpc, "http://rpc"), self.path, 0.1, max_inactive_seconds=30 * 86400)
         await watcher.poll()
         self.assertIn(WALLET, watcher.wallets)
 
@@ -705,13 +717,28 @@ class TestWebSocket(unittest.IsolatedAsyncioTestCase):
         await watcher.poll()
         self.assertEqual(rpc.llamadas, [])
 
+    async def test_al_reconectar_los_ids_de_la_conexion_anterior_no_valen(self):
+        class _WsQueCierra(_FakeWs):
+            async def receive(self, timeout=None):
+                return SimpleNamespace(type=aiohttp.WSMsgType.CLOSE)
+
+        rpc = _FakeRpc(firmas=["VIEJA"])
+        watcher, _ = await self._conectado(rpc)
+        ws = _WsQueCierra()
+        await watcher._serve(ws)
+        # La nueva conexión vuelve a suscribir la wallet desde cero...
+        self.assertEqual([m["method"] for m in ws.enviados], ["logsSubscribe"])
+        # ...y un aviso con la suscripción 77 de la anterior ya no se apunta.
+        watcher._handle(_aviso(77, "NUEVA"))
+        self.assertEqual(watcher._pending, {})
+
     async def test_quitar_una_wallet_del_fichero_la_desuscribe(self):
         rpc = _FakeRpc(firmas=["VIEJA"])
         watcher, ws = await self._conectado(rpc)
         self.path.write_text("", encoding="utf-8")
         # Escrito en el mismo instante que la lectura anterior, el fichero
         # puede conservar la fecha: sin esto reload() no lo vería cambiado.
-        watcher._loaded = None
+        watcher._list._loaded = None
         watcher.reload()
         await watcher._sync_subscriptions(ws)
         self.assertEqual(ws.enviados[-1]["method"], "logsUnsubscribe")
@@ -724,7 +751,7 @@ class TestTransaccionesQueFallan(unittest.IsolatedAsyncioTestCase):
 
     async def test_se_salta_tras_varios_intentos_y_sigue_con_las_demas(self):
         rpc = _FakeRpc(firmas=["VIEJA"])
-        watcher = WalletWatcher(rpc, "http://rpc", self.path, min_sol=0.1)
+        watcher = WalletWatcher(RpcClient(rpc, "http://rpc"), self.path, min_sol=0.1)
         await watcher.poll()
         # ROTA nunca se puede leer (p. ej. una versión de transacción nueva).
         rpc.firmas = ["BUENA", "ROTA", "VIEJA"]
@@ -736,7 +763,7 @@ class TestTransaccionesQueFallan(unittest.IsolatedAsyncioTestCase):
 
     async def test_pide_la_version_de_transaccion_soportada(self):
         rpc = _FakeRpc(firmas=["VIEJA"])
-        watcher = WalletWatcher(rpc, "http://rpc", self.path, min_sol=0.1)
+        watcher = WalletWatcher(RpcClient(rpc, "http://rpc"), self.path, min_sol=0.1)
         await watcher.poll()
         rpc.firmas = ["NUEVA", "VIEJA"]
         await watcher.poll()
@@ -801,6 +828,22 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         finally:
             conn.close()
 
+    async def test_al_salir_cierra_las_bases(self):
+        # Antes las dos conexiones a la base quedaban abiertas hasta que moría el proceso.
+        radar = MemecoinRadar(_config(alert_log_path=str(self.path), wallets_blacklist=True))
+        abiertas = {}
+
+        async def seguir(blacklist):
+            blacklist.entries()  # abre su conexión
+            abiertas["negra"] = blacklist
+            raise asyncio.CancelledError
+
+        radar._follow = seguir
+        with self.assertRaises(asyncio.CancelledError):
+            await radar.run()
+        self.assertIsNone(radar._tracker._conn)
+        self.assertIsNone(abiertas["negra"]._conn)
+
     async def test_avisa_y_registra_la_compra(self):
         radar = self._radar([_buy()])
         alerter = _FakeAlerter()
@@ -864,14 +907,14 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
 
     async def test_rug_en_bonding_curve_no_echa_a_la_wallet(self):
         tmp = self.path.parent
-        wallets_txt, negra = tmp / "wallets.txt", Blacklist(tmp / "negra.db")
+        wallets_txt, negra = tmp / "wallets.txt", _abrir_negra(self, tmp / "negra.db")
         wallets_txt.write_text(f"{WALLET}  # ballena\n", encoding="utf-8")
         radar = self._radar(
             [_buy()], wallets_bonding_curve=True, wallets_blacklist=True, wallets_rug_drop_pct=90,
         )
         await radar._wallets_once(_FakeClient(pairs=[{**_pair("TOK"), "dexId": "pumpfun"}]), _FakeAlerter())
         radar._tracker.update_row(self._rows()[0]["id"], {"peor_ret_30m_pct": -97.0})
-        radar._wallet_watcher = WalletWatcher(None, "http://rpc", wallets_txt, 0.1, negra)
+        radar._wallet_watcher = WalletWatcher(RpcClient(None, "http://rpc"), wallets_txt, 0.1, negra)
         radar._wallet_watcher.reload()
         radar._blacklist_ruggers()
         self.assertEqual(list(radar._wallet_watcher.wallets), [WALLET])
@@ -1071,11 +1114,11 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
 
     async def test_wallet_hiperactiva_va_a_la_lista_negra(self):
         tmp = self.path.parent
-        wallets_txt, negra = tmp / "wallets.txt", Blacklist(tmp / "negra.db")
+        wallets_txt, negra = tmp / "wallets.txt", _abrir_negra(self, tmp / "negra.db")
         wallets_txt.write_text(f"{WALLET}  # ballena\n{OTRA}  # buena\n", encoding="utf-8")
         compras = [_buy(mint=f"T{i}") for i in range(4)]
         radar = self._radar(wallets_blacklist=True, wallets_max_tokens_per_hour=3)
-        watcher = WalletWatcher(None, "http://rpc", wallets_txt, 0.1, negra)
+        watcher = WalletWatcher(RpcClient(None, "http://rpc"), wallets_txt, 0.1, negra)
         watcher.reload()
         watcher.poll = AsyncMock(return_value=compras)
         radar._wallet_watcher = watcher
@@ -1089,7 +1132,7 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
 
     async def test_wallet_que_pierde_va_a_la_lista_negra(self):
         tmp = self.path.parent
-        wallets_txt, negra = tmp / "wallets.txt", Blacklist(tmp / "negra.db")
+        wallets_txt, negra = tmp / "wallets.txt", _abrir_negra(self, tmp / "negra.db")
         wallets_txt.write_text(f"{WALLET}  # ballena\n{OTRA}  # buena\n", encoding="utf-8")
         compras = [_buy(mint=f"T{i}") for i in range(3)] + [_buy(wallet=OTRA, mint=f"T{i}") for i in range(3)]
         radar = self._radar(
@@ -1100,7 +1143,7 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         rows = self._rows()
         for row, ret in zip(rows, [-50, -40, 10, -50, 20, 30]):
             radar._tracker.update_row(row["id"], {"ret_30m_pct": ret})
-        radar._wallet_watcher = WalletWatcher(None, "http://rpc", wallets_txt, 0.1, negra)
+        radar._wallet_watcher = WalletWatcher(RpcClient(None, "http://rpc"), wallets_txt, 0.1, negra)
         radar._wallet_watcher.reload()
         radar._blacklist_losers()
         self.assertEqual(list(radar._wallet_watcher.wallets), [OTRA])
@@ -1110,7 +1153,7 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         """A 30 min la mediana es buena, pero a 24 h se hundieron: con
         loser_checkpoint_minutes = 1440 cuenta la de 24 h."""
         tmp = self.path.parent
-        wallets_txt, negra = tmp / "wallets.txt", Blacklist(tmp / "negra.db")
+        wallets_txt, negra = tmp / "wallets.txt", _abrir_negra(self, tmp / "negra.db")
         wallets_txt.write_text(f"{WALLET}  # ballena\n", encoding="utf-8")
         compras = [_buy(mint=f"T{i}") for i in range(3)]
         radar = self._radar(
@@ -1120,7 +1163,7 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         await radar._wallets_once(_FakeClient(pairs=[_pair(f"T{i}") for i in range(3)]), _FakeAlerter())
         for row, ret in zip(self._rows(), [-80, -60, 5]):
             radar._tracker.update_row(row["id"], {"ret_30m_pct": 3, "ret_1440m_pct": ret})
-        radar._wallet_watcher = WalletWatcher(None, "http://rpc", wallets_txt, 0.1, negra)
+        radar._wallet_watcher = WalletWatcher(RpcClient(None, "http://rpc"), wallets_txt, 0.1, negra)
         radar._wallet_watcher.reload()
         radar._blacklist_losers()
         self.assertEqual(list(radar._wallet_watcher.wallets), [])
@@ -1128,7 +1171,7 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
 
     async def test_wallet_con_pocas_senales_no_se_juzga(self):
         tmp = self.path.parent
-        wallets_txt, negra = tmp / "wallets.txt", Blacklist(tmp / "negra.db")
+        wallets_txt, negra = tmp / "wallets.txt", _abrir_negra(self, tmp / "negra.db")
         wallets_txt.write_text(f"{WALLET}  # ballena\n", encoding="utf-8")
         radar = self._radar(
             [_buy()], wallets_blacklist=True,
@@ -1136,7 +1179,7 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         )
         await radar._wallets_once(_FakeClient(pairs=[_pair("TOK")]), _FakeAlerter())
         radar._tracker.update_row(self._rows()[0]["id"], {"ret_30m_pct": -90})
-        radar._wallet_watcher = WalletWatcher(None, "http://rpc", wallets_txt, 0.1, negra)
+        radar._wallet_watcher = WalletWatcher(RpcClient(None, "http://rpc"), wallets_txt, 0.1, negra)
         radar._wallet_watcher.reload()
         radar._blacklist_losers()
         self.assertEqual(list(radar._wallet_watcher.wallets), [WALLET])
@@ -1216,12 +1259,12 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
 
     async def test_wallet_que_compra_un_rug_va_a_la_lista_negra(self):
         tmp = self.path.parent
-        wallets_txt, negra = tmp / "wallets.txt", Blacklist(tmp / "negra.db")
+        wallets_txt, negra = tmp / "wallets.txt", _abrir_negra(self, tmp / "negra.db")
         wallets_txt.write_text(f"{WALLET}  # ballena\n{OTRA}  # buena\n", encoding="utf-8")
         radar = self._radar([_buy()], wallets_blacklist=True, wallets_rug_drop_pct=90)
         await radar._wallets_once(_FakeClient(pairs=[_pair("TOK", symbol="NGU")]), _FakeAlerter())
         radar._tracker.update_row(self._rows()[0]["id"], {"peor_ret_30m_pct": -96.0})
-        radar._wallet_watcher = WalletWatcher(None, "http://rpc", wallets_txt, 0.1, negra)
+        radar._wallet_watcher = WalletWatcher(RpcClient(None, "http://rpc"), wallets_txt, 0.1, negra)
         radar._wallet_watcher.reload()
         radar._blacklist_ruggers()
         self.assertEqual(list(radar._wallet_watcher.wallets), [OTRA])
@@ -1234,7 +1277,7 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         la wallet, aunque ese par nunca se iba a avisar. Para la mediana de
         resultados sí cuentan: elegir mal es elegir mal aunque no se avise."""
         tmp = self.path.parent
-        wallets_txt, negra = tmp / "wallets.txt", Blacklist(tmp / "negra.db")
+        wallets_txt, negra = tmp / "wallets.txt", _abrir_negra(self, tmp / "negra.db")
         wallets_txt.write_text(f"{WALLET}  # ballena\n", encoding="utf-8")
         compras = [_buy(mint=f"T{i}") for i in range(3)]
         radar = self._radar(
@@ -1247,7 +1290,7 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         for row in self._rows():
             self.assertEqual(row["pasa_filtros_par"], 0)
             radar._tracker.update_row(row["id"], {"ret_30m_pct": -90, "peor_ret_30m_pct": -96.0})
-        radar._wallet_watcher = WalletWatcher(None, "http://rpc", wallets_txt, 0.1, negra)
+        radar._wallet_watcher = WalletWatcher(RpcClient(None, "http://rpc"), wallets_txt, 0.1, negra)
         radar._wallet_watcher.reload()
         radar._blacklist_ruggers()
         self.assertEqual(list(radar._wallet_watcher.wallets), [WALLET])

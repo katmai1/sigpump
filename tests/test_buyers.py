@@ -216,9 +216,12 @@ def _historial(n, cada_segundos, fallidas_cada=0, desde=None):
     ]
 
 
-def _check(entries, pages=5):
+def _check(entries, pages=5, min_age_days=0):
     buyer = Buyer(BALLENA)
-    history = HistoryFilter(_HistoryRpc(entries), min_history=20, max_txs_per_day=1000, max_failed_pct=50, max_pages=pages)
+    history = HistoryFilter(
+        _HistoryRpc(entries), min_history=20, max_txs_per_day=1000, max_failed_pct=50,
+        max_pages=pages, min_age_days=min_age_days,
+    )
     reason = asyncio.run(history.check(buyer))
     return buyer, reason
 
@@ -294,6 +297,26 @@ class CheckHistoryTest(unittest.TestCase):
         self.assertIsNone(reason)
         self.assertFalse(buyer.history_complete)
         self.assertEqual(buyer.history_txs, SIGNATURES_PAGE)
+
+    def test_antiguedad_suficiente(self):
+        # 300 firmas cada día: la primera hace ~299 días.
+        _, reason = _check(_historial(300, 86400), min_age_days=180)
+        self.assertIsNone(reason)
+
+    def test_antiguedad_insuficiente_se_descarta(self):
+        # 300 firmas cada 6 horas: la primera hace ~75 días.
+        _, reason = _check(_historial(300, 6 * 3600), min_age_days=180)
+        self.assertEqual(reason, "reciente: 75 días")
+
+    def test_historial_incompleto_basta_si_ya_es_antiguo(self):
+        # Solo se lee una página, pero su última firma ya tiene ~250 días.
+        buyer, reason = _check(_historial(2500, 6 * 3600), pages=1, min_age_days=180)
+        self.assertFalse(buyer.history_complete)
+        self.assertIsNone(reason)
+
+    def test_historial_incompleto_y_reciente_es_desconocido(self):
+        buyer, reason = _check(_historial(2500, 3 * 3600), pages=1, min_age_days=180)
+        self.assertTrue(reason.startswith("antigüedad desconocida"), reason)
 
     def test_split_separa_y_mantiene_orden(self):
         rpc = _HistoryRpc(_historial(300, 6 * 3600))

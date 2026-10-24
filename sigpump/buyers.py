@@ -4,8 +4,9 @@ sigpump/buyers.py
 Wallets que compraron un token en los últimos minutos gastando al menos un
 mínimo de SOL por transacción. Se ejecuta a mano con el mint del token:
 
-    python -m sigpump.buyers <MINT> [--minutes 10] [--min-sol 2]
-    python -m sigpump.buyers <MINT> --from 16:30 --to 16:35
+    python buyers.py <MINT> [--minutes 10] [--min-sol 2]
+    python buyers.py <MINT> --from 16:30 --to 16:35
+    python buyers.py <MINT> --min-age-days 180
 
 Usa el [solana].rpc_url de config.toml. Las transacciones se piden al mint y
 a sus pools de DexScreener (los swaps de Raydium AMM v4 no incluyen el mint
@@ -16,7 +17,8 @@ más barato); en otro RPC, una a una (--method rpc).
 
 Después se mira el historial de firmas de cada comprador (1 crédito por cada
 1000) para descartar las wallets nuevas y los bots, y dar la fecha de su
-primera transacción.
+primera transacción. Con --min-age-days se quedan solo las wallets cuya
+primera transacción tiene al menos esa antigüedad.
 
 Piezas:
 - Rpc: llamadas al RPC con ritmo máximo y cuenta de créditos.
@@ -77,6 +79,8 @@ DEFAULT_MAX_FAILED_PCT = 50.0
 # Páginas de 1000 firmas que se leen hacia atrás para llegar a la primera
 # transacción (1 crédito cada una). Más allá, la fecha queda como "antes de".
 DEFAULT_HISTORY_PAGES = 5
+# Antigüedad mínima en días de la primera transacción (0 = sin filtro).
+DEFAULT_MIN_AGE_DAYS = 0.0
 # Firmas mínimas para juzgar el ritmo o las fallidas: con pocas no es fiable.
 MIN_TXS_FOR_BOT_CHECK = 100
 
@@ -353,12 +357,14 @@ class HistoryFilter:
         max_txs_per_day: float = DEFAULT_MAX_TXS_PER_DAY,
         max_failed_pct: float = DEFAULT_MAX_FAILED_PCT,
         max_pages: int = DEFAULT_HISTORY_PAGES,
+        min_age_days: float = DEFAULT_MIN_AGE_DAYS,
     ):
         self._rpc = rpc
         self._min_history = min_history
         self._max_txs_per_day = max_txs_per_day
         self._max_failed_pct = max_failed_pct
         self._max_pages = max_pages
+        self._min_age_days = min_age_days
 
     async def split(self, buyers: list[Buyer]) -> tuple[list[Buyer], list[tuple[Buyer, str]]]:
         """Separa los compradores que operan habitualmente de los descartados,
@@ -406,7 +412,22 @@ class HistoryFilter:
             before = entries[-1]["signature"]
         if buyer.history_complete and buyer.history_txs < self._min_history:
             return f"nueva: solo {buyer.history_txs} transacciones"
-        return None
+        return self._age_reason(buyer)
+
+    def _age_reason(self, buyer: Buyer) -> str | None:
+        """Por qué no llega a min_age_days, o None. Si no se leyó el
+        historial entero, la primera transacción vista es una cota: si ya es
+        bastante antigua vale, si no, no se sabe y se descarta."""
+        if self._min_age_days <= 0:
+            return None
+        if buyer.first_ts is None:
+            return "antigüedad desconocida"
+        age_days = (time.time() - buyer.first_ts) / 86400
+        if age_days >= self._min_age_days:
+            return None
+        if buyer.history_complete:
+            return f"reciente: {age_days:.0f} días"
+        return f"antigüedad desconocida: {buyer.history_txs} tx en {age_days:.0f} días (--history-pages)"
 
     def _bot_reason(self, entries: list[dict]) -> str | None:
         """Por qué parece un bot según sus firmas más recientes (lo que hace
@@ -512,7 +533,8 @@ async def _run(config: Config, args: argparse.Namespace, since: float, until: fl
         buyers = await finder.find(args.mint, [args.mint, *pools], since, until)
         log.info("Revisando el historial de %d wallets...", len(buyers))
         history = HistoryFilter(
-            rpc, args.min_history, args.max_txs_per_day, args.max_failed_pct, args.history_pages
+            rpc, args.min_history, args.max_txs_per_day, args.max_failed_pct, args.history_pages,
+            args.min_age_days,
         )
         kept, discarded = await history.split(buyers)
     Report(window, args.min_sol).print(kept, discarded, rpc)
@@ -541,6 +563,8 @@ def _parse_args() -> argparse.Namespace:
                         help="%% de transacciones fallidas a partir del cual se considera un bot")
     parser.add_argument("--history-pages", type=int, default=DEFAULT_HISTORY_PAGES,
                         help="páginas de 1000 firmas para buscar la primera transacción")
+    parser.add_argument("--min-age-days", type=float, default=DEFAULT_MIN_AGE_DAYS,
+                        help="antigüedad mínima de la wallet en días (0 = sin filtro)")
     return parser.parse_args()
 
 

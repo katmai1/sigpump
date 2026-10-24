@@ -642,7 +642,9 @@ class TestWebSocket(unittest.IsolatedAsyncioTestCase):
         rpc = _FakeRpc(firmas=["VIEJA"])
         watcher, ws = await self._conectado(rpc)
         self.path.write_text("", encoding="utf-8")
-        watcher._mtime = None
+        # Escrito en el mismo instante que la lectura anterior, el fichero
+        # puede conservar la fecha: sin esto reload() no lo vería cambiado.
+        watcher._loaded = None
         watcher.reload()
         await watcher._sync_subscriptions(ws)
         self.assertEqual(ws.enviados[-1]["method"], "logsUnsubscribe")

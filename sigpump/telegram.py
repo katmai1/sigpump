@@ -15,7 +15,7 @@ from telegram.constants import ParseMode  # type: ignore[import-not-found]
 from telegram.error import RetryAfter  # type: ignore[import-not-found]
 from telegram.warnings import PTBDeprecationWarning  # type: ignore[import-not-found]
 
-from sigpump.tracker import TRACK_RECORD_MINUTES, TrackRecord, format_minutes
+from sigpump.tracker import HIT_PCT, TRACK_RECORD_MINUTES, TrackRecord, format_minutes
 from sigpump.util import buy_ratio_m5, liquidity_usd, market_cap_usd, to_float, volume_acceleration
 from sigpump.wallets import WalletSignal
 
@@ -143,6 +143,9 @@ class TelegramAlerter:
                 f"📊 Historial: {format_track_record(signal.track_record)}\n" if signal.track_record
                 else "📊 Sin historial medido todavía\n"
             )
+        if signal.hits and signal.hits[1]:
+            hits, total = signal.hits
+            header += f"🎯 Aciertos: {hits / total:.0%} ({hits} de {total} llegaron a {HIT_PCT:+.0f}%)\n"
         if signal.bonding_curve:
             header += f"🧪 <b>En bonding curve</b> ({pool}): sin graduar, más riesgo\n"
         if signal.transfer_fee_bps:

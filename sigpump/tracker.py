@@ -67,6 +67,23 @@ TRACK_RECORD_MINUTES = (60, 240, 1440)
 # checkpoint de TRACK_RECORD_MINUTES que tenga alguno medido.
 TrackRecord = tuple[tuple[int, float, int], ...]
 
+# Retorno al que tiene que llegar un token, en cualquier muestra registrada
+# (el mejor de los primeros TRACKING_MINUTES o un checkpoint largo), para
+# contar como acierto de la wallet en el aviso. 2026-10-31: con +8% acertaba
+# el 71% de los tokens (1455 de 2043), 65% mirando solo la primera media hora.
+HIT_PCT = 8.0
+_PEAK_COLUMNS = (_BEST, *(f"ret_{m}m_pct" for m in TRACK_RECORD_MINUTES))
+
+# La primera compra registrada de cada token por wallet (avisada o no,
+# pasara o no los filtros del par: el par no cambia lo bien que elige la
+# wallet), sin las de bonding curve. Una por token: las compras repetidas del
+# mismo token no deben pesar más.
+_FIRST_BUYS = (
+    "SELECT MIN(id) FROM alertas WHERE tipo = 'wallet' AND wallet IS NOT NULL "
+    "AND COALESCE(bonding_curve, 0) = 0 AND (:wallet IS NULL OR wallet = :wallet) "
+    "GROUP BY wallet, token"
+)
+
 # Columnas de la tabla `alertas` (además de `id`) y su tipo. Al abrir una
 # base creada por una versión anterior se agregan las que falten; las que
 # ya no se usan (score, velas, prealertas) se quedan como están.
@@ -401,10 +418,8 @@ class AlertTracker:
 
     def wallet_returns(self, minutes: int = TRACKING_MINUTES, wallet: str | None = None) -> dict[str, list[float]]:
         """Wallet -> rendimiento a `minutes` (uno de CHECKPOINTS_MINUTES) de
-        la primera compra registrada de cada token (avisada o no, pasara o no
-        los filtros del par: el par no cambia lo bien que elige la wallet),
-        solo las ya medidas. Una por token: las compras repetidas del mismo
-        token no deben pesar más. Con `wallet`, solo la de esa."""
+        la primera compra de cada token (_FIRST_BUYS), solo las ya medidas.
+        Con `wallet`, solo la de esa."""
         if minutes not in CHECKPOINTS_MINUTES:
             raise ValueError(f"Sin checkpoint a {minutes} min: {CHECKPOINTS_MINUTES}")
         column = f"ret_{minutes}m_pct"
@@ -413,10 +428,8 @@ class AlertTracker:
             return {}
         try:
             rows = conn.execute(
-                f"SELECT wallet, {column} AS ret FROM alertas WHERE id IN ("
-                "SELECT MIN(id) FROM alertas WHERE tipo = 'wallet' AND wallet IS NOT NULL "
-                "AND COALESCE(bonding_curve, 0) = 0 AND (:wallet IS NULL OR wallet = :wallet) "
-                f"GROUP BY wallet, token) AND {column} IS NOT NULL",
+                f"SELECT wallet, {column} AS ret FROM alertas WHERE id IN ({_FIRST_BUYS}) "
+                f"AND {column} IS NOT NULL",
                 {"wallet": wallet},
             ).fetchall()
         except sqlite3.Error as exc:
@@ -439,6 +452,29 @@ class AlertTracker:
             )
             for w in wallets
         }
+
+    def hit_rates(self, wallet: str | None = None) -> dict[str, tuple[int, int]]:
+        """Wallet -> (aciertos, tokens medidos): de la primera compra de cada
+        token (_FIRST_BUYS), cuántas llegaron a HIT_PCT en alguna muestra.
+        Con `wallet`, solo la de esa."""
+        conn = self._db()
+        if conn is None:
+            return {}
+        try:
+            rows = conn.execute(
+                f"SELECT wallet, {', '.join(_PEAK_COLUMNS)} FROM alertas WHERE id IN ({_FIRST_BUYS}) "
+                f"AND COALESCE({', '.join(_PEAK_COLUMNS)}) IS NOT NULL",
+                {"wallet": wallet},
+            ).fetchall()
+        except sqlite3.Error as exc:
+            log.warning("No se pudo leer %s: %s", self._path, exc)
+            return {}
+        rates: dict[str, tuple[int, int]] = {}
+        for row in rows:
+            peak = max(row[c] for c in _PEAK_COLUMNS if row[c] is not None)
+            hits, total = rates.get(row["wallet"], (0, 0))
+            rates[row["wallet"]] = (hits + (peak >= HIT_PCT), total + 1)
+        return rates
 
     async def update(self, client: DexScreenerClient, chain_id: str) -> None:
         """Muestrea el precio actual de las filas a las que les toca (un

@@ -59,6 +59,14 @@ class TestFormatMessage(unittest.TestCase):
         # Sin registro no hay historial que mostrar.
         self.assertNotIn("📊", _alerter().format_message(_pair(), _SIGNAL))
 
+    def test_aciertos_de_la_wallet(self):
+        con = _alerter().format_message(_pair(), dataclasses.replace(_SIGNAL, hits=(10, 14)))
+        self.assertIn("🎯 Aciertos: 71% (10 de 14 llegaron a +8%)", con)
+        for hits in (None, (0, 0)):
+            with self.subTest(hits=hits):
+                texto = _alerter().format_message(_pair(), dataclasses.replace(_SIGNAL, hits=hits))
+                self.assertNotIn("🎯", texto)
+
     def test_mensaje_completo(self):
         texto = _alerter().format_message(_pair(), _SIGNAL)
         self.assertIn("compró Pepe Coin (PEPE)</b>", texto)

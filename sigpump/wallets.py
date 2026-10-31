@@ -104,13 +104,14 @@ class WalletSignal:
     todavía no se graduó a un AMM. `transfer_fee_bps` es la comisión de
     transferencia del token (Token-2022), None si no se sabe.
     `track_record` es cómo le fue a la wallet en el registro (() sin tokens
-    medidos, None sin registro)."""
+    medidos, None sin registro) y `hits` sus (aciertos, tokens medidos)."""
     buy: WalletBuy
     others: tuple[str, ...] = field(default_factory=tuple)
     update: bool = False
     bonding_curve: bool = False
     transfer_fee_bps: int | None = None
     track_record: TrackRecord | None = None
+    hits: tuple[int, int] | None = None
 
 
 def _token_amounts(balances: object, owner: str) -> dict[str, float]:

@@ -95,12 +95,13 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         alerter = _FakeAlerter()
         client = _FakeClient(pairs=[_pair(f"T{i}") for i in range(3)])
         await radar.run_once(client, alerter)
-        self._anotar(radar, self._rows()[0]["id"], {"ret_60m_pct": 12, "ret_1440m_pct": -30})
+        self._anotar(radar, self._rows()[0]["id"], {"ret_60m_pct": 12, "ret_1440m_pct": -30, "mejor_ret_30m_pct": 4})
         await radar.run_once(client, alerter)
         await radar.run_once(client, alerter)
         self.assertEqual(
             [s.track_record for _, s in alerter.wallet], [(), ((60, 12, 1), (1440, -30, 1)), ()]
         )
+        self.assertEqual([s.hits for _, s in alerter.wallet], [None, (1, 1), None])
 
     async def test_ranking_de_las_wallets_seguidas(self):
         tercera = "9Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j3"

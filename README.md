@@ -134,7 +134,10 @@ y con los filtros estrictos casi nunca llegaría a tener tokens medidos.
 
 Cada aviso lleva el historial de la wallet en el registro: la mediana a 1 h,
 4 h y 24 h de la primera compra de cada token (las mismas que cuenta la lista
-negra por resultados), con los tokens medidos. Con `ranking_hour` (hora local,
+negra por resultados), con los tokens medidos, y su porcentaje de aciertos:
+cuántos de esos tokens llegaron a +8% en algún momento visto (el mejor
+precio de la primera media hora o los checkpoints de 1 h, 4 h y 24 h), aunque
+después cayeran. Con `ranking_hour` (hora local,
 -1 = apagado) llega además cada día un ranking de las wallets seguidas con al
 menos 5 tokens medidos a 1 h, de mejor a peor, para decidir a cuáles poner el
 `*` de confianza. Con los datos de octubre el pasado de una wallet predice:

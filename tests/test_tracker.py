@@ -295,6 +295,23 @@ class TestAlertTracker(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tracker.track_records(), {"W": ((60, 2, 3), (240, 5, 2), (1440, -50, 1))})
         self.assertEqual(tracker.track_records("OTRA"), {})
 
+    def test_aciertos_por_el_mejor_retorno_visto(self):
+        """Cuenta como acierto llegar a +8% en cualquier muestra, aunque luego
+        caiga; las compras repetidas, en bonding curve o sin medir no cuentan."""
+        tracker = self._tracker()
+        for token, campos in [
+            ("A", {"mejor_ret_30m_pct": 9, "ret_60m_pct": -40}),
+            ("A", {"mejor_ret_30m_pct": -5}),
+            ("B", {"mejor_ret_30m_pct": 3, "ret_1440m_pct": 8}),
+            ("C", {"mejor_ret_30m_pct": 7.9, "ret_60m_pct": -10}),
+            ("D", {"ret_240m_pct": 50, "bonding_curve": 1}),
+            ("E", {}),
+        ]:
+            row_id = tracker.record(_pair(), sent=True)
+            tracker.update_row(row_id, {"wallet": "W", "token": token, **campos})
+        self.assertEqual(tracker.hit_rates(), {"W": (2, 3)})
+        self.assertEqual(tracker.hit_rates("OTRA"), {})
+
     async def test_bonding_curve_sigue_el_token_tras_graduarse(self):
         """Al graduarse el token se muda de la curva a un pool del AMM: se
         sigue el de más liquidez del token y no el pool de la alerta."""

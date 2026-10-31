@@ -339,7 +339,9 @@ class MemecoinRadar:
         buy = signal.buy
         if self._tracker:
             signal = dataclasses.replace(
-                signal, track_record=self._tracker.track_records(buy.wallet).get(buy.wallet, ())
+                signal,
+                track_record=self._tracker.track_records(buy.wallet).get(buy.wallet, ()),
+                hits=self._tracker.hit_rates(buy.wallet).get(buy.wallet),
             )
         log.info(
             "Wallet%s: %s compró %s (%.2f SOL, %s)%s",

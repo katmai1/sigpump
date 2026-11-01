@@ -149,7 +149,10 @@ descartan las compras en pares recién creados, que ya subieron mucho en la
 última hora o de market cap pequeño: con los primeros datos eran las que
 casi siempre perdían. `min_txns_m5` y `min_volume_h1_usd` descartan los
 tokens muertos, con pocas transacciones en los últimos 5 minutos o poco
-volumen en la última hora: no se mueven y el aviso no sirve.
+volumen en la última hora. Vienen a 0: desde el 2026-11-01 están
+desactivados, porque con la edad y el turnover ya filtrados lo que quitaban
+(casi la mitad de los avisos) no daba peor que lo que quedaba. Son tokens
+de poca liquidez, donde el retorno medido aguanta menos tamaño.
 `max_price_change_m5_pct` descarta los que ya subieron mucho en los
 últimos 5 minutos, también para las wallets de confianza: es llegar tarde
 a la vela.

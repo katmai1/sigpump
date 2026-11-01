@@ -116,8 +116,13 @@ max_price_change_m5_pct = 20
 # en los últimos 5 min y volumen en USD de la última hora. Los tokens muertos
 # (una o dos transacciones en los últimos minutos) no se mueven: el aviso no
 # hace perder, pero tampoco sirve.
-min_txns_m5 = 5
-min_volume_h1_usd = 5000
+# 2026-11-01: con la edad y el turnover ya filtrados sobraban. Con 4 txns y
+# $3.000 quitaban 6,8 avisos/día de los últimos 10 días (casi la mitad), que
+# daban +2% de mediana a 1 h y -1% a 24 h (los que quedaban, +2% y -5%) y caían
+# más de 50% a 24 h el 5% (los que quedaban, 13%). Ojo: son tokens de poca
+# liquidez (mediana $21k), donde la propia compra mueve el precio.
+min_txns_m5 = 0
+min_volume_h1_usd = 0
 # Volumen de la última hora sobre el market cap (0.05 = 5%). Con mucho más
 # volumen del que corresponde al tamaño del token lo están bombeando o ya
 # están saliendo: por encima del 5%, el 64% de las señales caía más de 50% en

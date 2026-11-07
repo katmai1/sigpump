@@ -49,19 +49,12 @@ class TestFormatMessage(unittest.TestCase):
                 texto = _alerter().format_message(_pair(), dataclasses.replace(_SIGNAL, transfer_fee_bps=fee))
                 self.assertNotIn("Comisión", texto)
 
-    def test_historial_de_la_wallet(self):
-        con = _alerter().format_message(
-            _pair(), dataclasses.replace(_SIGNAL, track_record=((60, 3.4, 14), (240, -2.0, 12), (1440, -28.0, 9)))
-        )
-        self.assertIn("📊 Historial: +3% a 1 h, -2% a 4 h, -28% a 24 h (14 tokens)", con)
-        sin = _alerter().format_message(_pair(), dataclasses.replace(_SIGNAL, track_record=()))
-        self.assertIn("📊 Sin historial medido todavía", sin)
-        # Sin registro no hay historial que mostrar.
-        self.assertNotIn("📊", _alerter().format_message(_pair(), _SIGNAL))
-
     def test_aciertos_de_la_wallet(self):
         con = _alerter().format_message(_pair(), dataclasses.replace(_SIGNAL, hits=(10, 14)))
-        self.assertIn("🎯 Aciertos: 71% (10 de 14 llegaron a +8%)", con)
+        self.assertIn("🎯 Aciertos: 71% (10 de 14 llegaron a +8% sin caer antes más de 15%)", con)
+        otros = TelegramAlerter(TOKEN_FALSO, "-100123", hit_pct=12.5, hit_max_drop_pct=10)
+        texto = otros.format_message(_pair(), dataclasses.replace(_SIGNAL, hits=(1, 2)))
+        self.assertIn("llegaron a +12.5% sin caer antes más de 10%", texto)
         for hits in (None, (0, 0)):
             with self.subTest(hits=hits):
                 texto = _alerter().format_message(_pair(), dataclasses.replace(_SIGNAL, hits=hits))
@@ -81,13 +74,6 @@ class TestFormatMessage(unittest.TestCase):
         texto = _alerter().format_message(_pair(quoteToken={"symbol": "SOL"}), _SIGNAL)
         self.assertIn("Par: <b>PEPE/SOL</b> en raydium", texto)
         self.assertIn("Par: <b>PEPE/?</b>", _alerter().format_message(_pair(), _SIGNAL))
-
-    def test_wallet_de_confianza_se_marca(self):
-        self.assertNotIn("de las buenas", _alerter().format_message(_pair(), _SIGNAL))
-        signal = WalletSignal(dataclasses.replace(_SIGNAL.buy, trusted=True))
-        texto = _alerter().format_message(_pair(), signal)
-        self.assertIn("⭐ ballena compró", texto)
-        self.assertIn("⭐ <b>Wallet de las buenas</b>", texto)
 
     def test_bonding_curve_se_marca(self):
         self.assertNotIn("bonding curve", _alerter().format_message(_pair(), _SIGNAL))
@@ -133,15 +119,15 @@ class TestFormatMessage(unittest.TestCase):
 class TestRanking(unittest.TestCase):
     def test_ranking_con_las_wallets_y_las_que_no_tienen_datos(self):
         texto = format_ranking(
-            [("<buena>", True, ((60, 8.0, 12), (240, 1.0, 10))), ("mala", False, ((60, -9.0, 6),))], 3, 5
+            [("<buena>", ((60, 8.0, 12), (240, 1.0, 10))), ("mala", ((60, -9.0, 6),))], 3, 5
         )
-        self.assertIn("1. ⭐ &lt;buena&gt;: +8% a 1 h, +1% a 4 h (12 tokens)", texto)
+        self.assertIn("1. &lt;buena&gt;: +8% a 1 h, +1% a 4 h (12 tokens)", texto)
         self.assertIn("2. mala: -9% a 1 h (6 tokens)", texto)
         self.assertIn("menos de 5 tokens medidos): 3 wallets", texto)
 
     def test_con_muchas_solo_los_extremos(self):
         total = RANKING_TOP + RANKING_BOTTOM + 3
-        filas = [(f"w{i}", False, ((60, float(-i), 5),)) for i in range(1, total + 1)]
+        filas = [(f"w{i}", ((60, float(-i), 5),)) for i in range(1, total + 1)]
         lineas = format_ranking(filas, 0, 5).splitlines()[1:]
         self.assertEqual(len(lineas), RANKING_TOP + RANKING_BOTTOM + 1)
         self.assertTrue(lineas[0].startswith("1. w1:"))

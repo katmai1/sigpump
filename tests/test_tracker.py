@@ -1,6 +1,7 @@
 """Tests del registro de resultados: escritura en SQLite, checkpoints de
 retorno, recuperación tras reinicio y tolerancia a fallos de la base."""
 
+import json
 import logging
 import sqlite3
 import tempfile
@@ -10,7 +11,9 @@ from pathlib import Path
 
 from sigpump.config import Config
 from sigpump.filters import pair_rejection
-from sigpump.tracker import CHECKPOINT_TOLERANCE_MINUTES, COLUMNS, AlertTracker, pair_from_row
+from sigpump.tracker import (
+    CHECKPOINT_TOLERANCE_MINUTES, COLUMNS, AlertTracker, extend_path, pair_from_row, path_hit,
+)
 
 
 def _pair(address="TOK", pool="POOL", price="1.0"):
@@ -162,6 +165,7 @@ class TestAlertTracker(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["ret_30m_pct"], 10.0)
         self.assertEqual(row["mejor_ret_30m_pct"], 20.0)
         self.assertEqual(row["peor_ret_30m_pct"], -10.0)
+        self.assertEqual(json.loads(row["camino_precio"]), {"peor": -10.0, "picos": [[20.0, 0.0]]})
         # Terminada: no se vuelve a pedir su precio.
         await tracker.update(client, "solana")
         self.assertEqual(len(client.requested), 3)
@@ -295,22 +299,54 @@ class TestAlertTracker(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tracker.track_records(), {"W": ((60, 2, 3), (240, 5, 2), (1440, -50, 1))})
         self.assertEqual(tracker.track_records("OTRA"), {})
 
-    def test_aciertos_por_el_mejor_retorno_visto(self):
-        """Cuenta como acierto llegar a +8% en cualquier muestra, aunque luego
-        caiga; las compras repetidas, en bonding curve o sin medir no cuentan."""
+    def test_aciertos_con_lo_que_paso_antes_de_llegar(self):
+        """Acierto es llegar al objetivo sin haber caído antes más del stop.
+        Las que todavía no llegaron ni cayeron tanto solo cuentan (como
+        fallo) al acabar el seguimiento; las compras repetidas, en bonding
+        curve o de antes del camino del precio no cuentan."""
         tracker = self._tracker()
-        for token, campos in [
-            ("A", {"mejor_ret_30m_pct": 9, "ret_60m_pct": -40}),
-            ("A", {"mejor_ret_30m_pct": -5}),
-            ("B", {"mejor_ret_30m_pct": 3, "ret_1440m_pct": 8}),
-            ("C", {"mejor_ret_30m_pct": 7.9, "ret_60m_pct": -10}),
-            ("D", {"ret_240m_pct": 50, "bonding_curve": 1}),
-            ("E", {}),
+        viejo = time.time() - 2 * 86400
+        for token, camino, campos in [
+            ("A", {"peor": -40, "picos": [[9, -5]]}, {}),
+            ("A", {"peor": -50, "picos": []}, {}),
+            ("B", {"peor": -20, "picos": [[10, -20]]}, {}),
+            ("C", {"peor": -3, "picos": [[4, 0]]}, {}),
+            ("D", {"peor": -3, "picos": [[4, 0]]}, {"ret_1440m_pct": 2}),
+            ("E", {"peor": 0, "picos": [[50, 0]]}, {"bonding_curve": 1}),
+            ("F", None, {"ret_60m_pct": 30}),
+            ("G", {"peor": -3, "picos": []}, {"timestamp": viejo}),
         ]:
             row_id = tracker.record(_pair(), sent=True)
-            tracker.update_row(row_id, {"wallet": "W", "token": token, **campos})
-        self.assertEqual(tracker.hit_rates(), {"W": (2, 3)})
-        self.assertEqual(tracker.hit_rates("OTRA"), {})
+            tracker.update_row(row_id, {
+                "wallet": "W", "token": token, "camino_precio": camino and json.dumps(camino), **campos,
+            })
+        self.assertEqual(tracker.hit_rates(8, 15), {"W": (1, 4)})
+        self.assertEqual(tracker.hit_rates(8, 25), {"W": (2, 4)})
+        self.assertEqual(tracker.hit_rates(8, 15, "OTRA"), {})
+
+    def test_camino_del_precio(self):
+        camino = {"peor": 0.0, "picos": []}
+        for ret in (-2, 5, 9, -16, 3, 12, 20):
+            camino = extend_path(camino, ret)
+        # El 9 reemplaza al 5 (sin caída entre medio); el 20 al 12.
+        self.assertEqual(camino, {"peor": -16, "picos": [[9, -2], [20, -16]]})
+        self.assertTrue(path_hit(camino, 8, 15))
+        self.assertFalse(path_hit(camino, 10, 15))
+        self.assertTrue(path_hit(camino, 10, 16))
+        self.assertIsNone(path_hit(camino, 30, 20))
+        self.assertFalse(path_hit(camino, 30, 15))
+
+    async def test_las_filas_de_antes_no_ganan_camino(self):
+        """Una compra en seguimiento al actualizar no tiene su principio:
+        un camino a medias daría por bueno lo que quizá cayó antes."""
+        tracker = self._tracker()
+        row_id = tracker.record(_pair(), sent=True)
+        tracker.update_row(row_id, {"camino_precio": None})
+        self._age(5)
+        await tracker.update(_FakeClient({"POOL": 1.3}), "solana")
+        row = self._rows()[0]
+        self.assertEqual(row["ret_5m_pct"], 30.0)
+        self.assertIsNone(row["camino_precio"])
 
     async def test_bonding_curve_sigue_el_token_tras_graduarse(self):
         """Al graduarse el token se muda de la curva a un pool del AMM: se

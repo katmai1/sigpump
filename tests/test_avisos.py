@@ -90,24 +90,21 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fila["sol_gastado"], 1.5)
         self.assertEqual(fila["entrada_nueva"], 1)
 
-    async def test_el_aviso_lleva_el_historial_de_la_wallet(self):
+    async def test_el_aviso_lleva_los_aciertos_de_la_wallet(self):
         radar = self._radar([_buy(mint="T0")], [_buy(mint="T1")], [_buy(wallet=OTRA, mint="T2")])
         alerter = _FakeAlerter()
         client = _FakeClient(pairs=[_pair(f"T{i}") for i in range(3)])
         await radar.run_once(client, alerter)
-        self._anotar(radar, self._rows()[0]["id"], {"ret_60m_pct": 12, "ret_1440m_pct": -30, "mejor_ret_30m_pct": 4})
+        self._anotar(radar, self._rows()[0]["id"], {"camino_precio": '{"peor": -3, "picos": [[12, -3]]}'})
         await radar.run_once(client, alerter)
         await radar.run_once(client, alerter)
-        self.assertEqual(
-            [s.track_record for _, s in alerter.wallet], [(), ((60, 12, 1), (1440, -30, 1)), ()]
-        )
         self.assertEqual([s.hits for _, s in alerter.wallet], [None, (1, 1), None])
 
     async def test_ranking_de_las_wallets_seguidas(self):
         tercera = "9Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j3"
         radar = self._radar(wallets_ranking_hour=9)
         radar._wallet_watcher.wallets = {
-            WALLET: FollowedWallet("ballena", trusted=True),
+            WALLET: FollowedWallet("ballena"),
             OTRA: FollowedWallet("ballena 2"),
             tercera: FollowedWallet("nueva"),
         }
@@ -123,7 +120,7 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         await radar.send_ranking(alerter)
         [texto] = alerter.textos
         self.assertIn("1. ballena 2: +20% a 1 h", texto)
-        self.assertIn("2. ⭐ ballena: -10% a 1 h", texto)
+        self.assertIn("2. ballena: -10% a 1 h", texto)
         self.assertNotIn("nueva", texto)
         self.assertIn(": 1 wallets", texto)
         self.assertGreater(radar._next_ranking, time.time())
@@ -293,14 +290,6 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([s.others for _, s in alerter.wallet], [(), ("ballena",)])
         self.assertEqual(self._rows()[1]["wallets_confluencia"], 1)
 
-    async def test_confluencia_marca_las_wallets_de_confianza(self):
-        radar = self._radar([_buy(trusted=True)], [_buy(wallet=OTRA, label="ballena 2")])
-        alerter = _FakeAlerter()
-        client = _FakeClient(pairs=[_pair("TOK")])
-        await radar.run_once(client, alerter)
-        await radar.run_once(client, alerter)
-        self.assertEqual(alerter.wallet[-1][1].others, ("⭐ ballena",))
-
     async def test_la_confluencia_caduca(self):
         viejo = time.time() - 2 * 3600
         radar = self._radar([_buy(ts=viejo)], [_buy(wallet=OTRA, label="ballena 2")])
@@ -349,25 +338,6 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         await reiniciado.run_once(client, alerter)
         [(_, signal)] = alerter.wallet
         self.assertEqual(signal.others, ("ballena",))
-
-    async def test_la_estrella_de_confianza_sobrevive_a_un_reinicio(self):
-        # Las compras recuperadas del registro no guardan si la wallet es de
-        # confianza: se mira en el fichero de ahora.
-        radar = self._radar([_buy(trusted=True)])
-        client = _FakeClient(pairs=[_pair("TOK")])
-        await radar.run_once(client, _FakeAlerter())
-        reiniciado = self._radar([_buy(wallet=OTRA, label="ballena 2")])
-        reiniciado._wallet_watcher.wallets = {WALLET: FollowedWallet("ballena", trusted=True)}
-        reiniciado.restore_cooldowns()
-        alerter = _FakeAlerter()
-        await reiniciado.run_once(client, alerter)
-        self.assertEqual(alerter.wallet[-1][1].others, ("⭐ ballena",))
-
-    async def test_wallet_de_confianza_avisa_sola(self):
-        radar = self._radar([_buy(trusted=True)], wallets_min_wallets=2)
-        alerter = _FakeAlerter()
-        await radar.run_once(_FakeClient(pairs=[_pair("TOK")]), alerter)
-        self.assertEqual(len(alerter.wallet), 1)
 
     async def test_un_aviso_por_token_salvo_que_entren_mas_wallets(self):
         tercera = "8Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j8"
@@ -524,32 +494,6 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self._rows()[-1]["motivo_descarte"] or "", motivo)
                 self.assertEqual(len(alerter.wallet), 0 if motivo else 1)
 
-    async def test_wallet_de_confianza_se_salta_cambio_market_cap_y_turnover(self):
-        casos = [
-            (_pair("TOK", created_at=_hace_horas(5), change=80), ""),
-            ({**_pair("TOK", created_at=_hace_horas(5)), "marketCap": 50_000}, ""),
-            (_pair("TOK", created_at=_hace_horas(5), volume=50_000), ""),
-            ({**_pair("TOK", created_at=_hace_horas(5)), "txns": {"m5": {"buys": 1, "sells": 0}}}, ""),
-            (_pair("TOK", created_at=_hace_horas(0.5)), "par creado hace 30 min"),
-            ({**_pair("TOK", created_at=_hace_horas(5)), "priceChange": {"m5": 25, "h1": 10}},
-             "cambio 5m +25% > 20%"),
-            ({**_pair("TOK", created_at=_hace_horas(5)), "quoteToken": {"symbol": "PUMP"}},
-             "par contra PUMP, no contra SOL"),
-        ]
-        for pair, motivo in casos:
-            with self.subTest(motivo=motivo):
-                radar = self._radar(
-                    [_buy(trusted=True)], wallets_min_pair_age_minutes=120,
-                    wallets_max_price_change_h1_pct=50, wallets_min_market_cap_usd=100_000,
-                    wallets_max_turnover_h1=0.03, wallets_min_txns_m5=5, quote_tokens=["SOL"],
-                    wallets_max_price_change_m5_pct=20,
-                )
-                alerter = _FakeAlerter()
-                pair = {"quoteToken": {"symbol": "SOL"}, **pair}
-                await radar.run_once(_FakeClient(pairs=[pair]), alerter)
-                self.assertEqual(self._rows()[-1]["motivo_descarte"] or "", motivo)
-                self.assertEqual(len(alerter.wallet), 0 if motivo else 1)
-
     async def test_filtros_de_actividad_del_par_para_wallets(self):
         casos = [
             ({**_pair("TOK"), "txns": {"m5": {"buys": 1, "sells": 0}}}, "1 txns en 5 min < 5"),
@@ -672,12 +616,12 @@ class TestMensajeDeWallet(unittest.TestCase):
         self.assertNotIn("ACTUALIZACIÓN", text)
         self.assertNotIn("Score", text)
 
-    def test_encabezado_de_actualizacion_y_confianza(self):
+    def test_encabezado_de_actualizacion(self):
         alerter = TelegramAlerter("123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11", "-100123")
-        signal = WalletSignal(_buy(trusted=True), others=("a", "b"), update=True)
+        signal = WalletSignal(_buy(), others=("a", "b"), update=True)
         text = alerter.format_message(_pair("TOK", symbol="PEPE"), signal)
         self.assertTrue(text.startswith("🔁 <b>ACTUALIZACIÓN</b>"))
-        self.assertIn("⭐ ballena compró", text)
+        self.assertIn("👛 <b>ballena compró", text)
 
 
 if __name__ == "__main__":

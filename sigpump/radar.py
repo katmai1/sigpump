@@ -204,13 +204,6 @@ class MemecoinRadar:
             return
         watcher.ban(buy.wallet, buy.label, f"hiperactiva, {self._cooldowns.tokens_last_hour(buy.wallet)} tokens en 1h")
 
-    def _trusted(self, buy: WalletBuy) -> bool:
-        """Si la wallet de `buy` es de confianza según el fichero de ahora. Las
-        compras recuperadas del registro tras un reinicio no lo guardan, y
-        sin esto perdían la ⭐ en la confluencia."""
-        info = self._wallet_watcher.wallets.get(buy.wallet) if self._wallet_watcher else None
-        return info.trusted if info else buy.trusted
-
     async def run_once(self, client: DexScreenerClient, alerter: TelegramAlerter) -> None:
         """
         Vuelta del seguimiento de wallets: busca sus compras nuevas y avisa
@@ -220,7 +213,7 @@ class MemecoinRadar:
         misma wallet en el mismo token dentro de su cooldown, wallets
         hiperactivas, tokens ya avisados sin wallets nuevas suficientes y,
         con [wallets].min_wallets > 1, compras sin suficientes wallets en el
-        token (salvo de wallets de confianza).
+        token.
         """
         if self._wallet_watcher is None:
             return
@@ -244,7 +237,7 @@ class MemecoinRadar:
         for buy in buys:
             self._blacklist_hyperactive(buy)
         signals = [
-            WalletSignal(buy, cooldowns.confluence(buy, self._trusted)) for buy in buys
+            WalletSignal(buy, cooldowns.confluence(buy)) for buy in buys
             if not cooldowns.wallet_cooldown_active(buy)
         ]
         summary.in_cooldown += len(buys) - len(signals)
@@ -307,7 +300,7 @@ class MemecoinRadar:
     def decide(self, signal: WalletSignal, pair: dict, unsafe_reason: str | None = None) -> _Decision:
         """Si se avisa de la compra de `signal` en `pair`, y si no, por qué. En
         orden: autoridades del mint (`unsafe_reason`), filtros del par, wallet
-        hiperactiva, [wallets].min_wallets (salvo las de confianza) y un aviso
+        hiperactiva, [wallets].min_wallets y un aviso
         previo del token sin realert_new_wallets wallets más. No cambia nada:
         el cooldown de la wallet se mira y se marca antes."""
         buy = signal.buy
@@ -315,7 +308,7 @@ class MemecoinRadar:
         cooldowns = self._cooldowns
         if unsafe_reason:
             return _Decision(unsafe_reason, "autoridades", pair_ok=False)
-        failing = first_failing(cfg, pair, curve=signal.bonding_curve, trusted=buy.trusted)
+        failing = first_failing(cfg, pair, curve=signal.bonding_curve)
         if failing:
             return _Decision(failing[1], failing[0], pair_ok=False)
         if cooldowns.hyperactive(buy.wallet):
@@ -323,7 +316,7 @@ class MemecoinRadar:
                 f"wallet hiperactiva ({cooldowns.tokens_last_hour(buy.wallet)} tokens en 1h)", "hiperactiva"
             )
         wallets = 1 + len(signal.others)
-        if wallets < cfg.wallets_min_wallets and not buy.trusted:
+        if wallets < cfg.wallets_min_wallets:
             return _Decision(f"{wallets} de {cfg.wallets_min_wallets} wallets", "min_wallets")
         previous = cooldowns.last_token_alert(buy.mint)
         if previous is None:
@@ -338,11 +331,10 @@ class MemecoinRadar:
         quita el cooldown de la wallet: su próxima compra lo vuelve a intentar."""
         buy = signal.buy
         if self._tracker:
-            signal = dataclasses.replace(
-                signal,
-                track_record=self._tracker.track_records(buy.wallet).get(buy.wallet, ()),
-                hits=self._tracker.hit_rates(buy.wallet).get(buy.wallet),
+            hits = self._tracker.hit_rates(
+                self._config.wallets_hit_pct, self._config.wallets_hit_max_drop_pct, buy.wallet
             )
+            signal = dataclasses.replace(signal, hits=hits.get(buy.wallet))
         log.info(
             "Wallet%s: %s compró %s (%.2f SOL, %s)%s",
             " (actualización)" if signal.update else "",
@@ -428,6 +420,8 @@ class MemecoinRadar:
             self._config.telegram_chat_id,
             self._config.telegram_message_thread_id,
             self._config.chain_id,
+            self._config.wallets_hit_pct,
+            self._config.wallets_hit_max_drop_pct,
         )
         # `async with alerter` valida el token al arrancar y cierra el cliente
         # HTTP de Telegram al salir.
@@ -471,8 +465,8 @@ class MemecoinRadar:
 
     async def send_ranking(self, alerter: TelegramAlerter) -> None:
         """Manda el ranking diario de las wallets seguidas por su historial en
-        el registro, para ver cuáles merecen el `*` de confianza y cuáles
-        sobran. Si falla se loguea y se espera al día siguiente."""
+        el registro, para ver cuáles sobran. Si falla se loguea y se espera
+        al día siguiente."""
         self._next_ranking = next_daily(time.time(), self._config.wallets_ranking_hour)
         watcher = self._wallet_watcher
         if not (self._tracker and watcher and watcher.wallets):
@@ -482,8 +476,8 @@ class MemecoinRadar:
         for wallet, info in watcher.wallets.items():
             record = records.get(wallet, ())
             if record and record[0][0] == TRACK_RECORD_MINUTES[0] and record[0][2] >= RANKING_MIN_TOKENS:
-                rows.append((info.label, info.trusted, record))
-        rows.sort(key=lambda row: row[2][0][1], reverse=True)
+                rows.append((info.label, record))
+        rows.sort(key=lambda row: row[1][0][1], reverse=True)
         try:
             await alerter.send_text(format_ranking(rows, len(watcher.wallets) - len(rows), RANKING_MIN_TOKENS))
         except Exception:

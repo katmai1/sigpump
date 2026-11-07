@@ -47,16 +47,6 @@ class TestWalletWatcher(ConFicheroDeWallets):
         self.assertEqual(await watcher.poll(), [])
         self.assertEqual(rpc.llamadas[0][1][1]["limit"], 1)
 
-    async def test_la_confianza_llega_a_la_compra(self):
-        self.path.write_text(f"{WALLET} *  # ballena\n", encoding="utf-8")
-        rpc = _FakeRpc(firmas=["VIEJA"], txs={})
-        watcher = WalletWatcher(RpcClient(rpc, "http://rpc"), self.path, min_sol=0.1)
-        await watcher.poll()
-        rpc.firmas = ["NUEVA", "VIEJA"]
-        rpc.txs["NUEVA"] = _tx(post_tokens=[_saldo(TOKEN, 1)], sol_gastado=1)
-        [buy] = await watcher.poll()
-        self.assertTrue(buy.trusted)
-
 
     async def test_la_primera_vuelta_no_avisa_del_historial(self):
         rpc = _FakeRpc(firmas=["VIEJA"], txs={"VIEJA": _tx(post_tokens=[_saldo(TOKEN, 1)], sol_gastado=1)})

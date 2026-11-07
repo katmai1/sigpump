@@ -2,7 +2,7 @@
 sigpump/wallet_list.py
 
 Las wallets seguidas: el fichero de wallets (una por línea, con su etiqueta
-detrás de `#` y un `*` si es de confianza), menos las de la lista negra, y
+detrás de `#`), menos las de la lista negra, y
 las castigadas por un tiempo, que siguen en el fichero pero no se consultan.
 """
 
@@ -16,23 +16,24 @@ from sigpump.util import SOLANA_ADDRESS_RE
 
 log = logging.getLogger()
 
-# Marca de wallet de confianza en el fichero, detrás de la dirección.
-TRUSTED_MARK = "*"
+# Marca de las antiguas wallets de confianza, detrás de la dirección. Desde
+# el 2026-11-07 no hace nada (todas pasan los mismos filtros), pero los
+# ficheros de antes la siguen teniendo y no debe romper la dirección.
+OLD_TRUSTED_MARK = "*"
 
 
 @dataclass(frozen=True)
 class FollowedWallet:
-    """Wallet del fichero: su etiqueta y si es de confianza (avisa sola,
-    aunque no llegue a [wallets].min_wallets)."""
+    """Wallet del fichero: su etiqueta."""
     label: str
-    trusted: bool = False
 
 
 def load_wallets(path: Path, blacklist: set[str] | frozenset[str] = frozenset()) -> dict[str, FollowedWallet]:
     """
     Dirección -> wallet, desde un fichero con una wallet por línea. Lo que
-    va detrás de `#` es la etiqueta; un `*` detrás de la dirección la marca
-    de confianza. Las líneas que empiezan por `#` y las vacías se ignoran.
+    va detrás de `#` es la etiqueta; un `*` detrás de la dirección (la marca
+    de confianza de antes) se ignora. Las líneas que empiezan por `#` y las
+    vacías se ignoran.
     Una línea que no es una dirección se avisa y se salta, para que un typo
     no tire el resto de la lista. Una dirección repetida se queda con su
     primera aparición y las demás se borran del fichero, igual que las que
@@ -43,9 +44,7 @@ def load_wallets(path: Path, blacklist: set[str] | frozenset[str] = frozenset())
     removed = False
     for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(keepends=True), start=1):
         address, _, label = line.partition("#")
-        address = address.strip()
-        trusted = address.endswith(TRUSTED_MARK)
-        address = address.removesuffix(TRUSTED_MARK).strip()
+        address = address.strip().removesuffix(OLD_TRUSTED_MARK).strip()
         if address in wallets:
             log.warning("%s:%d wallet duplicada, se elimina: %s", path, number, address)
             removed = True
@@ -60,7 +59,7 @@ def load_wallets(path: Path, blacklist: set[str] | frozenset[str] = frozenset())
         if not SOLANA_ADDRESS_RE.match(address):
             log.warning("%s:%d no es una dirección de Solana, se ignora: %r", path, number, address)
             continue
-        wallets[address] = FollowedWallet(label.strip() or f"{address[:4]}…{address[-4:]}", trusted)
+        wallets[address] = FollowedWallet(label.strip() or f"{address[:4]}…{address[-4:]}")
     if removed:
         # Se escribe aparte y se renombra para no dejar el fichero a medias.
         tmp = path.with_name(path.name + ".tmp")

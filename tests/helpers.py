@@ -156,11 +156,10 @@ _LOGS_SWAP = [
 ]
 
 
-def _buy(wallet=WALLET, label="ballena", mint="TOK", ts=None, new=True, trusted=False):
+def _buy(wallet=WALLET, label="ballena", mint="TOK", ts=None, new=True):
     return WalletBuy(
         wallet=wallet, label=label, mint=mint, sol_spent=1.5, stable_spent=0.0,
         new_position=new, signature="SIG", ts=time.time() if ts is None else ts,
-        trusted=trusted,
     )
 
 

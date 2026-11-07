@@ -126,10 +126,10 @@ class TestUnsafeReasons(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(radar._authorities.pedidas, ["", "TOK"])
 
 
-def _signal(wallet="W1", mint="TOK", trusted=False, others=(), curve=False):
+def _signal(wallet="W1", mint="TOK", others=(), curve=False):
     buy = WalletBuy(
         wallet=wallet, label=wallet, mint=mint, sol_spent=1.0, stable_spent=0.0,
-        new_position=True, signature="SIG", ts=time.time(), trusted=trusted,
+        new_position=True, signature="SIG", ts=time.time(),
     )
     return WalletSignal(buy, tuple(others), bonding_curve=curve)
 
@@ -148,11 +148,10 @@ class TestDecide(unittest.TestCase):
         self.assertEqual((por_autoridades.reason, por_autoridades.pair_ok), ("se pueden congelar", False))
         self.assertEqual((por_par.reason, por_par.pair_ok), ("cambio 1h +50% > 10%", False))
 
-    def test_min_wallets_salvo_las_de_confianza(self):
+    def test_min_wallets(self):
         radar = MemecoinRadar(_config(wallets_min_wallets=2))
         decision = radar.decide(_signal(), _pair("TOK"))
         self.assertEqual((decision.reason, decision.pair_ok), ("1 de 2 wallets", True))
-        self.assertIsNone(radar.decide(_signal(trusted=True), _pair("TOK")).reason)
         self.assertIsNone(radar.decide(_signal(others=("W2",)), _pair("TOK")).reason)
 
     def test_hiperactiva(self):

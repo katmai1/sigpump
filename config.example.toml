@@ -33,11 +33,11 @@ rpc_url = "https://api.mainnet-beta.solana.com"
 # tokens que se pueden acuñar o congelar se descartan.
 # Una dirección por línea; lo que va detrás de # es la etiqueta del aviso:
 #   5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1  # ballena 1
-# Un * detrás de la dirección la marca de confianza: avisa sola aunque no
-# llegue a min_wallets, y a sus compras no se les aplican
-# max_price_change_h1_pct, min_market_cap_usd, max_turnover_h1 ni min_txns_m5
-# (sí la edad, max_price_change_m5_pct, min_volume_h1_usd, el dex y quote_tokens).
-#   5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1 *  # ballena 1
+# Hasta el 2026-11-07 un * detrás de la dirección la marcaba de confianza
+# (avisaba sola y se saltaba el cambio 1h, el market cap, min_txns_m5 y el
+# turnover). Ya no hace nada: todas pasan los mismos filtros. Desde el 17-oct
+# eso dejaba pasar 45 avisos de 724, que daban +2% a 1 h y -2% a 24 h (todos,
+# +1% y -8%); se quitó igual, por estrategia.
 # Se relee solo cuando cambia: no hace falta reiniciar para añadir wallets.
 file = "wallets.txt"
 interval_seconds = 15
@@ -95,10 +95,20 @@ loser_max_median_ret_pct = -50
 loser_checkpoint_minutes = 1440
 # Hora local (0-23) a la que llega cada día por Telegram el ranking de las
 # wallets seguidas por la mediana de sus tokens a 1 h, 4 h y 24 h, para ver
-# cuáles merecen el `*` de confianza. -1 = no mandarlo. 2026-10-24: ordenando
+# cuáles sobran. -1 = no mandarlo. 2026-10-24: ordenando
 # las wallets por su mediana hasta el 19-oct, el mejor tercio dio después +3%
 # a 1 h y el peor -9% (Spearman +0.76); el historial predice.
 ranking_hour = 9
+# Aciertos de la wallet en el aviso: de la primera compra de cada token,
+# cuántas llegaron a +hit_pct sin haber caído antes más de hit_max_drop_pct
+# (el objetivo y el stop de quien copia la compra). Se miran todas las
+# muestras del seguimiento en orden; una que no llegó a ninguno de los dos
+# cuenta como fallo a las 24 h. 2026-11-07: antes bastaba con tocar +8% en
+# algún momento, aunque antes hubiera caído; de 2558 tokens, 789 tocaron +8%
+# y -15% en la misma primera media hora sin que se supiera qué fue antes.
+# Solo cuentan las compras registradas desde entonces.
+hit_pct = 8
+hit_max_drop_pct = 15
 # Filtros del par para avisar de una compra de wallet (0 = sin filtro). Con
 # los primeros datos, los pares de menos de 2 h daban una mediana de -67% a
 # 30 min, los que ya subían más de 50% en 1h -25% y los de market cap por
@@ -108,7 +118,7 @@ min_pair_age_minutes = 120
 max_price_change_h1_pct = 50
 min_market_cap_usd = 100000
 # Lo que ya subió en los últimos 5 min (0 = sin filtro). A diferencia de los
-# anteriores se aplica también a las wallets de confianza y en bonding curve:
+# anteriores se aplica también en bonding curve:
 # comprar en plena vela es llegar tarde. 2026-10-24: las que entraban con
 # +20% o más en 5 min daban -33% de media a 24 h (+10% o menos, -8%).
 max_price_change_m5_pct = 20

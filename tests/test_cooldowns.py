@@ -20,10 +20,6 @@ def _cooldowns(**kwargs):
     return Cooldowns(Config(alert_log_path="", **kwargs))
 
 
-def _sin_confianza(_buy):
-    return False
-
-
 class TestCooldowns(unittest.TestCase):
     def test_cooldown_de_wallet_en_token(self):
         c = _cooldowns(wallets_cooldown_minutes=60)
@@ -37,16 +33,10 @@ class TestCooldowns(unittest.TestCase):
 
     def test_confluencia_una_por_wallet_y_sin_la_propia(self):
         c = _cooldowns(wallets_confluence_minutes=60)
-        self.assertEqual(c.confluence(_buy("W1"), _sin_confianza), ())
-        c.confluence(_buy("W1"), _sin_confianza)
-        self.assertEqual(c.confluence(_buy("W2"), _sin_confianza), ("W1",))
-        self.assertEqual(c.confluence(_buy("W1"), _sin_confianza), ("W2",))
-
-    def test_confluencia_marca_las_de_confianza(self):
-        c = _cooldowns()
-        c.confluence(_buy("W1", label="ballena"), _sin_confianza)
-        others = c.confluence(_buy("W2"), lambda b: b.wallet == "W1")
-        self.assertEqual(others, ("⭐ ballena",))
+        self.assertEqual(c.confluence(_buy("W1")), ())
+        c.confluence(_buy("W1"))
+        self.assertEqual(c.confluence(_buy("W2")), ("W1",))
+        self.assertEqual(c.confluence(_buy("W1")), ("W2",))
 
     def test_hiperactiva_no_cuenta_para_la_confluencia(self):
         c = _cooldowns(wallets_max_tokens_per_hour=2)
@@ -54,8 +44,8 @@ class TestCooldowns(unittest.TestCase):
             c.add_activity(_buy("BOT", mint=mint))
         self.assertTrue(c.hyperactive("BOT"))
         self.assertEqual(c.tokens_last_hour("BOT"), 3)
-        c.confluence(_buy("BOT"), _sin_confianza)
-        self.assertEqual(c.confluence(_buy("W2"), _sin_confianza), ())
+        c.confluence(_buy("BOT"))
+        self.assertEqual(c.confluence(_buy("W2")), ())
 
     def test_aviso_por_token(self):
         c = _cooldowns(wallets_token_cooldown_minutes=60)
@@ -70,11 +60,11 @@ class TestCooldowns(unittest.TestCase):
     def test_prune_olvida_lo_que_salio_de_su_ventana(self):
         c = _cooldowns(wallets_confluence_minutes=60, wallets_cooldown_minutes=60)
         viejo = time.time() - 2 * 3600
-        c.confluence(_buy("W1", ts=viejo), _sin_confianza)
+        c.confluence(_buy("W1", ts=viejo))
         c.add_activity(_buy("W1", ts=viejo))
         c.start_wallet_cooldown(_buy("W1"))
         c.prune(now=time.time() + 2 * 3600)
-        self.assertEqual(c.confluence(_buy("W2"), _sin_confianza), ())
+        self.assertEqual(c.confluence(_buy("W2")), ())
         self.assertEqual(c.tokens_last_hour("W1"), 0)
         self.assertFalse(c.wallet_cooldown_active(_buy("W1")))
 
@@ -93,7 +83,7 @@ class TestCooldowns(unittest.TestCase):
         self.assertEqual(c.restore_since(now), now - 1440 * 60)
         c.restore(filas, now)
         self.assertTrue(c.wallet_cooldown_active(_buy("W1")))
-        self.assertEqual(c.confluence(_buy("W3"), _sin_confianza), ("W2",))
+        self.assertEqual(c.confluence(_buy("W3")), ("W2",))
         self.assertEqual(c.last_token_alert("TOK"), 2)
         self.assertEqual(c.tokens_last_hour("W1"), 0)
         self.assertEqual(c.tokens_last_hour("W2"), 1)

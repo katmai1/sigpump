@@ -9,6 +9,7 @@ para medir qué wallets dan margen, alimenta la lista negra automática y
 permite ajustar los filtros con datos en vez de a ojo.
 """
 
+import json
 import logging
 import sqlite3
 import statistics
@@ -56,8 +57,8 @@ def format_minutes(minutes: int) -> str:
 
 _LAST = CHECKPOINTS_MINUTES[-1]
 
-# Checkpoints del historial de cada wallet que se muestra en el aviso y en el
-# ranking diario. 2026-10-24: ordenando las wallets por su mediana hasta el
+# Checkpoints del historial de cada wallet que se muestra en el ranking
+# diario. 2026-10-24: ordenando las wallets por su mediana hasta el
 # 19-oct, el mejor tercio dio después +3% a 1 h y el peor -9% (16 wallets,
 # Spearman +0.76); a 4 h -2% frente a -38% y a 24 h -28% frente a -65%. El
 # pasado de una wallet sí dice algo de lo que hará.
@@ -67,12 +68,35 @@ TRACK_RECORD_MINUTES = (60, 240, 1440)
 # checkpoint de TRACK_RECORD_MINUTES que tenga alguno medido.
 TrackRecord = tuple[tuple[int, float, int], ...]
 
-# Retorno al que tiene que llegar un token, en cualquier muestra registrada
-# (el mejor de los primeros TRACKING_MINUTES o un checkpoint largo), para
-# contar como acierto de la wallet en el aviso. 2026-10-31: con +8% acertaba
-# el 71% de los tokens (1455 de 2043), 65% mirando solo la primera media hora.
-HIT_PCT = 8.0
-_PEAK_COLUMNS = (_BEST, *(f"ret_{m}m_pct" for m in TRACK_RECORD_MINUTES))
+# Camino del precio de una compra, para saber qué pasó antes: lo peor que
+# se vio hasta ahora y, en orden, cada nuevo máximo por encima de la entrada
+# con lo peor visto antes de llegar a él. Con el mejor y el peor de la
+# primera media hora no se sabía el orden: 2026-11-07, de 2558 tokens, 789
+# habían tocado +8% y -15% en esa media hora. Se guardan los dos y no si
+# acertó o no para que los umbrales de acierto se puedan cambiar después.
+_PATH = "camino_precio"
+
+
+def extend_path(path: dict, ret: float) -> dict:
+    """El camino `path` ({"peor", "picos"}) con una muestra más, `ret`. Un
+    máximo nuevo sin caída nueva desde el anterior lo reemplaza: para saber
+    si se cayó antes de llegar a un umbral basta el primer pico que lo pasa."""
+    worst, peaks = path["peor"], [list(peak) for peak in path["picos"]]
+    if ret > (peaks[-1][0] if peaks else 0):
+        if peaks and peaks[-1][1] == worst:
+            peaks[-1][0] = ret
+        else:
+            peaks.append([ret, worst])
+    return {"peor": min(worst, ret), "picos": peaks}
+
+
+def path_hit(path: dict, hit_pct: float, max_drop_pct: float) -> bool | None:
+    """Si la compra acertó: llegó a +`hit_pct` sin haber caído antes más de
+    `max_drop_pct`. None si todavía no se sabe (no llegó ni cayó tanto)."""
+    for peak, worst in path["picos"]:
+        if peak >= hit_pct:
+            return worst >= -max_drop_pct
+    return False if path["peor"] < -max_drop_pct else None
 
 # La primera compra registrada de cada token por wallet (avisada o no,
 # pasara o no los filtros del par: el par no cambia lo bien que elige la
@@ -138,6 +162,9 @@ COLUMNS: dict[str, str] = {
     **{column: "REAL" for column in _CHECKPOINT_COLUMNS},
     _BEST: "REAL",
     _WORST: "REAL",
+    # JSON de extend_path() con todas las muestras del seguimiento. NULL en
+    # las filas anteriores al 2026-11-07: no cuentan para los aciertos.
+    _PATH: "TEXT",
     "url": "TEXT",
     "timestamp": "REAL",
 }
@@ -307,6 +334,7 @@ class AlertTracker:
             "compras_m5_pct": _round(buy_ratio * 100) if buy_ratio is not None else None,
             "url": str(pair.get("url") or ""),
             "timestamp": now,
+            _PATH: json.dumps({"peor": 0.0, "picos": []}),
             **(extra or {}),
         }
         try:
@@ -453,27 +481,36 @@ class AlertTracker:
             for w in wallets
         }
 
-    def hit_rates(self, wallet: str | None = None) -> dict[str, tuple[int, int]]:
+    def hit_rates(
+        self, hit_pct: float, max_drop_pct: float, wallet: str | None = None, now: float | None = None
+    ) -> dict[str, tuple[int, int]]:
         """Wallet -> (aciertos, tokens medidos): de la primera compra de cada
-        token (_FIRST_BUYS), cuántas llegaron a HIT_PCT en alguna muestra.
-        Con `wallet`, solo la de esa."""
+        token (_FIRST_BUYS) con camino registrado, cuántas llegaron a
+        +`hit_pct` sin caer antes más de `max_drop_pct` (path_hit). Una que
+        todavía no llegó ni cayó tanto cuenta como fallo al acabar el
+        seguimiento, y hasta entonces no cuenta. Con `wallet`, solo la de esa."""
         conn = self._db()
         if conn is None:
             return {}
         try:
             rows = conn.execute(
-                f"SELECT wallet, {', '.join(_PEAK_COLUMNS)} FROM alertas WHERE id IN ({_FIRST_BUYS}) "
-                f"AND COALESCE({', '.join(_PEAK_COLUMNS)}) IS NOT NULL",
+                f"SELECT wallet, {_PATH}, {_CHECKPOINT_COLUMNS[-1]} AS ultimo, timestamp FROM alertas "
+                f"WHERE id IN ({_FIRST_BUYS}) AND {_PATH} IS NOT NULL",
                 {"wallet": wallet},
             ).fetchall()
         except sqlite3.Error as exc:
             log.warning("No se pudo leer %s: %s", self._path, exc)
             return {}
+        cutoff = self._cutoff(now)
         rates: dict[str, tuple[int, int]] = {}
         for row in rows:
-            peak = max(row[c] for c in _PEAK_COLUMNS if row[c] is not None)
+            hit = path_hit(json.loads(row[_PATH]), hit_pct, max_drop_pct)
+            if hit is None:
+                if row["ultimo"] is None and row["timestamp"] > cutoff:
+                    continue
+                hit = False
             hits, total = rates.get(row["wallet"], (0, 0))
-            rates[row["wallet"]] = (hits + (peak >= HIT_PCT), total + 1)
+            rates[row["wallet"]] = (hits + hit, total + 1)
         return rates
 
     async def update(self, client: DexScreenerClient, chain_id: str) -> None:
@@ -535,6 +572,8 @@ class AlertTracker:
                             logged = minutes
                     if not changes:
                         continue
+                    if row[_PATH] is not None:
+                        changes[_PATH] = json.dumps(extend_path(json.loads(row[_PATH]), ret))
                     conn.execute(
                         f"UPDATE alertas SET {', '.join(f'{c} = :{c}' for c in changes)} WHERE id = :id",
                         {**changes, "id": row["id"]},

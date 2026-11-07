@@ -57,7 +57,7 @@ consultarlo.
 - `sigpump/summary.py`: resumen horario en el log (avisos, descartes por
   motivo, WebSocket, llamadas al RPC).
 - `sigpump/filters.py`: tabla `PAIR_FILTERS` con los filtros del par y si
-  cada uno se aplica en bonding curve y a las wallets de confianza.
+  cada uno se aplica en bonding curve.
 - `sigpump/screener.py` (DexScreener), `solana.py` (`RpcClient`, compartido
   por todo lo que llama al RPC, y mint/freeze authority),
   `telegram.py` (formato y envío), `tracker.py` (SQLite y retornos a
@@ -91,9 +91,9 @@ un umbral:
    `config.example.toml`, en el estilo de los que ya hay
    ("2026-10-22: con 24 h se quitaban 83 de 146 avisos...").
 
-Tener en cuenta las excepciones existentes: wallets de confianza (`*` en
-`wallets.txt`) y compras en bonding curve tienen sus propios subconjuntos de
-filtros (ver README). Esos subconjuntos se definen solo en `PAIR_FILTERS`;
+Tener en cuenta la excepción existente: las compras en bonding curve tienen
+su propio subconjunto de filtros (ver README). Las wallets de confianza (`*`)
+se quitaron el 2026-11-07. Ese subconjunto se define solo en `PAIR_FILTERS`;
 `tests/test_filters.py` comprueba que README, `config.example.toml` y
 `config.py` digan lo mismo, así que al cambiar uno hay que ajustar los textos.
 

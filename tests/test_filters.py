@@ -1,5 +1,5 @@
-"""Tests de la tabla de filtros del par: qué se aplica en bonding curve y a
-las wallets de confianza, y que la documentación diga lo mismo."""
+"""Tests de la tabla de filtros del par: qué se aplica en bonding curve, y
+que la documentación diga lo mismo."""
 
 import re
 import unittest
@@ -10,8 +10,6 @@ from sigpump.filters import PAIR_FILTERS, pair_rejection
 
 _CLAVES = {f.key for f in PAIR_FILTERS}
 _CURVA = {f.key for f in PAIR_FILTERS if f.curve}
-_SIN_CONFIANZA = {f.key for f in PAIR_FILTERS if not f.trusted}
-_CON_CONFIANZA = _CLAVES - _SIN_CONFIANZA
 # La documentación nombra estas dos con palabras y no por su clave.
 _ALIAS = {"edad": "min_pair_age_minutes", "dex": "dex_ids"}
 
@@ -25,20 +23,16 @@ def _claves_entre(texto: str, inicio: str, fin: str) -> set[str]:
 
 
 class TestLaDocumentacionCoincideConLaTabla(unittest.TestCase):
-    """README, config.example.toml y config.py describen estos subconjuntos a
+    """README, config.example.toml y config.py describen este subconjunto a
     mano: min_volume_h1_usd se aplicaba a las de confianza sin que lo dijeran."""
 
     def test_readme(self):
         texto = Path("README.md").read_text(encoding="utf-8")
         self.assertEqual(_claves_entre(texto, "A esas solo se les aplican", r"\("), _CURVA)
-        self.assertEqual(_claves_entre(texto, "a sus compras no se les aplican", r"\(sí"), _SIN_CONFIANZA)
-        self.assertEqual(_claves_entre(texto, r"\(sí ", r"\)"), _CON_CONFIANZA)
 
     def test_config_de_ejemplo(self):
         texto = Path("config.example.toml").read_text(encoding="utf-8")
         self.assertEqual(_claves_entre(texto, "Solo se les aplican", "y no cuentan"), _CURVA)
-        self.assertEqual(_claves_entre(texto, "a sus compras no se les aplican", r"\(sí"), _SIN_CONFIANZA)
-        self.assertEqual(_claves_entre(texto, r"\(sí ", r"\)"), _CON_CONFIANZA)
 
     def test_comentario_de_config(self):
         texto = Path("sigpump/config.py").read_text(encoding="utf-8")
@@ -81,10 +75,10 @@ class TestPairRejection(unittest.TestCase):
         estricta = _config_estricta()
         for f in PAIR_FILTERS:
             solo = Config(alert_log_path="", **{_campo(f.key): getattr(estricta, _campo(f.key))})
-            for curve, trusted in ((False, False), (True, False), (False, True), (True, True)):
-                with self.subTest(filtro=f.key, curve=curve, trusted=trusted):
-                    motivo = pair_rejection(solo, _par_malo(), now=0.0, curve=curve, trusted=trusted)
-                    aplica = (f.curve or not curve) and (f.trusted or not trusted)
+            for curve in (False, True):
+                with self.subTest(filtro=f.key, curve=curve):
+                    motivo = pair_rejection(solo, _par_malo(), now=0.0, curve=curve)
+                    aplica = f.curve or not curve
                     self.assertEqual(motivo is not None, aplica, motivo)
 
     def test_par_bueno_pasa(self):

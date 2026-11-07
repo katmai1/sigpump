@@ -122,13 +122,18 @@ class Config:
     # Hora local (0-23) a la que se manda cada día por Telegram el ranking de
     # las wallets seguidas por su historial en el registro. -1 = no mandarlo.
     wallets_ranking_hour: int = _key("wallets.ranking_hour", -1)
+    # Aciertos de la wallet en el aviso: de sus tokens, cuántos llegaron a
+    # +hit_pct sin haber caído antes más de hit_max_drop_pct (el objetivo y
+    # el stop de quien copia la compra).
+    wallets_hit_pct: float = _key("wallets.hit_pct", 8.0)
+    wallets_hit_max_drop_pct: float = _key("wallets.hit_max_drop_pct", 15.0)
     # Filtros del par para los avisos de wallets (0 = sin filtro): los pares
     # recién creados, los que ya subieron mucho en 1h y los de market cap
     # pequeño daban casi siempre pérdidas.
     wallets_min_pair_age_minutes: float = _key("wallets.min_pair_age_minutes", 0.0)
     wallets_max_price_change_h1_pct: float = _key("wallets.max_price_change_h1_pct", 0.0)
     # Lo que ya subió en los últimos 5 min: llegar tarde a la vela. Se aplica
-    # también a las wallets de confianza y en bonding curve.
+    # también en bonding curve.
     wallets_max_price_change_m5_pct: float = _key("wallets.max_price_change_m5_pct", 0.0)
     wallets_min_market_cap_usd: float = _key("wallets.min_market_cap_usd", 0.0)
     # Actividad mínima del par: los tokens muertos (una o dos transacciones
@@ -222,6 +227,12 @@ class Config:
             raise ValueError(f"[wallets].ranking_hour debe estar entre -1 y 23 ({self.wallets_ranking_hour})")
         if self.wallets_ranking_hour >= 0 and not self.alert_log_path:
             raise ValueError("[wallets].ranking_hour necesita [radar].alert_log_path: el ranking sale de esa base")
+        if self.wallets_hit_pct <= 0:
+            raise ValueError(f"[wallets].hit_pct debe ser > 0 ({self.wallets_hit_pct})")
+        if not 0 <= self.wallets_hit_max_drop_pct <= 100:
+            raise ValueError(
+                f"[wallets].hit_max_drop_pct debe estar entre 0 y 100 ({self.wallets_hit_max_drop_pct})"
+            )
         if not self.wallets_file:
             raise ValueError("[wallets].file no puede estar vacío")
         if self.wallets_blacklist and not self.alert_log_path:

@@ -1,4 +1,4 @@
-"""Tests del fichero de wallets: etiquetas, confianza, duplicadas y las de la lista negra."""
+"""Tests del fichero de wallets: etiquetas, la marca * de antes, duplicadas y las de la lista negra."""
 
 import logging
 import tempfile
@@ -48,11 +48,10 @@ class TestLoadWallets(unittest.TestCase):
         load_wallets(self.path)
         self.assertEqual(self.path.stat().st_mtime_ns, mtime)
 
-    def test_asterisco_marca_wallet_de_confianza(self):
+    def test_el_asterisco_de_confianza_de_antes_se_ignora(self):
         self.path.write_text(f"{WALLET} *  # ballena\n{OTRA}*\n", encoding="utf-8")
         wallets = load_wallets(self.path)
-        self.assertEqual(wallets[WALLET], FollowedWallet("ballena", trusted=True))
-        self.assertTrue(wallets[OTRA].trusted)
+        self.assertEqual(wallets, {WALLET: FollowedWallet("ballena"), OTRA: FollowedWallet(f"{OTRA[:4]}…{OTRA[-4:]}")})
 
     def test_las_de_la_lista_negra_se_eliminan_del_fichero(self):
         self.path.write_text(f"{WALLET}  # ballena\n{OTRA}  # rug\n", encoding="utf-8")

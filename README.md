@@ -66,14 +66,12 @@ Con `min_wallets = 2` (o más) solo se avisa cuando ese número de wallets
 seguidas distintas compraron el mismo token dentro de `confluence_minutes`:
 la primera compra queda registrada con `enviada = 0` y el aviso sale con la
 que completa el número. Las compras recientes se recuperan del registro al
-reiniciar, así que un reinicio entre las dos no pierde el aviso. Una wallet
-marcada de confianza (un `*` detrás de la dirección en el fichero) avisa sola,
-aunque no llegue a `min_wallets`, y a sus compras no se les aplican
-`max_price_change_h1_pct`, `min_market_cap_usd`, `max_turnover_h1` ni
-`min_txns_m5` (sí la edad del par, `max_price_change_m5_pct`, `min_volume_h1_usd`, el dex y `quote_tokens`): en pares de más
-de un día, las suyas que esos filtros descartaban eran las mejores del
-registro. Sirven para salir rápido: esas mismas daban +6% a 1 h y +11% a 4 h,
-pero -42% a 24 h.
+reiniciar, así que un reinicio entre las dos no pierde el aviso.
+
+Hasta el 2026-11-07 había wallets de confianza (un `*` detrás de la
+dirección en el fichero), que avisaban solas y se saltaban parte de los
+filtros del par. Se quitaron: ahora todas pasan los mismos filtros. Un `*`
+que quede en el fichero se ignora.
 
 `cooldown_minutes` deja un aviso por wallet y token en esa ventana. Con 24 h
 (1440) no se repiten las wallets que van promediando un token cada pocas
@@ -132,17 +130,22 @@ avisar no dice nada de la wallet. La de resultados las cuenta todas (menos
 las de bonding curve): elegir mal tokens es elegir mal aunque no se avisen,
 y con los filtros estrictos casi nunca llegaría a tener tokens medidos.
 
-Cada aviso lleva el historial de la wallet en el registro: la mediana a 1 h,
-4 h y 24 h de la primera compra de cada token (las mismas que cuenta la lista
-negra por resultados), con los tokens medidos, y su porcentaje de aciertos:
-cuántos de esos tokens llegaron a +8% en algún momento visto (el mejor
-precio de la primera media hora o los checkpoints de 1 h, 4 h y 24 h), aunque
-después cayeran. Con `ranking_hour` (hora local,
--1 = apagado) llega además cada día un ranking de las wallets seguidas con al
-menos 5 tokens medidos a 1 h, de mejor a peor, para decidir a cuáles poner el
-`*` de confianza. Con los datos de octubre el pasado de una wallet predice:
-ordenándolas por su mediana hasta el 19, el mejor tercio dio después +3% a
-1 h y el peor -9%; a 24 h, -28% frente a -65%.
+Cada aviso lleva el porcentaje de aciertos de la wallet en el registro: de
+la primera compra de cada token (sin las de bonding curve), cuántas llegaron
+a +`hit_pct` (8% por defecto) sin haber caído antes más de
+`hit_max_drop_pct` (15%), es decir, las que con ese objetivo y ese stop se
+habrían cerrado ganando. Se mira en todas las muestras del seguimiento, en
+orden (columna `camino_precio`). Una compra que todavía no llegó al objetivo
+ni cayó hasta el stop no cuenta hasta que acaba su seguimiento (a las 24 h);
+entonces cuenta como fallo. Solo cuentan las compras registradas desde el
+2026-11-07: las de antes no guardaban el orden de los precios.
+
+Con `ranking_hour` (hora local, -1 = apagado) llega cada día un ranking de
+las wallets seguidas con al menos 5 tokens medidos a 1 h, por la mediana de
+sus tokens a 1 h, 4 h y 24 h, de mejor a peor, para ver cuáles sobran. Con los datos de
+octubre el pasado de una wallet predice: ordenándolas por su mediana hasta
+el 19, el mejor tercio dio después +3% a 1 h y el peor -9%; a 24 h, -28%
+frente a -65%.
 
 `min_pair_age_minutes`, `max_price_change_h1_pct` y `min_market_cap_usd`
 descartan las compras en pares recién creados, que ya subieron mucho en la
@@ -154,8 +157,7 @@ desactivados, porque con la edad y el turnover ya filtrados lo que quitaban
 (casi la mitad de los avisos) no daba peor que lo que quedaba. Son tokens
 de poca liquidez, donde el retorno medido aguanta menos tamaño.
 `max_price_change_m5_pct` descarta los que ya subieron mucho en los
-últimos 5 minutos, también para las wallets de confianza: es llegar tarde
-a la vela.
+últimos 5 minutos, también en bonding curve: es llegar tarde a la vela.
 `max_turnover_h1` descarta los que mueven en la última hora más de esa
 fracción de su market cap (0.1 = 10%): los están bombeando o ya están
 saliendo, y en octubre el 64% de los que pasaban del 5% cayó más de 50% en
@@ -181,6 +183,10 @@ después:
 - `mejor_ret_30m_pct`, `peor_ret_30m_pct`: el mejor y el peor precio visto
   en las muestras de los primeros 30 minutos. De acá sale la lista negra
   por rug; la de resultados usa el checkpoint de `loser_checkpoint_minutes`.
+- `camino_precio`: JSON con lo peor visto en todo el seguimiento (`peor`) y,
+  en orden, cada nuevo máximo con lo peor visto antes de llegar a él
+  (`picos`: `[[máximo, peor antes], ...]`). De acá salen los aciertos del
+  aviso. NULL en las filas de antes del 2026-11-07.
 - `enviada = 0` son compras descartadas, con `motivo_descarte`: sirven para
   comprobar si los filtros tiran señales buenas.
 - `pasa_filtros_par = 1` si el par pasó los filtros: se avisó, o se descartó
@@ -257,7 +263,7 @@ Secciones disponibles:
   (`token_cooldown_minutes`, `realert_new_wallets`), tope de actividad
   (`max_tokens_per_hour`), bots (`max_txs_per_hour`), abandonadas (`max_inactive_days`), lista negra (`blacklist`, `rug_drop_pct`,
   `loser_min_signals`, `loser_max_median_ret_pct`, `loser_checkpoint_minutes`), ranking diario
-  (`ranking_hour`) y filtros del par
+  (`ranking_hour`), aciertos del aviso (`hit_pct`, `hit_max_drop_pct`) y filtros del par
   (`min_pair_age_minutes`, `max_price_change_h1_pct`, `max_price_change_m5_pct`,
   `min_market_cap_usd`, `min_txns_m5`, `min_volume_h1_usd`, `max_turnover_h1`) y avisos en bonding
   curve (`bonding_curve`).

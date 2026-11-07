@@ -29,7 +29,6 @@ import aiohttp  # type: ignore[import-not-found]
 
 from sigpump.blacklist import ABANDONED_REASON, Blacklist
 from sigpump.solana import RpcClient, redact
-from sigpump.tracker import TrackRecord
 from sigpump.wallet_list import FollowedWallet, WalletList
 
 log = logging.getLogger()
@@ -93,7 +92,6 @@ class WalletBuy:
     new_position: bool
     signature: str
     ts: float
-    trusted: bool = False
 
 
 @dataclass(frozen=True)
@@ -102,15 +100,13 @@ class WalletSignal:
     en el mismo token hace poco (confluencia). `update` marca un token ya
     avisado al que se sumaron wallets nuevas y `bonding_curve` uno que
     todavía no se graduó a un AMM. `transfer_fee_bps` es la comisión de
-    transferencia del token (Token-2022), None si no se sabe.
-    `track_record` es cómo le fue a la wallet en el registro (() sin tokens
-    medidos, None sin registro) y `hits` sus (aciertos, tokens medidos)."""
+    transferencia del token (Token-2022), None si no se sabe. `hits` son
+    los (aciertos, tokens medidos) de la wallet en el registro."""
     buy: WalletBuy
     others: tuple[str, ...] = field(default_factory=tuple)
     update: bool = False
     bonding_curve: bool = False
     transfer_fee_bps: int | None = None
-    track_record: TrackRecord | None = None
     hits: tuple[int, int] | None = None
 
 
@@ -145,7 +141,7 @@ def _account_index(tx: dict, address: str) -> int | None:
 
 
 def parse_buys(
-    tx: dict, wallet: str, label: str, signature: str, min_sol: float, trusted: bool = False
+    tx: dict, wallet: str, label: str, signature: str, min_sol: float
 ) -> list[WalletBuy]:
     """
     Compras de `wallet` en la transacción `tx` (getTransaction con
@@ -188,7 +184,6 @@ def parse_buys(
             new_position=pre.get(mint, 0.0) <= 0,
             signature=signature,
             ts=float(ts),
-            trusted=trusted,
         )
         for mint in bought
     ]
@@ -480,7 +475,7 @@ class WalletWatcher:
                 self._pending[wallet] = rest + [s for s in self._pending.get(wallet, []) if s not in rest]
                 break
             if tx is not None:
-                buys += parse_buys(tx, wallet, info.label, signature, self._min_sol, info.trusted)
+                buys += parse_buys(tx, wallet, info.label, signature, self._min_sol)
         return buys
 
     async def _poll_wallet(self, wallet: str, info: FollowedWallet) -> list[WalletBuy]:
@@ -532,7 +527,7 @@ class WalletWatcher:
                 if retry:
                     break
                 if tx is not None:
-                    buys += parse_buys(tx, wallet, label, signature, self._min_sol, info.trusted)
+                    buys += parse_buys(tx, wallet, label, signature, self._min_sol)
             self._last_signature[wallet] = signature
         return buys
 

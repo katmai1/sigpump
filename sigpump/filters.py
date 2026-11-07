@@ -3,10 +3,10 @@ sigpump/filters.py
 
 Filtros del par para los avisos de wallets, en una tabla: cada uno con la
 clave de config que lo controla y si se aplica a las compras en bonding
-curve y a las de wallets de confianza. Es la única fuente de esos
-subconjuntos; el README, config.example.toml y config.py los describen, y
-tests/test_filters.py comprueba que digan lo mismo (antes se desincronizaron:
-min_volume_h1_usd se aplicaba a las de confianza sin que lo dijera ninguno).
+curve. Es la única fuente de ese subconjunto; el README, config.example.toml
+y config.py lo describen, y tests/test_filters.py comprueba que digan lo
+mismo (antes se desincronizaron: min_volume_h1_usd se aplicaba a las wallets
+de confianza, que ya no existen, sin que lo dijera ninguno).
 """
 
 import time
@@ -108,30 +108,27 @@ class PairFilter:
     check: Callable[[Config, dict, float], str | None]
     # Compras de tokens que siguen en la bonding curve de un launchpad.
     curve: bool
-    # Compras de wallets de confianza (* en el fichero de wallets).
-    trusted: bool
 
 
 # En orden: el motivo de descarte es el del primero que falla.
 #
 # Bonding curve: un token sin graduar incumple siempre el dex, la edad, el
-# market cap y el turnover. De confianza: en pares de más de un día, sus
-# compras que el cambio 1h, el market cap y el turnover descartaban eran las
-# mejores del registro (+18% de mediana a 1 h), y en octubre las de
-# 4y2T…dvE1 que min_txns_m5 tiraba (0-2 txns en 5 min) acabaron todas en
-# positivo a 24 h. max_price_change_m5_pct se mira siempre: comprar lo que
-# acaba de subir mucho es llegar tarde, sea quien sea quien compra; igual
-# min_volume_h1_usd: un token sin volumen no se mueve.
+# market cap y el turnover.
+#
+# Hasta el 2026-11-07 las wallets de confianza (* en el fichero) se saltaban
+# el cambio 1h, el market cap, min_txns_m5 y el turnover. Se quitaron a
+# mano: desde el 17-oct eso dejaba pasar 45 avisos (de 724), que daban +2%
+# de mediana a 1 h y -2% a 24 h (todos los avisos, +1% y -8%).
 PAIR_FILTERS: tuple[PairFilter, ...] = (
-    PairFilter("dex_ids", _dex, curve=False, trusted=True),
-    PairFilter("quote_tokens", _quote, curve=True, trusted=True),
-    PairFilter("min_pair_age_minutes", _age, curve=False, trusted=True),
-    PairFilter("max_price_change_h1_pct", _change_h1, curve=True, trusted=False),
-    PairFilter("max_price_change_m5_pct", _change_m5, curve=True, trusted=True),
-    PairFilter("min_market_cap_usd", _market_cap, curve=False, trusted=False),
-    PairFilter("min_txns_m5", _txns, curve=True, trusted=False),
-    PairFilter("min_volume_h1_usd", _volume, curve=True, trusted=True),
-    PairFilter("max_turnover_h1", _turnover, curve=False, trusted=False),
+    PairFilter("dex_ids", _dex, curve=False),
+    PairFilter("quote_tokens", _quote, curve=True),
+    PairFilter("min_pair_age_minutes", _age, curve=False),
+    PairFilter("max_price_change_h1_pct", _change_h1, curve=True),
+    PairFilter("max_price_change_m5_pct", _change_m5, curve=True),
+    PairFilter("min_market_cap_usd", _market_cap, curve=False),
+    PairFilter("min_txns_m5", _txns, curve=True),
+    PairFilter("min_volume_h1_usd", _volume, curve=True),
+    PairFilter("max_turnover_h1", _turnover, curve=False),
 )
 
 
@@ -142,16 +139,15 @@ def venue_reason(cfg: Config, pair: dict) -> str | None:
 
 
 def first_failing(
-    cfg: Config, pair: dict, now: float | None = None, curve: bool = False, trusted: bool = False
+    cfg: Config, pair: dict, now: float | None = None, curve: bool = False
 ) -> tuple[str, str] | None:
     """(clave, motivo) del primer filtro del par que descarta la compra, o
     None si pasa. `now` es la hora contra la que se mide la edad del par
-    (ahora si no se da). Con `curve` (token en bonding curve) y `trusted`
-    (wallet de confianza) solo se aplican los filtros de PAIR_FILTERS que
-    lo permiten."""
+    (ahora si no se da). Con `curve` (token en bonding curve) solo se
+    aplican los filtros de PAIR_FILTERS que lo permiten."""
     now = time.time() if now is None else now
     for f in PAIR_FILTERS:
-        if (curve and not f.curve) or (trusted and not f.trusted):
+        if curve and not f.curve:
             continue
         if reason := f.check(cfg, pair, now):
             return f.key, reason
@@ -159,8 +155,8 @@ def first_failing(
 
 
 def pair_rejection(
-    cfg: Config, pair: dict, now: float | None = None, curve: bool = False, trusted: bool = False
+    cfg: Config, pair: dict, now: float | None = None, curve: bool = False
 ) -> str | None:
     """Motivo de first_failing(), sin la clave del filtro."""
-    failing = first_failing(cfg, pair, now, curve, trusted)
+    failing = first_failing(cfg, pair, now, curve)
     return failing[1] if failing else None

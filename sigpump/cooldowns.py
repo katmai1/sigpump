@@ -9,7 +9,6 @@ recupera del registro al reiniciar.
 """
 
 import time
-from typing import Callable
 
 from sigpump.config import Config
 from sigpump.wallets import WalletBuy
@@ -125,16 +124,15 @@ class Cooldowns:
 
     # --- confluencia ---
 
-    def confluence(self, buy: WalletBuy, trusted: Callable[[WalletBuy], bool]) -> tuple[str, ...]:
+    def confluence(self, buy: WalletBuy) -> tuple[str, ...]:
         """Anota la compra y devuelve las etiquetas de las otras wallets
         seguidas que entraron en el mismo token dentro de confluence_minutes.
-        Las hiperactivas no cuentan; las de confianza (según `trusted`)
-        llevan ⭐."""
+        Las hiperactivas no cuentan."""
         since = buy.ts - self._config.wallets_confluence_minutes * 60
         recent = [b for b in self._buys.get(buy.mint, []) if b.ts >= since]
         # Una por wallet: dos wallets con la misma etiqueta cuentan como dos.
         others = tuple({
-            b.wallet: f"⭐ {b.label}" if trusted(b) else b.label for b in recent
+            b.wallet: b.label for b in recent
             if b.wallet != buy.wallet and not self.hyperactive(b.wallet)
         }.values())
         self._buys[buy.mint] = recent + [buy]

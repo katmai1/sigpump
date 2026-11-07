@@ -72,6 +72,9 @@ class TestConfigValidation(unittest.TestCase):
             dict(wallets_ranking_hour=24),
             dict(wallets_ranking_hour=-2),
             dict(wallets_ranking_hour=9, alert_log_path=""),
+            dict(wallets_hit_pct=0),
+            dict(wallets_hit_max_drop_pct=-1),
+            dict(wallets_hit_max_drop_pct=101),
         ]
         for caso in casos:
             with self.subTest(caso=caso), self.assertRaises(ValueError):

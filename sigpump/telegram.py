@@ -15,7 +15,7 @@ from telegram.constants import ParseMode  # type: ignore[import-not-found]
 from telegram.error import RetryAfter  # type: ignore[import-not-found]
 from telegram.warnings import PTBDeprecationWarning  # type: ignore[import-not-found]
 
-from sigpump.tracker import HIT_PCT, TRACK_RECORD_MINUTES, TrackRecord, format_minutes
+from sigpump.tracker import TRACK_RECORD_MINUTES, TrackRecord, format_minutes
 from sigpump.util import buy_ratio_m5, liquidity_usd, market_cap_usd, to_float, volume_acceleration
 from sigpump.wallets import WalletSignal
 
@@ -35,8 +35,8 @@ def format_track_record(record: TrackRecord) -> str:
     return f"{medians} ({max(count for _, _, count in record)} tokens)"
 
 
-def format_ranking(rows: list[tuple[str, bool, TrackRecord]], without_data: int, min_tokens: int) -> str:
-    """HTML del ranking diario: (etiqueta, de confianza, historial) por
+def format_ranking(rows: list[tuple[str, TrackRecord]], without_data: int, min_tokens: int) -> str:
+    """HTML del ranking diario: (etiqueta, historial) por
     wallet, ya ordenadas de mejor a peor en el primer checkpoint de
     TRACK_RECORD_MINUTES. `without_data` son las que no llegan a
     `min_tokens` tokens medidos en él."""
@@ -51,9 +51,8 @@ def format_ranking(rows: list[tuple[str, bool, TrackRecord]], without_data: int,
         if item is None:
             lines.append("…")
             continue
-        position, (label, trusted, record) = item
-        star = "⭐ " if trusted else ""
-        lines.append(f"{position}. {star}{html.escape(label)}: {format_track_record(record)}")
+        position, (label, record) = item
+        lines.append(f"{position}. {html.escape(label)}: {format_track_record(record)}")
     if without_data:
         lines.append(f"\nSin datos suficientes (menos de {min_tokens} tokens medidos): {without_data} wallets")
     return "\n".join(lines)
@@ -66,6 +65,8 @@ class TelegramAlerter:
         chat_id: str,
         message_thread_id: int | None = None,
         chain_id: str = "solana",
+        hit_pct: float = 8.0,
+        hit_max_drop_pct: float = 15.0,
     ):
         self._bot = Bot(token=bot_token)
         self._chat_id = chat_id
@@ -73,6 +74,9 @@ class TelegramAlerter:
         self._message_thread_id = message_thread_id
         # Solo se usa para armar el link de fallback si la API no trae `url`.
         self._chain_id = chain_id
+        # [wallets].hit_pct y hit_max_drop_pct, para explicar los aciertos.
+        self._hit_pct = hit_pct
+        self._hit_max_drop_pct = hit_max_drop_pct
 
     async def __aenter__(self) -> "TelegramAlerter":
         """initialize() valida el token contra la API (getMe) y prepara el
@@ -130,22 +134,17 @@ class TelegramAlerter:
             spent.append(f"${buy.stable_spent:,.0f}")
         tx_url = html.escape(f"https://solscan.io/tx/{buy.signature}", quote=True)
         header = "🔁 <b>ACTUALIZACIÓN</b>: entran más wallets\n" if signal.update else ""
-        star = "⭐ " if buy.trusted else ""
         header += (
-            f"👛 <b>{star}{html.escape(buy.label)} compró {name} ({symbol})</b>\n"
+            f"👛 <b>{html.escape(buy.label)} compró {name} ({symbol})</b>\n"
             f"{'Entrada nueva' if buy.new_position else 'Amplía posición'}: "
             f"<b>{' + '.join(spent) or '?'}</b> (<a href=\"{tx_url}\">tx</a>)\n"
         )
-        if buy.trusted:
-            header += "⭐ <b>Wallet de las buenas</b>\n"
-        if signal.track_record is not None:
-            header += (
-                f"📊 Historial: {format_track_record(signal.track_record)}\n" if signal.track_record
-                else "📊 Sin historial medido todavía\n"
-            )
         if signal.hits and signal.hits[1]:
             hits, total = signal.hits
-            header += f"🎯 Aciertos: {hits / total:.0%} ({hits} de {total} llegaron a {HIT_PCT:+.0f}%)\n"
+            header += (
+                f"🎯 Aciertos: {hits / total:.0%} ({hits} de {total} llegaron a {self._hit_pct:+g}% "
+                f"sin caer antes más de {self._hit_max_drop_pct:g}%)\n"
+            )
         if signal.bonding_curve:
             header += f"🧪 <b>En bonding curve</b> ({pool}): sin graduar, más riesgo\n"
         if signal.transfer_fee_bps:

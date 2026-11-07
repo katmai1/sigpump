@@ -101,7 +101,8 @@ class WalletSignal:
     avisado al que se sumaron wallets nuevas y `bonding_curve` uno que
     todavía no se graduó a un AMM. `transfer_fee_bps` es la comisión de
     transferencia del token (Token-2022), None si no se sabe. `hits` son
-    los (aciertos, tokens medidos) de la wallet en el registro."""
+    los (aciertos, tokens medidos) de la wallet en el registro: (0, 0) si
+    todavía no tiene ninguno medido y None si no hay registro."""
     buy: WalletBuy
     others: tuple[str, ...] = field(default_factory=tuple)
     update: bool = False

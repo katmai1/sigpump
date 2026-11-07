@@ -55,10 +55,10 @@ class TestFormatMessage(unittest.TestCase):
         otros = TelegramAlerter(TOKEN_FALSO, "-100123", hit_pct=12.5, hit_max_drop_pct=10)
         texto = otros.format_message(_pair(), dataclasses.replace(_SIGNAL, hits=(1, 2)))
         self.assertIn("llegaron a +12.5% sin caer antes más de 10%", texto)
-        for hits in (None, (0, 0)):
-            with self.subTest(hits=hits):
-                texto = _alerter().format_message(_pair(), dataclasses.replace(_SIGNAL, hits=hits))
-                self.assertNotIn("🎯", texto)
+        sin_datos = _alerter().format_message(_pair(), dataclasses.replace(_SIGNAL, hits=(0, 0)))
+        self.assertIn("🎯 Aciertos: sin datos todavía", sin_datos)
+        sin_registro = _alerter().format_message(_pair(), dataclasses.replace(_SIGNAL, hits=None))
+        self.assertNotIn("🎯", sin_registro)
 
     def test_mensaje_completo(self):
         texto = _alerter().format_message(_pair(), _SIGNAL)

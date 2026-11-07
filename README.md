@@ -139,6 +139,8 @@ orden (columna `camino_precio`). Una compra que todavía no llegó al objetivo
 ni cayó hasta el stop no cuenta hasta que acaba su seguimiento (a las 24 h);
 entonces cuenta como fallo. Solo cuentan las compras registradas desde el
 2026-11-07: las de antes no guardaban el orden de los precios.
+Mientras la wallet no tenga ninguna medida, el aviso dice "sin datos
+todavía" en vez del porcentaje.
 
 Con `ranking_hour` (hora local, -1 = apagado) llega cada día un ranking de
 las wallets seguidas con al menos 5 tokens medidos a 1 h, por la mediana de

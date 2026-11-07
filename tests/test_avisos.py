@@ -98,7 +98,7 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         self._anotar(radar, self._rows()[0]["id"], {"camino_precio": '{"peor": -3, "picos": [[12, -3]]}'})
         await radar.run_once(client, alerter)
         await radar.run_once(client, alerter)
-        self.assertEqual([s.hits for _, s in alerter.wallet], [None, (1, 1), None])
+        self.assertEqual([s.hits for _, s in alerter.wallet], [(0, 0), (1, 1), (0, 0)])
 
     async def test_ranking_de_las_wallets_seguidas(self):
         tercera = "9Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j3"

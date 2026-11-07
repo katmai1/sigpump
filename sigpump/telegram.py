@@ -145,6 +145,10 @@ class TelegramAlerter:
                 f"🎯 Aciertos: {hits / total:.0%} ({hits} de {total} llegaron a {self._hit_pct:+g}% "
                 f"sin caer antes más de {self._hit_max_drop_pct:g}%)\n"
             )
+        elif signal.hits:
+            # Wallet nueva o compras sin cerrar todavía: que no parezca que
+            # falta la línea por un fallo.
+            header += "🎯 Aciertos: sin datos todavía\n"
         if signal.bonding_curve:
             header += f"🧪 <b>En bonding curve</b> ({pool}): sin graduar, más riesgo\n"
         if signal.transfer_fee_bps:

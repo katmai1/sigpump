@@ -334,7 +334,8 @@ class MemecoinRadar:
             hits = self._tracker.hit_rates(
                 self._config.wallets_hit_pct, self._config.wallets_hit_max_drop_pct, buy.wallet
             )
-            signal = dataclasses.replace(signal, hits=hits.get(buy.wallet))
+            # (0, 0) y no None: con registro el aviso dice que aún no hay datos.
+            signal = dataclasses.replace(signal, hits=hits.get(buy.wallet, (0, 0)))
         log.info(
             "Wallet%s: %s compró %s (%.2f SOL, %s)%s",
             " (actualización)" if signal.update else "",

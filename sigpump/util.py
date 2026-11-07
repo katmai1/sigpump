@@ -88,3 +88,25 @@ def buy_ratio_m5(pair: dict) -> float | None:
         return None
     buys = to_float(((pair.get("txns") or {}).get("m5") or {}).get("buys"))
     return buys / total
+
+
+def bot_volume_m5(
+    pair: dict, min_txns: int, max_usd_per_tx: float, buy_margin_pct: float
+) -> tuple[float, float, float | None] | None:
+    """(txns, USD por txn, fracción de compras) de los últimos 5 min si
+    parece volumen de un bot, None si no o si min_txns es 0.
+
+    Parece de bot con al menos `min_txns` txns y, o bien menos de
+    `max_usd_per_tx` USD de media por txn, o bien compras a menos de
+    `buy_margin_pct` puntos del 50%. HELL (2026-11-07): 254 txns por $275 y
+    49,6% de compras; en 20 min, 1098 txns y una sola compra de más de
+    0,1 SOL, la de la wallet avisada."""
+    total = txns_m5(pair)
+    if min_txns <= 0 or total < min_txns:
+        return None
+    usd_per_tx = to_float((pair.get("volume") or {}).get("m5")) / total
+    ratio = buy_ratio_m5(pair)
+    balanced = ratio is not None and abs(ratio * 100 - 50) < buy_margin_pct
+    if usd_per_tx < max_usd_per_tx or balanced:
+        return total, usd_per_tx, ratio
+    return None

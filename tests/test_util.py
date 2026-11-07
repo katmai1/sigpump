@@ -3,7 +3,7 @@ de volumen y presión compradora) que se muestran en el aviso y se registran."""
 
 import unittest
 
-from sigpump.util import MIN_TXNS_FOR_BUY_RATIO, buy_ratio_m5, volume_acceleration
+from sigpump.util import MIN_TXNS_FOR_BUY_RATIO, bot_volume_m5, buy_ratio_m5, volume_acceleration
 
 
 class TestVolumeAcceleration(unittest.TestCase):
@@ -34,6 +34,37 @@ class TestBuyRatioM5(unittest.TestCase):
         for pair in ({}, {"txns": None}, {"txns": {"h1": {"buys": 10}}}, {"txns": {"m5": "x"}}):
             with self.subTest(pair=pair):
                 self.assertIsNone(buy_ratio_m5(pair))
+
+
+def _par_5m(buys, sells, volumen):
+    return {"txns": {"m5": {"buys": buys, "sells": sells}}, "volume": {"m5": volumen}}
+
+
+class TestBotVolumeM5(unittest.TestCase):
+    def test_hell(self):
+        """Los números del aviso de HELL del 2026-11-07."""
+        txns, usd_tx, ratio = bot_volume_m5(_par_5m(126, 128, 275.15), 50, 5, 2)
+        self.assertEqual(txns, 254)
+        self.assertAlmostEqual(usd_tx, 275.15 / 254)
+        self.assertAlmostEqual(ratio, 126 / 254)
+
+    def test_txns_de_centimos_aunque_no_sea_mitad_y_mitad(self):
+        self.assertIsNotNone(bot_volume_m5(_par_5m(80, 20, 300), 50, 5, 2))
+
+    def test_mitad_y_mitad_aunque_sean_txns_grandes(self):
+        self.assertIsNotNone(bot_volume_m5(_par_5m(51, 50, 20_000), 50, 5, 2))
+
+    def test_volumen_normal_no_avisa(self):
+        self.assertIsNone(bot_volume_m5(_par_5m(70, 30, 20_000), 50, 5, 2))
+
+    def test_pocas_txns_o_apagado(self):
+        self.assertIsNone(bot_volume_m5(_par_5m(20, 20, 10), 50, 5, 2))
+        self.assertIsNone(bot_volume_m5(_par_5m(126, 128, 275), 0, 5, 2))
+        self.assertIsNone(bot_volume_m5({}, 50, 5, 2))
+
+    def test_pocas_txns_sin_porcentaje_de_compras(self):
+        # Con min_txns por debajo de MIN_TXNS_FOR_BUY_RATIO no hay % de compras.
+        self.assertEqual(bot_volume_m5(_par_5m(2, 1, 3), 1, 5, 2), (3, 1.0, None))
 
 
 

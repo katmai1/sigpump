@@ -75,6 +75,11 @@ class TestConfigValidation(unittest.TestCase):
             dict(wallets_hit_pct=0),
             dict(wallets_hit_max_drop_pct=-1),
             dict(wallets_hit_max_drop_pct=101),
+            dict(wallets_bot_volume_min_txns_m5=-1),
+            dict(wallets_bot_volume_min_txns_m5=50.5),
+            dict(wallets_bot_volume_max_usd_per_tx=-1),
+            dict(wallets_bot_volume_buy_margin_pct=-1),
+            dict(wallets_bot_volume_buy_margin_pct=51),
         ]
         for caso in casos:
             with self.subTest(caso=caso), self.assertRaises(ValueError):

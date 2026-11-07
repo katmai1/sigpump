@@ -127,6 +127,13 @@ class Config:
     # el stop de quien copia la compra).
     wallets_hit_pct: float = _key("wallets.hit_pct", 8.0)
     wallets_hit_max_drop_pct: float = _key("wallets.hit_max_drop_pct", 15.0)
+    # Advertencia de volumen de bots en el aviso (no descarta): con al menos
+    # bot_volume_min_txns_m5 txns en 5 min y menos de bot_volume_max_usd_per_tx
+    # USD por txn, o compras a menos de bot_volume_buy_margin_pct puntos del
+    # 50%. Hay pocos casos para un filtro. 0 = sin advertencia.
+    wallets_bot_volume_min_txns_m5: int = _key("wallets.bot_volume_min_txns_m5", 0)
+    wallets_bot_volume_max_usd_per_tx: float = _key("wallets.bot_volume_max_usd_per_tx", 5.0)
+    wallets_bot_volume_buy_margin_pct: float = _key("wallets.bot_volume_buy_margin_pct", 2.0)
     # Filtros del par para los avisos de wallets (0 = sin filtro): los pares
     # recién creados, los que ya subieron mucho en 1h y los de market cap
     # pequeño daban casi siempre pérdidas.
@@ -232,6 +239,14 @@ class Config:
         if not 0 <= self.wallets_hit_max_drop_pct <= 100:
             raise ValueError(
                 f"[wallets].hit_max_drop_pct debe estar entre 0 y 100 ({self.wallets_hit_max_drop_pct})"
+            )
+        for name in ("bot_volume_min_txns_m5", "bot_volume_max_usd_per_tx"):
+            if getattr(self, f"wallets_{name}") < 0:
+                raise ValueError(f"[wallets].{name} debe ser >= 0 ({getattr(self, f'wallets_{name}')})")
+        if not 0 <= self.wallets_bot_volume_buy_margin_pct <= 50:
+            raise ValueError(
+                f"[wallets].bot_volume_buy_margin_pct debe estar entre 0 y 50 "
+                f"({self.wallets_bot_volume_buy_margin_pct})"
             )
         if not self.wallets_file:
             raise ValueError("[wallets].file no puede estar vacío")

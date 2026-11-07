@@ -142,6 +142,14 @@ entonces cuenta como fallo. Solo cuentan las compras registradas desde el
 Mientras la wallet no tenga ninguna medida, el aviso dice "sin datos
 todavía" en vez del porcentaje.
 
+Con `bot_volume_min_txns_m5` (0 = apagado) el aviso lleva un ⚠️ de volumen
+de bots cuando en los últimos 5 minutos hubo al menos esas transacciones y,
+o bien su media es de menos de `bot_volume_max_usd_per_tx` USD, o bien las
+compras están a menos de `bot_volume_buy_margin_pct` puntos del 50%: un bot
+comprando y vendiendo céntimos para inflar la actividad, sin compradores
+reales detrás. Solo advierte, no descarta: el 2026-11-07, como filtro, habría
+quitado 16 de 694 avisos con resultados apenas peores que el resto.
+
 Con `ranking_hour` (hora local, -1 = apagado) llega cada día un ranking de
 las wallets seguidas con al menos 5 tokens medidos a 1 h, por la mediana de
 sus tokens a 1 h, 4 h y 24 h, de mejor a peor, para ver cuáles sobran. Con los datos de
@@ -265,7 +273,9 @@ Secciones disponibles:
   (`token_cooldown_minutes`, `realert_new_wallets`), tope de actividad
   (`max_tokens_per_hour`), bots (`max_txs_per_hour`), abandonadas (`max_inactive_days`), lista negra (`blacklist`, `rug_drop_pct`,
   `loser_min_signals`, `loser_max_median_ret_pct`, `loser_checkpoint_minutes`), ranking diario
-  (`ranking_hour`), aciertos del aviso (`hit_pct`, `hit_max_drop_pct`) y filtros del par
+  (`ranking_hour`), aciertos del aviso (`hit_pct`, `hit_max_drop_pct`), advertencia de volumen
+  de bots (`bot_volume_min_txns_m5`, `bot_volume_max_usd_per_tx`,
+  `bot_volume_buy_margin_pct`) y filtros del par
   (`min_pair_age_minutes`, `max_price_change_h1_pct`, `max_price_change_m5_pct`,
   `min_market_cap_usd`, `min_txns_m5`, `min_volume_h1_usd`, `max_turnover_h1`) y avisos en bonding
   curve (`bonding_curve`).

@@ -16,7 +16,7 @@ from telegram.error import RetryAfter  # type: ignore[import-not-found]
 from telegram.warnings import PTBDeprecationWarning  # type: ignore[import-not-found]
 
 from sigpump.tracker import TRACK_RECORD_MINUTES, TrackRecord, format_minutes
-from sigpump.util import buy_ratio_m5, liquidity_usd, market_cap_usd, to_float, volume_acceleration
+from sigpump.util import bot_volume_m5, buy_ratio_m5, liquidity_usd, market_cap_usd, to_float, volume_acceleration
 from sigpump.wallets import WalletSignal
 
 # Espera máxima aceptable ante flood control. Más que esto bloquearía el
@@ -67,6 +67,7 @@ class TelegramAlerter:
         chain_id: str = "solana",
         hit_pct: float = 8.0,
         hit_max_drop_pct: float = 15.0,
+        bot_volume: tuple[int, float, float] = (0, 5.0, 2.0),
     ):
         self._bot = Bot(token=bot_token)
         self._chat_id = chat_id
@@ -77,6 +78,8 @@ class TelegramAlerter:
         # [wallets].hit_pct y hit_max_drop_pct, para explicar los aciertos.
         self._hit_pct = hit_pct
         self._hit_max_drop_pct = hit_max_drop_pct
+        # [wallets].bot_volume_*: (min_txns_m5, max_usd_per_tx, buy_margin_pct).
+        self._bot_volume = bot_volume
 
     async def __aenter__(self) -> "TelegramAlerter":
         """initialize() valida el token contra la API (getMe) y prepara el
@@ -157,6 +160,16 @@ class TelegramAlerter:
             header += (
                 f"⚠️ <b>Comisión de transferencia: {signal.transfer_fee_bps / 100:g}%</b>"
                 " al comprar y al vender\n"
+            )
+        bots = bot_volume_m5(pair, *self._bot_volume)
+        if bots:
+            # Mucho movimiento de céntimos y mitad compras, mitad ventas: un
+            # bot inflando la actividad, sin compradores reales detrás.
+            txns, usd_per_tx, ratio = bots
+            buys = f", {ratio * 100:.0f}% compras" if ratio is not None else ""
+            header += (
+                f"⚠️ <b>Volumen de bots</b>: {txns:.0f} tx por "
+                f"${usd_per_tx * txns:,.0f} en 5 min (${usd_per_tx:,.2f}/tx{buys})\n"
             )
         if signal.others:
             header += (

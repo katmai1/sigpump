@@ -109,6 +109,18 @@ ranking_hour = 9
 # Solo cuentan las compras registradas desde entonces.
 hit_pct = 8
 hit_max_drop_pct = 15
+# Advertencia ⚠️ de volumen de bots en el aviso (no descarta nada): con al
+# menos bot_volume_min_txns_m5 transacciones en 5 min y menos de
+# bot_volume_max_usd_per_tx USD de media por transacción, o compras a menos
+# de bot_volume_buy_margin_pct puntos del 50%. 0 = sin advertencia.
+# 2026-11-07: HELL avisó con 254 tx por $275 en 5 min y 49,6% de compras; en
+# 20 min hubo 1098 tx y la única compra de más de 0,1 SOL fue la de la wallet
+# avisada. Cayó -12% a 30 min. Como filtro quitaría 16 de 694 avisos, que
+# daban -1% de mediana a 1 h, -2% a 4 h y -10% a 24 h (los que quedaban, +1%,
+# -1% y -8%): pocos casos y poca diferencia para descartarlos.
+bot_volume_min_txns_m5 = 50
+bot_volume_max_usd_per_tx = 5
+bot_volume_buy_margin_pct = 2
 # Filtros del par para avisar de una compra de wallet (0 = sin filtro). Con
 # los primeros datos, los pares de menos de 2 h daban una mediana de -67% a
 # 30 min, los que ya subían más de 50% en 1h -25% y los de market cap por

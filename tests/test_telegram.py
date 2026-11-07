@@ -60,6 +60,16 @@ class TestFormatMessage(unittest.TestCase):
         sin_registro = _alerter().format_message(_pair(), dataclasses.replace(_SIGNAL, hits=None))
         self.assertNotIn("🎯", sin_registro)
 
+    def test_volumen_de_bots(self):
+        par = _pair(txns={"m5": {"buys": 126, "sells": 128}}, volume={"m5": 275.15, "h1": 818})
+        con = TelegramAlerter(TOKEN_FALSO, "-100123", bot_volume=(50, 5, 2)).format_message(par, _SIGNAL)
+        self.assertIn("⚠️ <b>Volumen de bots</b>: 254 tx por $275 en 5 min ($1.08/tx, 50% compras)", con)
+        # Por defecto está apagado, y con volumen normal no sale.
+        self.assertNotIn("bots", _alerter().format_message(par, _SIGNAL))
+        normal = _pair(txns={"m5": {"buys": 70, "sells": 30}}, volume={"m5": 20_000, "h1": 90_000})
+        texto = TelegramAlerter(TOKEN_FALSO, "-100123", bot_volume=(50, 5, 2)).format_message(normal, _SIGNAL)
+        self.assertNotIn("bots", texto)
+
     def test_mensaje_completo(self):
         texto = _alerter().format_message(_pair(), _SIGNAL)
         self.assertIn("compró Pepe Coin (PEPE)</b>", texto)

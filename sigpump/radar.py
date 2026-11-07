@@ -423,6 +423,11 @@ class MemecoinRadar:
             self._config.chain_id,
             self._config.wallets_hit_pct,
             self._config.wallets_hit_max_drop_pct,
+            bot_volume=(
+                self._config.wallets_bot_volume_min_txns_m5,
+                self._config.wallets_bot_volume_max_usd_per_tx,
+                self._config.wallets_bot_volume_buy_margin_pct,
+            ),
         )
         # `async with alerter` valida el token al arrancar y cierra el cliente
         # HTTP de Telegram al salir.

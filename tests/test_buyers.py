@@ -335,7 +335,8 @@ class CheckHistoryTest(unittest.TestCase):
     def test_split_separa_y_mantiene_orden(self):
         rpc = _HistoryRpc(_historial(300, 6 * 3600))
         buyers = [Buyer(BALLENA, sol_spent=5), Buyer(PEZ, sol_spent=3)]
-        kept, discarded = asyncio.run(HistoryFilter(rpc).split(buyers))
+        # Sin filtro de antigüedad (el valor por defecto lo tiene): aquí solo importa el orden.
+        kept, discarded = asyncio.run(HistoryFilter(rpc, min_age_days=0).split(buyers))
         self.assertEqual([b.wallet for b in kept], [BALLENA, PEZ])
         self.assertEqual(discarded, [])
 

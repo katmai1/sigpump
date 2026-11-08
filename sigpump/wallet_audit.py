@@ -5,6 +5,7 @@ Qué hace en la cadena cada wallet del fichero, para entender por qué unas
 avisan y otras no. Se ejecuta a mano:
 
     python wallet_audit.py [--txs 50] [--days 30] [--wallet DIRECCIÓN ...]
+    python wallet_audit.py --base [--days 30]    # sin RPC: lo que guardó el bot
 
 La base solo guarda las compras que llegan al radar: las de menos de
 [wallets].min_sol no dejan rastro, y las de bonding curve (sin
@@ -21,6 +22,12 @@ Por cada wallet:
   más, pequeñas, con stablecoin o en bonding curve), ventas y otras.
 - Cuántos de los tokens que compró con min_sol o más están en alertas.db:
   los que faltan no llegaron al radar.
+
+Con --base no llama al RPC: usa la tabla actividad_wallet, donde el bot
+cuenta por día y tipo lo que hace cada wallet (activity.py) desde que se
+actualizó a la versión que la tiene. La clasificación es la misma
+(wallets.classify); las de "transferencia" y la mayoría de "fallida" son
+las que el WebSocket descarta sin leer, que aquí no aparecen.
 
 Solo lee: ni wallets.txt ni alertas.db se tocan (por eso no usa load_wallets,
 que reescribe el fichero al quitar repetidas, ni Blacklist).
@@ -42,19 +49,24 @@ from pathlib import Path
 
 import aiohttp  # type: ignore[import-not-found]
 
+from sigpump.activity import day_of, read_activity
 from sigpump.buyers import DEFAULT_METHOD, METHODS, RPC_ERRORS, Rpc, TransactionReader, tx_signature
 from sigpump.config import Config
 from sigpump.solana import redact
 from sigpump.util import SOLANA_ADDRESS_RE
 from sigpump.wallet_list import OLD_TRUSTED_MARK
 from sigpump.wallets import (
+    BUY,
+    BUY_CURVE,
+    BUY_SMALL,
+    BUY_STABLE,
     COMMITMENT,
-    LAMPORTS_PER_SOL,
-    QUOTE_MINTS,
-    STABLE_MINTS,
-    WSOL_MINT,
-    _account_index,
-    _token_amounts,
+    OTHER,
+    SEEN_BY_BOT,
+    SELL,
+    TX_FAILED,
+    TX_TRANSFER,
+    classify,
 )
 
 log = logging.getLogger()
@@ -65,97 +77,6 @@ DEFAULT_DAYS = 30.0
 # en config.toml).
 ACTIVITY_DAYS = 7
 SIGNATURES_PAGE = 1000
-# Gasto mínimo en SOL para llamar compra a que suba un token: crear la cuenta
-# del token cuesta ~0,002 SOL de renta, y con menos sería un airdrop o una
-# transferencia en la que la wallet pagó la cuenta.
-MIN_BUY_SOL = 0.005
-# Programas de bonding curve de los launchpads (los mismos que
-# radar.BONDING_CURVE_DEX_IDS en DexScreener). Se miran en la transacción y no
-# en DexScreener: muchos tokens se graduaron después, y lo que importa es
-# dónde estaban cuando la wallet compró.
-CURVE_PROGRAMS = {
-    "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P": "pump.fun",
-    "LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj": "LaunchLab",
-    "dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN": "Meteora DBC",
-    "MoonCVVNZFSYkqNXP6bxHLPL6QQJiMagDL3qcqUQTrG": "Moonshot",
-}
-
-# Clases de transacción.
-BUY = "compra"
-BUY_SMALL = "compra pequeña"
-BUY_STABLE = "compra con stable"
-BUY_CURVE = "bonding curve"
-SELL = "venta"
-OTHER = "otra"
-# Las que wallets.parse_buys deja pasar: el bot las ve y las registra.
-SEEN_BY_BOT = (BUY, BUY_STABLE)
-
-
-@dataclass(frozen=True)
-class TxClass:
-    """Qué fue una transacción para la wallet: su clase, los tokens que
-    compró y el SOL que gastó (repartido entre ellos)."""
-    kind: str
-    mints: tuple[str, ...] = ()
-    sol_spent: float = 0.0
-
-
-def _programs(tx: dict) -> set[str]:
-    """Programas que aparecen en la transacción: cuentas (también las de
-    tablas de direcciones, que jsonParsed incluye), instrucciones internas y
-    logs. Un agregador como Jupiter llega a la curva por una interna."""
-    found: set[str] = set()
-    message = (tx.get("transaction") or {}).get("message") or {}
-    for key in message.get("accountKeys") or []:
-        pubkey = key.get("pubkey") if isinstance(key, dict) else key
-        if isinstance(pubkey, str):
-            found.add(pubkey)
-    meta = tx.get("meta") or {}
-    for loaded in (meta.get("loadedAddresses") or {}).values():
-        found.update(a for a in loaded or [] if isinstance(a, str))
-    for group in meta.get("innerInstructions") or []:
-        for ins in (group or {}).get("instructions") or []:
-            if isinstance(ins, dict) and isinstance(ins.get("programId"), str):
-                found.add(ins["programId"])
-    for line in meta.get("logMessages") or []:
-        if isinstance(line, str) and line.startswith("Program ") and " invoke [" in line:
-            found.add(line.split()[1])
-    return found
-
-
-def classify(tx: dict, wallet: str, min_sol: float) -> TxClass:
-    """Clase de `tx` para `wallet`, con el mismo cálculo de saldos que
-    wallets.parse_buys (que con min_sol descarta en silencio lo pequeño)."""
-    meta = tx.get("meta") or {}
-    if meta.get("err") is not None:
-        return TxClass(OTHER)
-    pre = _token_amounts(meta.get("preTokenBalances"), wallet)
-    post = _token_amounts(meta.get("postTokenBalances"), wallet)
-    deltas = {mint: post.get(mint, 0.0) - pre.get(mint, 0.0) for mint in pre.keys() | post.keys()}
-    sol_spent = -deltas.get(WSOL_MINT, 0.0)
-    index = _account_index(tx, wallet)
-    pre_lamports, post_lamports = meta.get("preBalances") or [], meta.get("postBalances") or []
-    if index is not None and index < min(len(pre_lamports), len(post_lamports)):
-        spent = pre_lamports[index] - post_lamports[index]
-        if index == 0:
-            spent -= meta.get("fee") or 0
-        sol_spent += spent / LAMPORTS_PER_SOL
-    stable_spent = -sum(deltas.get(mint, 0.0) for mint in STABLE_MINTS)
-    bought = tuple(sorted(m for m, d in deltas.items() if d > 0 and m not in QUOTE_MINTS))
-    sold = [m for m, d in deltas.items() if d < 0 and m not in QUOTE_MINTS]
-
-    if bought and (sol_spent >= MIN_BUY_SOL or stable_spent > 0):
-        share = round(max(0.0, sol_spent) / len(bought), 4)
-        if _programs(tx) & CURVE_PROGRAMS.keys():
-            return TxClass(BUY_CURVE, bought, share)
-        if sol_spent >= min_sol:
-            return TxClass(BUY, bought, share)
-        if stable_spent > 0:
-            return TxClass(BUY_STABLE, bought, share)
-        return TxClass(BUY_SMALL, bought, share)
-    if sold and (sol_spent < 0 or stable_spent < 0):
-        return TxClass(SELL)
-    return TxClass(OTHER)
 
 
 @dataclass
@@ -185,6 +106,9 @@ class WalletAudit:
     # 2026-11-08: las de stable se tomaban por un problema y avisaban igual.
     tokens: set[str] = field(default_factory=set)
     tokens_in_db: int = 0
+    # Con --base no se saben los tokens: filas de alertas.db de la wallet en
+    # la ventana. None = no se usó.
+    rows_in_db: int | None = None
     error: str | None = None
 
     @property
@@ -211,7 +135,7 @@ class WalletAudit:
             if main == BUY_SMALL:
                 return f"solo compras < {min_sol:g} SOL (mediana {self.median_spent(BUY_SMALL):.3f})"
             return f"solo {main}"
-        if self.tokens and self.tokens_in_db == 0:
+        if (self.tokens and self.tokens_in_db == 0) or self.rows_in_db == 0:
             # Lo normal en una wallet recién añadida: compró antes de seguirla.
             return "compra pero no está en la base"
         return "ok"
@@ -259,6 +183,42 @@ class Ledger:
     def tokens(self, wallet: str) -> set[str]:
         """Tokens de las compras de `wallet` registradas, avisadas o no."""
         return {t for (t,) in self._query("SELECT DISTINCT token FROM alertas WHERE wallet = ?", (wallet,)) if t}
+
+    def rows_since(self, wallet: str, since: float) -> int:
+        """Compras de `wallet` registradas desde `since`, avisadas o no."""
+        rows = self._query("SELECT COUNT(*) FROM alertas WHERE wallet = ? AND timestamp >= ?", (wallet, since))
+        return rows[0][0] if rows else 0
+
+    def activity(self, since_day: str) -> list[tuple[str, str, str, int, float, float]]:
+        """Filas de actividad_wallet desde `since_day`."""
+        return read_activity(self._db, since_day) if self._db is not None else []
+
+
+def _day_start(day: str) -> float:
+    return time.mktime(time.strptime(day, "%Y-%m-%d"))
+
+
+def fill_from_activity(audit: WalletAudit, rows: list[tuple], now: float) -> WalletAudit:
+    """Rellena `audit` con sus filas de actividad_wallet (wallet, dia,
+    tipo, n, sol, ultima). Lo que en la lectura del RPC es por transacción
+    aquí es por día: el SOL de cada compra es la media de su día."""
+    week = day_of(now - ACTIVITY_DAYS * 86400)
+    for _, day, kind, n, sol, last in rows:
+        audit.read += n
+        audit.kinds[kind] += n
+        if day >= week:
+            audit.txs_7d += n
+            if kind == TX_FAILED:
+                audit.failed_7d += n
+        if kind in (BUY, BUY_SMALL, BUY_STABLE, BUY_CURVE) and n:
+            audit.spent.setdefault(kind, []).extend([sol / n] * n)
+        if last:
+            audit.last_ts = max(audit.last_ts or 0.0, last)
+            if kind in SEEN_BY_BOT:
+                audit.last_buy_ts = max(audit.last_buy_ts or 0.0, last)
+        start = _day_start(day)
+        audit.oldest_read_ts = min(audit.oldest_read_ts or start, start)
+    return audit
 
 
 class WalletAuditor:
@@ -326,35 +286,53 @@ def _ago(ts: float | None, now: float) -> str:
 class Report:
     """Tabla por wallet, agrupada por diagnóstico, y totales."""
 
-    def __init__(self, min_sol: float, days: float, txs: int):
+    def __init__(self, min_sol: float, days: float, txs: int | None):
         self._min_sol = min_sol
         self._days = days
+        # None = desde la base (--base).
         self._txs = txs
 
-    def print(self, audits: list[WalletAudit], rpc: Rpc, now: float, out=sys.stdout) -> None:
+    def print(self, audits: list[WalletAudit], rpc: Rpc | None, now: float, out=sys.stdout) -> None:
         def p(text: str = "") -> None:
             print(text, file=out)
 
-        p(f"\nÚltimas {self._txs} transacciones de los últimos {self._days:g} días de cada wallet"
+        what = (f"Últimas {self._txs} transacciones" if self._txs is not None
+                else "Actividad guardada por el bot (actividad_wallet)")
+        p(f"\n{what} de los últimos {self._days:g} días de cada wallet"
           f" (compra = >= {self._min_sol:g} SOL fuera de bonding curve):\n")
+        if self._txs is None:
+            first = min((a.oldest_read_ts for a in audits if a.oldest_read_ts), default=None)
+            if first is None:
+                # Sin datos, todas saldrían como inactivas.
+                p("La tabla está vacía: el bot todavía no ha guardado actividad (¿sin reiniciar?).")
+                return
+            p(f"Datos desde {day_of(first)}.\n")
         p(f"{'wallet':11} {'etiqueta':16} {'tx 7d':>6} {'últ.':>5} {'leídas':>6} {'cubre':>5} {'compra':>6} {'últ.c':>5} "
           f"{'peq.':>5} {'stab.':>5} {'curva':>5} {'venta':>5} {'base':>7}  diagnóstico")
         order = sorted(audits, key=lambda a: (a.diagnosis(self._min_sol, self._days) == "ok", -a.kinds[BUY]))
         for a in order:
             txs_7d = f"{a.txs_7d}{'+' if a.txs_7d_more else ''}"
-            base = f"{a.tokens_in_db}/{len(a.tokens)}" if a.tokens else "-"
+            if a.rows_in_db is not None:
+                base = str(a.rows_in_db)
+            else:
+                base = f"{a.tokens_in_db}/{len(a.tokens)}" if a.tokens else "-"
             covers = _ago(a.oldest_read_ts, now) if a.read else "-"
             p(f"{_short(a.wallet):11} {a.label[:16]:16} {txs_7d:>6} {_ago(a.last_ts, now):>5} {a.read:>6} {covers:>5} "
               f"{a.kinds[BUY]:>6} {_ago(a.last_buy_ts, now) if a.last_buy_ts else '-':>5} {a.kinds[BUY_SMALL]:>5} {a.kinds[BUY_STABLE]:>5} {a.kinds[BUY_CURVE]:>5} "
               f"{a.kinds[SELL]:>5} {base:>7}  {a.diagnosis(self._min_sol, self._days)}")
         p("\núlt.c = hace cuánto fue la última compra que registra el bot (min_sol o más, o con stable).")
-        p("cubre = antigüedad de la más vieja leída (hasta dónde llegan las --txs).")
-        p("base = de los tokens de esas compras, cuántos están en alertas.db para esa wallet.")
+        if self._txs is not None:
+            p("cubre = antigüedad de la más vieja leída (hasta dónde llegan las --txs).")
+            p("base = de los tokens de esas compras, cuántos están en alertas.db para esa wallet.")
+        else:
+            p("leídas = transacciones contadas; cubre = primer día con datos.")
+            p("base = compras de la wallet registradas en alertas.db en la ventana.")
         diagnoses = Counter(a.diagnosis(self._min_sol, self._days).split(":")[0].split(" (")[0] for a in audits)
         p("\nResumen:")
         for text, n in diagnoses.most_common():
             p(f"  {n:3d}  {text}")
-        p(f"\nLlamadas al RPC: {rpc.calls}  (~{rpc.credits} créditos de Helius)")
+        if rpc is not None:
+            p(f"\nLlamadas al RPC: {rpc.calls}  (~{rpc.credits} créditos de Helius)")
 
 
 async def _run(config: Config, args: argparse.Namespace) -> None:
@@ -369,6 +347,16 @@ async def _run(config: Config, args: argparse.Namespace) -> None:
     try:
         banned = ledger.banned(now)
         audits = [WalletAudit(w, label, banned=banned.get(w)) for w, label in wallets.items()]
+        if args.base:
+            since = now - args.days * 86400
+            by_wallet: dict[str, list[tuple]] = {}
+            for row in ledger.activity(day_of(since)):
+                by_wallet.setdefault(row[0], []).append(row)
+            for a in audits:
+                fill_from_activity(a, by_wallet.get(a.wallet, []), now)
+                a.rows_in_db = ledger.rows_since(a.wallet, since)
+            Report(config.wallets_min_sol, args.days, None).print(audits, None, now)
+            return
         async with aiohttp.ClientSession() as session:
             rpc = Rpc(session, config.solana_rpc_url)
             reader = TransactionReader(rpc, args.txs, args.method)
@@ -393,6 +381,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--method", choices=METHODS, default=DEFAULT_METHOD,
                         help="helius: getTransactionsForAddress (10 créditos/100 tx); "
                              "rpc: getTransaction por firma (1 crédito/tx)")
+    parser.add_argument("--base", action="store_true",
+                        help="sin RPC: la actividad que guardó el bot en actividad_wallet")
     parser.add_argument("--wallet", nargs="+", metavar="DIRECCIÓN",
                         help="solo estas wallets (dirección o su principio)")
     parser.add_argument("--verbose", action="store_true")

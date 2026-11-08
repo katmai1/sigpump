@@ -27,6 +27,7 @@ from pathlib import Path
 
 import aiohttp  # type: ignore[import-not-found]
 
+from sigpump.activity import WalletActivity
 from sigpump.blacklist import ABANDONED_REASON, Blacklist
 from sigpump.solana import RpcClient, redact
 from sigpump.wallet_list import FollowedWallet, WalletList
@@ -190,6 +191,103 @@ def parse_buys(
     ]
 
 
+# Gasto mínimo en SOL para llamar compra a que suba un token: crear la cuenta
+# del token cuesta ~0,002 SOL de renta, y con menos sería un airdrop o una
+# transferencia en la que la wallet pagó la cuenta.
+MIN_BUY_SOL = 0.005
+# Programas de bonding curve de los launchpads (los mismos que
+# radar.BONDING_CURVE_DEX_IDS en DexScreener). Se miran en la transacción y no
+# en DexScreener: muchos tokens se graduaron después, y lo que importa es
+# dónde estaban cuando la wallet compró.
+CURVE_PROGRAMS = {
+    "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P": "pump.fun",
+    "LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj": "LaunchLab",
+    "dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN": "Meteora DBC",
+    "MoonCVVNZFSYkqNXP6bxHLPL6QQJiMagDL3qcqUQTrG": "Moonshot",
+}
+
+# Clases de transacción.
+BUY = "compra"
+BUY_SMALL = "compra pequeña"
+BUY_STABLE = "compra con stable"
+BUY_CURVE = "bonding curve"
+SELL = "venta"
+OTHER = "otra"
+# Las que el WebSocket descarta sin leerlas (no pueden ser compras).
+TX_FAILED = "fallida"
+TX_TRANSFER = "transferencia"
+# Las que parse_buys deja pasar: el bot las ve y las registra.
+SEEN_BY_BOT = (BUY, BUY_STABLE)
+
+
+@dataclass(frozen=True)
+class TxClass:
+    """Qué fue una transacción para la wallet: su clase, los tokens que
+    compró y el SOL que gastó (repartido entre ellos)."""
+    kind: str
+    mints: tuple[str, ...] = ()
+    sol_spent: float = 0.0
+
+
+def _programs(tx: dict) -> set[str]:
+    """Programas que aparecen en la transacción: cuentas (también las de
+    tablas de direcciones, que jsonParsed incluye), instrucciones internas y
+    logs. Un agregador como Jupiter llega a la curva por una interna."""
+    found: set[str] = set()
+    message = (tx.get("transaction") or {}).get("message") or {}
+    for key in message.get("accountKeys") or []:
+        pubkey = key.get("pubkey") if isinstance(key, dict) else key
+        if isinstance(pubkey, str):
+            found.add(pubkey)
+    meta = tx.get("meta") or {}
+    for loaded in (meta.get("loadedAddresses") or {}).values():
+        found.update(a for a in loaded or [] if isinstance(a, str))
+    for group in meta.get("innerInstructions") or []:
+        for ins in (group or {}).get("instructions") or []:
+            if isinstance(ins, dict) and isinstance(ins.get("programId"), str):
+                found.add(ins["programId"])
+    for line in meta.get("logMessages") or []:
+        if isinstance(line, str) and line.startswith("Program ") and " invoke [" in line:
+            found.add(line.split()[1])
+    return found
+
+
+def classify(tx: dict, wallet: str, min_sol: float) -> TxClass:
+    """Clase de `tx` para `wallet`, con el mismo cálculo de saldos que
+    parse_buys (que con min_sol descarta en silencio lo pequeño). La usan el
+    registro de actividad (activity.py) y wallet_audit.py."""
+    meta = tx.get("meta") or {}
+    if meta.get("err") is not None:
+        return TxClass(TX_FAILED)
+    pre = _token_amounts(meta.get("preTokenBalances"), wallet)
+    post = _token_amounts(meta.get("postTokenBalances"), wallet)
+    deltas = {mint: post.get(mint, 0.0) - pre.get(mint, 0.0) for mint in pre.keys() | post.keys()}
+    sol_spent = -deltas.get(WSOL_MINT, 0.0)
+    index = _account_index(tx, wallet)
+    pre_lamports, post_lamports = meta.get("preBalances") or [], meta.get("postBalances") or []
+    if index is not None and index < min(len(pre_lamports), len(post_lamports)):
+        spent = pre_lamports[index] - post_lamports[index]
+        if index == 0:
+            spent -= meta.get("fee") or 0
+        sol_spent += spent / LAMPORTS_PER_SOL
+    stable_spent = -sum(deltas.get(mint, 0.0) for mint in STABLE_MINTS)
+    bought = tuple(sorted(m for m, d in deltas.items() if d > 0 and m not in QUOTE_MINTS))
+    sold = [m for m, d in deltas.items() if d < 0 and m not in QUOTE_MINTS]
+
+    if bought and (sol_spent >= MIN_BUY_SOL or stable_spent > 0):
+        share = round(max(0.0, sol_spent) / len(bought), 4)
+        if _programs(tx) & CURVE_PROGRAMS.keys():
+            return TxClass(BUY_CURVE, bought, share)
+        if sol_spent >= min_sol:
+            return TxClass(BUY, bought, share)
+        if stable_spent > 0:
+            return TxClass(BUY_STABLE, bought, share)
+        return TxClass(BUY_SMALL, bought, share)
+    if sold and (sol_spent < 0 or stable_spent < 0):
+        return TxClass(SELL)
+    return TxClass(OTHER)
+
+
 def only_transfers(logs: object) -> bool:
     """True si los logs de una transacción muestran que solo invoca programas
     de transferencia (no puede ser una compra). Sin logs, o truncados, no se
@@ -273,6 +371,7 @@ class WalletWatcher:
         full_poll_seconds: float = 600.0,
         max_txs_per_hour: int = 0,
         max_inactive_seconds: float = 0.0,
+        activity: WalletActivity | None = None,
     ):
         # Compartido con la comprobación de autoridades: el tope del RPC es por API key.
         self._rpc_client = rpc
@@ -304,6 +403,8 @@ class WalletWatcher:
         self._last_active: dict[str, float] = {}
         # Suscripciones de la conexión actual del WebSocket.
         self._subs = _Subscriptions()
+        # Contadores por día y tipo de lo que hace cada wallet (None = no se guardan).
+        self._daily = activity
 
     @property
     def wallets(self) -> dict[str, FollowedWallet]:
@@ -425,6 +526,18 @@ class WalletWatcher:
             buys += wallet_buys
         return buys
 
+    def _read_buys(self, tx: dict, wallet: str, label: str, signature: str) -> list[WalletBuy]:
+        """Compras de una transacción leída, y la cuenta de su tipo."""
+        if self._daily is not None:
+            kind = classify(tx, wallet, self._min_sol)
+            self._daily.count(wallet, kind.kind, kind.sol_spent * len(kind.mints), tx.get("blockTime"))
+        return parse_buys(tx, wallet, label, signature, self._min_sol)
+
+    def _count(self, wallet: str, kind: str, ts: float | None = None) -> None:
+        """Cuenta una transacción que no se lee."""
+        if self._daily is not None:
+            self._daily.count(wallet, kind, ts=ts)
+
     def _mark_seen(self, signature: str) -> None:
         self._seen[signature] = None
         while len(self._seen) > SEEN_SIGNATURES_MAX:
@@ -476,7 +589,7 @@ class WalletWatcher:
                 self._pending[wallet] = rest + [s for s in self._pending.get(wallet, []) if s not in rest]
                 break
             if tx is not None:
-                buys += parse_buys(tx, wallet, info.label, signature, self._min_sol)
+                buys += self._read_buys(tx, wallet, info.label, signature)
         return buys
 
     async def _poll_wallet(self, wallet: str, info: FollowedWallet) -> list[WalletBuy]:
@@ -528,7 +641,11 @@ class WalletWatcher:
                 if retry:
                     break
                 if tx is not None:
-                    buys += parse_buys(tx, wallet, label, signature, self._min_sol)
+                    buys += self._read_buys(tx, wallet, label, signature)
+            elif signature not in self._seen:
+                # Fallida que el WebSocket no avisó (sin él, o caído).
+                self._count(wallet, TX_FAILED, entry.get("blockTime"))
+                self._mark_seen(signature)
             self._last_signature[wallet] = signature
         return buys
 
@@ -618,6 +735,7 @@ class WalletWatcher:
         # Una transacción fallida o una simple transferencia no compra nada:
         # no merece la consulta, ni ahora ni en la pasada completa.
         if value.get("err") is not None or only_transfers(value.get("logs")):
+            self._count(wallet, TX_FAILED if value.get("err") is not None else TX_TRANSFER)
             self._mark_seen(signature)
             return
         pending = self._pending.setdefault(wallet, [])

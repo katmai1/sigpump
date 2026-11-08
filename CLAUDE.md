@@ -36,6 +36,7 @@ Reglas:
 .venv/bin/python run.py --config config.toml           # el bot (no lanzarlo sin pedirlo)
 .venv/bin/python buyers.py <MINT> --minutes 10         # quién compró un token (gasta créditos)
 .venv/bin/python wallet_audit.py --txs 50              # qué hace cada wallet en la cadena (gasta créditos)
+.venv/bin/python wallet_audit.py --base                # lo mismo desde actividad_wallet (gratis)
 ```
 
 Python 3.11+ (usa `tomllib`); el `.venv` es 3.13. Dependencias en
@@ -51,6 +52,9 @@ consultarlo.
 - `sigpump/wallets.py`: detección de compras por saldos antes/después
   (polling RPC + WebSocket, pasada completa cada `full_poll_minutes`).
   `WalletWatcher` sondea, lee transacciones y echa bots y abandonadas.
+  `classify` dice qué fue cada transacción (compra, pequeña, curva, venta...).
+- `sigpump/activity.py`: `WalletActivity`, contadores por wallet, día y tipo
+  en la tabla `actividad_wallet` (se vuelcan cada 5 min y al parar).
 - `sigpump/wallet_list.py`: `WalletList`, el fichero de wallets menos la
   lista negra y los castigos temporales.
 - `sigpump/cooldowns.py`: `Cooldowns`, lo que el radar recuerda de las
@@ -67,6 +71,7 @@ consultarlo.
 - `sigpump/buyers.py`: herramienta aparte, a mano (`buyers.py` en la raíz la lanza).
 - `sigpump/wallet_audit.py`: herramienta aparte, a mano: clasifica las últimas
   transacciones de cada wallet del fichero y las cruza con la base (solo lee).
+  Con `--base` sale de `actividad_wallet`, sin RPC ni créditos.
 
 Todo es asyncio. Los tests usan dobles para la sesión HTTP, el RPC y el bot:
 ningún test toca la red.

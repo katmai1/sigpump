@@ -228,6 +228,19 @@ FROM alertas WHERE tipo = 'wallet'
 GROUP BY wallet ORDER BY ret_30m DESC;
 ```
 
+### Actividad de las wallets
+
+La tabla `actividad_wallet` cuenta, por wallet, día (hora local) y tipo,
+lo que hace cada wallet seguida, también lo que no llega a `alertas`:
+`compra` (`min_sol` o más), `compra pequeña`, `compra con stable`,
+`bonding curve`, `venta`, `otra`, y las que el WebSocket descarta sin leer
+(`fallida`, `transferencia`). Guarda `n`, el SOL gastado (`sol`) y la hora
+de la última (`ultima`). Son contadores y no una fila por transacción (las
+wallets seguidas hacían más de 28.000 a la semana): unos pocos MB al año.
+Se vuelcan cada 5 minutos y al parar; un corte pierde como mucho ese rato.
+No cuesta créditos: el bot ya lee esas transacciones. La tabla se crea en el
+primer volcado; las bases de antes no cambian en nada más.
+
 ## Requisitos
 
 - Python 3.11 o superior (usa `tomllib` de la librería estándar).
@@ -320,7 +333,13 @@ bonding curve, compra pero no está en la base, ok). No modifica ni
 ```bash
 python wallet_audit.py                       # todas, últimas 50 tx de 30 días
 python wallet_audit.py --wallet 5Q54 7Q54    # solo esas (dirección o su principio)
+python wallet_audit.py --base --days 7       # sin RPC: lo que contó el bot
 ```
+
+Con `--base` no gasta nada: el mismo informe sale de la tabla
+`actividad_wallet` (ver [Actividad de las wallets](#actividad-de-las-wallets)),
+que solo tiene datos desde que el bot corre con esta versión. Ahí las
+transacciones se cuentan todas, no solo las últimas `--txs`.
 
 Gasta créditos: por wallet, una página de firmas (1 crédito) y sus últimas
 `--txs` transacciones (10 créditos por cada 100 con Helius, 1 por
@@ -354,6 +373,7 @@ sigpump/
   telegram.py                 Formateo y envío de los avisos por Telegram
   tracker.py                  Registro SQLite de las compras y su resultado
   blacklist.py                Lista negra de wallets (tabla lista_negra)
+  activity.py                 Actividad por wallet y día (tabla actividad_wallet)
   buyers.py                   Herramienta aparte: quién compró un token
   wallet_audit.py             Herramienta aparte: qué hace en la cadena cada wallet
   util.py                     Conversión defensiva y métricas de los campos de la API

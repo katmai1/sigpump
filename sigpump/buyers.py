@@ -17,8 +17,9 @@ más barato); en otro RPC, una a una (--method rpc).
 
 Después se mira el historial de firmas de cada comprador (1 crédito por cada
 1000) para descartar las wallets nuevas y los bots, y dar la fecha de su
-primera transacción. Con --min-age-days se quedan solo las wallets cuya
-primera transacción tiene al menos esa antigüedad.
+primera transacción. Con --min-age-days (100 por defecto; 0 = sin filtro)
+se quedan solo las wallets cuya primera transacción tiene al menos esa
+antigüedad. Por defecto se cuentan las compras de 0,5 SOL o más (--min-sol).
 
 Piezas:
 - Rpc: llamadas al RPC con ritmo máximo y cuenta de créditos.
@@ -49,7 +50,7 @@ from sigpump.wallets import COMMITMENT, MAX_TRANSACTION_VERSION, parse_buys
 log = logging.getLogger()
 
 DEFAULT_MINUTES = 20.0
-DEFAULT_MIN_SOL = 2.0
+DEFAULT_MIN_SOL = 0.5
 # Transacciones leídas como máximo, entre el mint y todos sus pools: un token
 # con mucho volumen hace miles en 10 minutos, y cada una cuesta 0.1 créditos
 # con "helius" o 1 con "rpc".
@@ -81,7 +82,7 @@ DEFAULT_MAX_FAILED_PCT = 50.0
 # transacción (1 crédito cada una). Más allá, la fecha queda como "antes de".
 DEFAULT_HISTORY_PAGES = 5
 # Antigüedad mínima en días de la primera transacción (0 = sin filtro).
-DEFAULT_MIN_AGE_DAYS = 0.0
+DEFAULT_MIN_AGE_DAYS = 100.0
 # Firmas mínimas para juzgar el ritmo o las fallidas: con pocas no es fiable.
 MIN_TXS_FOR_BOT_CHECK = 100
 

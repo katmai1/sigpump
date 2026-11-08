@@ -92,9 +92,9 @@ class Clasificacion(unittest.TestCase):
     def test_envio_de_sol_es_otra(self):
         self.assertEqual(classify(_tx(1.0), WALLET, 0.1).kind, OTHER)
 
-    def test_fallida_es_otra(self):
+    def test_fallida(self):
         tx = _tx(0.5, post=[_saldo(TOKEN, 1000)], err={"InstructionError": [0, "Custom"]})
-        self.assertEqual(classify(tx, WALLET, 0.1).kind, OTHER)
+        self.assertEqual(classify(tx, WALLET, 0.1).kind, "fallida")
 
     def test_saldos_de_otra_wallet_no_cuentan(self):
         tx = _tx(0.0, post=[_saldo(TOKEN, 1000, owner=OTRA)])
@@ -260,6 +260,50 @@ class Informe(unittest.TestCase):
         self.assertIn("40 d", texto)
         self.assertIn("1  inactiva", texto)
         self.assertIn("1  ok", texto)
+
+
+
+class DesdeLaBase(unittest.TestCase):
+    """--base: la actividad que guardó el bot, sin RPC."""
+
+    def test_rellena_por_dia(self):
+        from sigpump.activity import day_of
+        from sigpump.wallet_audit import fill_from_activity
+
+        hoy, hace_10 = day_of(AHORA), day_of(AHORA - 10 * 86400)
+        filas = [
+            (WALLET, hoy, BUY, 2, 1.0, AHORA - 60),
+            (WALLET, hoy, "fallida", 3, 0.0, AHORA - 30),
+            (WALLET, hace_10, BUY_SMALL, 4, 0.2, AHORA - 10 * 86400),
+        ]
+        audit = fill_from_activity(WalletAudit(WALLET, "w"), filas, AHORA)
+        self.assertEqual((audit.read, audit.txs_7d, audit.failed_7d), (9, 5, 3))
+        self.assertEqual((audit.last_ts, audit.last_buy_ts), (AHORA - 30, AHORA - 60))
+        self.assertEqual(audit.spent[BUY_SMALL], [0.05] * 4)
+        self.assertEqual(day_of(audit.oldest_read_ts), hace_10)
+
+    def test_compra_sin_filas_en_la_base(self):
+        audit = WalletAudit(WALLET, "w", read=2, rows_in_db=0)
+        audit.kinds[BUY] = 2
+        self.assertEqual(audit.diagnosis(0.1, 30), "compra pero no está en la base")
+        audit.rows_in_db = 2
+        self.assertEqual(audit.diagnosis(0.1, 30), "ok")
+
+    def test_informe_sin_rpc(self):
+        audit = WalletAudit(WALLET, "ballena", read=2, rows_in_db=1, oldest_read_ts=AHORA - 86400)
+        audit.kinds[BUY] = 2
+        out = io.StringIO()
+        Report(0.1, 30, None).print([audit], None, AHORA, out=out)
+        texto = out.getvalue()
+        self.assertIn("Actividad guardada por el bot", texto)
+        self.assertIn("Datos desde", texto)
+        self.assertNotIn("Llamadas al RPC", texto)
+
+    def test_informe_con_tabla_vacia(self):
+        out = io.StringIO()
+        Report(0.1, 30, None).print([WalletAudit(WALLET, "w")], None, AHORA, out=out)
+        self.assertIn("La tabla está vacía", out.getvalue())
+        self.assertNotIn("inactiva", out.getvalue())
 
 
 if __name__ == "__main__":

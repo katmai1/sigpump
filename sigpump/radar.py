@@ -17,6 +17,7 @@ from pathlib import Path
 
 import aiohttp  # type: ignore[import-not-found]
 
+from sigpump.activity import WalletActivity
 from sigpump.blacklist import Blacklist, import_blacklist_file
 from sigpump.config import Config
 from sigpump.cooldowns import Cooldowns
@@ -86,6 +87,8 @@ class MemecoinRadar:
         self._summary = Summary()
         # Se crea en run(), con la sesión HTTP; el resumen cuenta sus llamadas.
         self._rpc: RpcClient | None = None
+        # Actividad por wallet y día; se crea en run() si hay base.
+        self._activity: WalletActivity | None = None
         hour = config.wallets_ranking_hour
         self._next_ranking = next_daily(time.time(), hour) if hour >= 0 and self._tracker else None
 
@@ -382,6 +385,8 @@ class MemecoinRadar:
         [wallets].interval_seconds y, con websocket, los avisos del RPC."""
         blacklist = None
         try:
+            if self._config.alert_log_path:
+                self._activity = WalletActivity(Path(self._config.alert_log_path))
             if self._tracker:
                 # Abre la base al arrancar (y no en el primer aviso) para que un
                 # problema con el archivo se vea enseguida en el log.
@@ -398,6 +403,8 @@ class MemecoinRadar:
                 self._tracker.close()
             if blacklist is not None:
                 blacklist.close()
+            if self._activity is not None:
+                self._activity.flush()
 
     def _open_blacklist(self) -> Blacklist | None:
         """La lista negra si [wallets].blacklist está activa, con el fichero
@@ -446,6 +453,7 @@ class MemecoinRadar:
                 self._config.wallets_full_poll_minutes * 60,
                 self._config.wallets_max_txs_per_hour,
                 self._config.wallets_max_inactive_days * 86400,
+                self._activity,
             )
             loops = [self._wallets_loop(client, alerter)]
             if self._config.wallets_websocket:
@@ -465,6 +473,8 @@ class MemecoinRadar:
                 log.exception("Error siguiendo las wallets")
             if self._summary.due():
                 self._log_summary()
+            if self._activity is not None and self._activity.due():
+                self._activity.flush()
             if self._next_ranking is not None and time.time() >= self._next_ranking:
                 await self.send_ranking(alerter)
             await asyncio.sleep(self._config.wallets_interval_seconds)

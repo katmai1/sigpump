@@ -329,16 +329,36 @@ class CheckHistoryTest(unittest.TestCase):
         self.assertIsNone(reason)
 
     def test_historial_incompleto_y_reciente_es_desconocido(self):
+        # 8 firmas/día: la página leída cubre 125 días; 180 piden ~1440 firmas.
         buyer, reason = _check(_historial(2500, 3 * 3600), pages=1, min_age_days=180)
-        self.assertTrue(reason.startswith("antigüedad desconocida"), reason)
+        self.assertTrue(buyer.age_unknown)
+        self.assertEqual(reason, "1000 tx en 125 días, harían falta ~2 páginas")
+
+    def test_reciente_con_historial_completo_no_es_desconocido(self):
+        buyer, _ = _check(_historial(300, 6 * 3600), min_age_days=180)
+        self.assertFalse(buyer.age_unknown)
 
     def test_split_separa_y_mantiene_orden(self):
         rpc = _HistoryRpc(_historial(300, 6 * 3600))
         buyers = [Buyer(BALLENA, sol_spent=5), Buyer(PEZ, sol_spent=3)]
         # Sin filtro de antigüedad (el valor por defecto lo tiene): aquí solo importa el orden.
-        kept, discarded = asyncio.run(HistoryFilter(rpc, min_age_days=0).split(buyers))
+        kept, unknown, discarded = asyncio.run(HistoryFilter(rpc, min_age_days=0).split(buyers))
         self.assertEqual([b.wallet for b in kept], [BALLENA, PEZ])
+        self.assertEqual((unknown, discarded), ([], []))
+
+    def test_split_aparta_la_antiguedad_sin_comprobar(self):
+        # Mismo historial para las dos: 2500 firmas cada 3 h, una página.
+        rpc = _HistoryRpc(_historial(2500, 3 * 3600))
+        buyers = [Buyer(BALLENA, sol_spent=5)]
+        history = HistoryFilter(rpc, max_pages=1, min_age_days=180)
+        kept, unknown, discarded = asyncio.run(history.split(buyers))
+        self.assertEqual(kept, [])
+        self.assertEqual([b.wallet for b, _ in unknown], [BALLENA])
         self.assertEqual(discarded, [])
+        rpc = _HistoryRpc(_historial(300, 6 * 3600))
+        kept, unknown, discarded = asyncio.run(HistoryFilter(rpc, min_age_days=180).split([Buyer(PEZ)]))
+        self.assertEqual([(b.wallet, r) for b, r in discarded], [(PEZ, "reciente: 75 días")])
+        self.assertEqual(unknown, [])
 
 
 if __name__ == "__main__":

@@ -19,13 +19,16 @@ Después se mira el historial de firmas de cada comprador (1 crédito por cada
 1000) para descartar las wallets nuevas y los bots, y dar la fecha de su
 primera transacción. Con --min-age-days (100 por defecto; 0 = sin filtro)
 se quedan solo las wallets cuya primera transacción tiene al menos esa
-antigüedad. Por defecto se cuentan las compras de 0,5 SOL o más (--min-sol).
+antigüedad. Las que no se pudieron fechar (muy activas: --history-pages no
+llega a su primera transacción) salen aparte, sin comprobar, en vez de entre
+las descartadas. Por defecto se cuentan las compras de 0,5 SOL o más (--min-sol).
 
 Piezas:
 - Rpc: llamadas al RPC con ritmo máximo y cuenta de créditos.
 - TransactionReader: lee las transacciones de la ventana (helius o rpc).
 - BuyerFinder: saca de ellas las compras del token y las suma por wallet.
-- HistoryFilter: revisa el historial de cada comprador y descarta nuevas y bots.
+- HistoryFilter: revisa el historial de cada comprador y descarta nuevas y bots;
+  aparta las de antigüedad sin comprobar.
 - Report: imprime el resultado.
 """
 
@@ -34,6 +37,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import math
 import time
 import tomllib
 from dataclasses import dataclass
@@ -103,6 +107,9 @@ class Buyer:
     # history_complete, si no solo se sabe que es anterior.
     first_ts: float | None = None
     history_complete: bool = False
+    # No se llegó a una transacción lo bastante antigua ni a la primera: no
+    # se sabe si pasa min_age_days.
+    age_unknown: bool = False
 
     @property
     def history_text(self) -> str:
@@ -368,18 +375,26 @@ class HistoryFilter:
         self._max_pages = max_pages
         self._min_age_days = min_age_days
 
-    async def split(self, buyers: list[Buyer]) -> tuple[list[Buyer], list[tuple[Buyer, str]]]:
-        """Separa los compradores que operan habitualmente de los descartados,
-        estos con su motivo. Mantiene el orden."""
+    async def split(
+        self, buyers: list[Buyer]
+    ) -> tuple[list[Buyer], list[tuple[Buyer, str]], list[tuple[Buyer, str]]]:
+        """Separa los compradores que operan habitualmente, los de antigüedad
+        sin comprobar y los descartados, estos dos con su motivo. Mantiene el
+        orden. Las sin comprobar van aparte porque no han fallado ningún
+        filtro: el 2026-11-08 tres wallets de ~110 tx/día salían como
+        descartadas solo porque 5 páginas no llegaban a 100 días."""
         kept: list[Buyer] = []
+        unknown: list[tuple[Buyer, str]] = []
         discarded: list[tuple[Buyer, str]] = []
         reasons = await asyncio.gather(*(self._safe_check(b) for b in buyers))
         for buyer, reason in zip(buyers, reasons):
             if reason is None:
                 kept.append(buyer)
+            elif buyer.age_unknown:
+                unknown.append((buyer, reason))
             else:
                 discarded.append((buyer, reason))
-        return kept, discarded
+        return kept, unknown, discarded
 
     async def _safe_check(self, buyer: Buyer) -> str | None:
         try:
@@ -423,13 +438,17 @@ class HistoryFilter:
         if self._min_age_days <= 0:
             return None
         if buyer.first_ts is None:
+            buyer.age_unknown = True
             return "antigüedad desconocida"
         age_days = (time.time() - buyer.first_ts) / 86400
         if age_days >= self._min_age_days:
             return None
         if buyer.history_complete:
             return f"reciente: {age_days:.0f} días"
-        return f"antigüedad desconocida: {buyer.history_txs} tx en {age_days:.0f} días (--history-pages)"
+        buyer.age_unknown = True
+        # Al ritmo visto, cuántas páginas harían falta para llegar a min_age_days.
+        pages = math.ceil(buyer.history_txs / max(age_days, 1) * self._min_age_days / SIGNATURES_PAGE)
+        return f"{buyer.history_txs} tx en {age_days:.0f} días, harían falta ~{pages} páginas"
 
     def _bot_reason(self, entries: list[dict]) -> str | None:
         """Por qué parece un bot según sus firmas más recientes (lo que hace
@@ -456,22 +475,36 @@ class Report:
         self._window = window
         self._min_sol = min_sol
 
-    def print(self, kept: list[Buyer], discarded: list[tuple[Buyer, str]], rpc: Rpc) -> None:
+    def print(
+        self,
+        kept: list[Buyer],
+        unknown: list[tuple[Buyer, str]],
+        discarded: list[tuple[Buyer, str]],
+        rpc: Rpc,
+    ) -> None:
         print(
             f"\n{len(kept)} wallets habituales compraron >= {self._min_sol:g} SOL"
             f" {self._window}:\n"
         )
         for buyer in kept:
-            last = time.strftime("%H:%M:%S", time.localtime(buyer.last_ts))
-            print(
-                f"{buyer.wallet}  {buyer.sol_spent:10.3f} SOL  {buyer.buys:3d} compras  última {last}"
-                f"  {buyer.history_text:>7}  desde {buyer.since_text}"
-            )
+            print(self._row(buyer))
+        if unknown:
+            print(f"\nAntigüedad sin comprobar ({len(unknown)}), más --history-pages para saberla:")
+            for buyer, reason in unknown:
+                print(f"{self._row(buyer)}  ({reason})")
         if discarded:
             print(f"\nDescartadas ({len(discarded)}):")
             for buyer, reason in discarded:
                 print(f"{buyer.wallet}  {buyer.sol_spent:10.3f} SOL  {reason}")
         print(f"\nLlamadas al RPC: {rpc.calls}  (~{rpc.credits} créditos de Helius)")
+
+    @staticmethod
+    def _row(buyer: Buyer) -> str:
+        last = time.strftime("%H:%M:%S", time.localtime(buyer.last_ts))
+        return (
+            f"{buyer.wallet}  {buyer.sol_spent:10.3f} SOL  {buyer.buys:3d} compras  última {last}"
+            f"  {buyer.history_text:>7}  desde {buyer.since_text}"
+        )
 
 
 async def _pool_addresses(session: aiohttp.ClientSession, chain_id: str, mint: str) -> list[str]:
@@ -538,8 +571,8 @@ async def _run(config: Config, args: argparse.Namespace, since: float, until: fl
             rpc, args.min_history, args.max_txs_per_day, args.max_failed_pct, args.history_pages,
             args.min_age_days,
         )
-        kept, discarded = await history.split(buyers)
-    Report(window, args.min_sol).print(kept, discarded, rpc)
+        kept, unknown, discarded = await history.split(buyers)
+    Report(window, args.min_sol).print(kept, unknown, discarded, rpc)
 
 
 def _parse_args() -> argparse.Namespace:

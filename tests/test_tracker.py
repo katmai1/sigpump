@@ -303,7 +303,7 @@ class TestAlertTracker(unittest.IsolatedAsyncioTestCase):
         """Acierto es llegar al objetivo sin haber caído antes más del stop.
         Las que todavía no llegaron ni cayeron tanto solo cuentan (como
         fallo) al acabar el seguimiento; las compras repetidas, en bonding
-        curve o de antes del camino del precio no cuentan."""
+        curve, de antes del camino del precio o sin resolver no cuentan."""
         tracker = self._tracker()
         viejo = time.time() - 2 * 86400
         for token, camino, campos in [
@@ -315,6 +315,8 @@ class TestAlertTracker(unittest.IsolatedAsyncioTestCase):
             ("E", {"peor": 0, "picos": [[50, 0]]}, {"bonding_curve": 1}),
             ("F", None, {"ret_60m_pct": 30}),
             ("G", {"peor": -3, "picos": []}, {"timestamp": viejo}),
+            # path_backfill.py no supo qué llegó antes: no cuenta.
+            ("H", {"peor": -20, "picos": [[10, -20]], "fuente": "sin resolver"}, {"timestamp": viejo}),
         ]:
             row_id = tracker.record(_pair(), sent=True)
             tracker.update_row(row_id, {

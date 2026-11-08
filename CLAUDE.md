@@ -37,6 +37,7 @@ Reglas:
 .venv/bin/python buyers.py <MINT> --minutes 10         # quién compró un token (gasta créditos)
 .venv/bin/python wallet_audit.py --txs 50              # qué hace cada wallet en la cadena (gasta créditos)
 .venv/bin/python wallet_audit.py --base                # lo mismo desde actividad_wallet (gratis)
+.venv/bin/python path_backfill.py --cache velas.json  # aciertos de antes del 7-nov (GeckoTerminal; --escribir toca la base)
 ```
 
 Python 3.11+ (usa `tomllib`); el `.venv` es 3.13. Dependencias en
@@ -72,6 +73,9 @@ consultarlo.
 - `sigpump/wallet_audit.py`: herramienta aparte, a mano: clasifica las últimas
   transacciones de cada wallet del fichero y las cruza con la base (solo lee).
   Con `--base` sale de `actividad_wallet`, sin RPC ni créditos.
+- `sigpump/path_backfill.py`: herramienta aparte, a mano: rellena `camino_precio`
+  de las compras de antes del 2026-11-07 (velas de GeckoTerminal donde hace falta).
+  Con `--escribir` escribe en `alertas.db`: solo con permiso.
 
 Todo es asyncio. Los tests usan dobles para la sesión HTTP, el RPC y el bot:
 ningún test toca la red.

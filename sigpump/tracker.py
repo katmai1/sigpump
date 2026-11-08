@@ -75,6 +75,8 @@ TrackRecord = tuple[tuple[int, float, int], ...]
 # habían tocado +8% y -15% en esa media hora. Se guardan los dos y no si
 # acertó o no para que los umbrales de acierto se puedan cambiar después.
 _PATH = "camino_precio"
+# "fuente" de los caminos que path_backfill.py no pudo resolver: no cuentan.
+UNRESOLVED_PATH = "sin resolver"
 
 
 def extend_path(path: dict, ret: float) -> dict:
@@ -504,7 +506,13 @@ class AlertTracker:
         cutoff = self._cutoff(now)
         rates: dict[str, tuple[int, int]] = {}
         for row in rows:
-            hit = path_hit(json.loads(row[_PATH]), hit_pct, max_drop_pct)
+            path = json.loads(row[_PATH])
+            # path_backfill.py rehízo las de antes del 2026-11-07; las que
+            # tocaron objetivo y stop sin velas que digan cuál fue antes no
+            # se sabe si acertaron, y contarlas como fallo hundía a la wallet.
+            if path.get("fuente") == UNRESOLVED_PATH:
+                continue
+            hit = path_hit(path, hit_pct, max_drop_pct)
             if hit is None:
                 if row["ultimo"] is None and row["timestamp"] > cutoff:
                     continue

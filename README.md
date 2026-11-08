@@ -137,8 +137,10 @@ a +`hit_pct` (8% por defecto) sin haber caído antes más de
 habrían cerrado ganando. Se mira en todas las muestras del seguimiento, en
 orden (columna `camino_precio`). Una compra que todavía no llegó al objetivo
 ni cayó hasta el stop no cuenta hasta que acaba su seguimiento (a las 24 h);
-entonces cuenta como fallo. Solo cuentan las compras registradas desde el
-2026-11-07: las de antes no guardaban el orden de los precios.
+entonces cuenta como fallo. Las compras registradas antes del 2026-11-07
+no guardaban el orden de los precios: se rellenan a mano (las que no se
+pueden resolver no cuentan) con
+`path_backfill.py` (ver [Rellenar los aciertos de antes](#rellenar-los-aciertos-de-antes)).
 Mientras la wallet no tenga ninguna medida, el aviso dice "sin datos
 todavía" en vez del porcentaje.
 
@@ -196,7 +198,9 @@ después:
 - `camino_precio`: JSON con lo peor visto en todo el seguimiento (`peor`) y,
   en orden, cada nuevo máximo con lo peor visto antes de llegar a él
   (`picos`: `[[máximo, peor antes], ...]`). De acá salen los aciertos del
-  aviso. NULL en las filas de antes del 2026-11-07.
+  aviso. NULL en las filas de antes del 2026-11-07 hasta pasar
+  `path_backfill.py`; las que rellena llevan `fuente` (`registro`,
+  `geckoterminal` o `sin resolver`).
 - `enviada = 0` son compras descartadas, con `motivo_descarte`: sirven para
   comprobar si los filtros tiran señales buenas.
 - `pasa_filtros_par = 1` si el par pasó los filtros: se avisó, o se descartó
@@ -346,6 +350,36 @@ Gasta créditos: por wallet, una página de firmas (1 crédito) y sus últimas
 transacción con `--method rpc`). Las wallets sin transacciones en `--days`
 días no pasan de la página de firmas.
 
+### Rellenar los aciertos de antes
+
+[sigpump/path_backfill.py](sigpump/path_backfill.py) rehace `camino_precio`
+de las primeras compras de antes del 2026-11-07 (sin las de bonding curve),
+para que cuenten en los aciertos del aviso. Con el mejor y el peor de los
+primeros 30 minutos y los checkpoints de 1 h, 4 h y 24 h ya se sabe el
+resultado, salvo cuando en esa media hora se tocaron el objetivo y el stop
+(789 de 2629): para esas pide velas de 1 minuto del pool a GeckoTerminal
+(API pública, sin créditos del RPC; una llamada cada 6 s, unos 80 min) y
+mira qué llegó antes. Si las dos caen en el mismo minuto cuenta el stop
+primero. Si las velas del pool no llegan a las dos marcas (o GeckoTerminal no
+tiene velas de ese pool) prueba con otros dos pools del mismo token (`pool`
+en el JSON dice cuál); si tampoco, se queda con el camino del registro, que
+pone el peor antes del mejor, y sale como `sin resolver`: esas no cuentan
+en los aciertos (no se sabe si acertaron). Con `--reintentar` se vuelven a
+pasar, y solo esas se sobrescriben.
+
+Los caminos de `registro` valen para el `hit_pct` y el `hit_max_drop_pct`
+con los que se rellenaron: si se cambian, hay que borrarlos y volver a
+pasar. Nunca pisa un camino del seguimiento en directo.
+
+```bash
+python path_backfill.py --cache velas.json              # solo el informe
+python path_backfill.py --cache velas.json --escribir   # lo guarda en la base
+python path_backfill.py --cache velas.json --escribir --reintentar   # otra vez las sin resolver
+```
+
+Para deshacerlo:
+`UPDATE alertas SET camino_precio = NULL WHERE json_extract(camino_precio, '$.fuente') IS NOT NULL`.
+
 ## Tests
 
 Los tests usan solo `unittest` de la stdlib (no hace falta instalar nada
@@ -376,8 +410,10 @@ sigpump/
   activity.py                 Actividad por wallet y día (tabla actividad_wallet)
   buyers.py                   Herramienta aparte: quién compró un token
   wallet_audit.py             Herramienta aparte: qué hace en la cadena cada wallet
+  path_backfill.py            Herramienta aparte: aciertos de las compras de antes del 2026-11-07
   util.py                     Conversión defensiva y métricas de los campos de la API
 buyers.py                 CLI de sigpump/buyers.py (gasta créditos del RPC)
 wallet_audit.py           CLI de sigpump/wallet_audit.py (gasta créditos del RPC)
+path_backfill.py          CLI de sigpump/path_backfill.py (GeckoTerminal, sin créditos)
 tests/                    Tests (stdlib unittest, sin red)
 ```

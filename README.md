@@ -304,6 +304,29 @@ y llamadas al RPC desde el resumen anterior:
 Resumen de 1 h: 42 compras de wallets seguidas, 5 avisos, 30 descartadas (dex_ids 12, min_txns_m5 8, ...), 4 sin pool, 3 repetidas en cooldown | 48 wallets (2 castigadas), WebSocket conectado | 3120 llamadas al RPC
 ```
 
+### Revisar las wallets en la cadena
+
+La base solo guarda las compras que llegan al radar: las de menos de
+`min_sol` no dejan rastro y las de bonding curve (sin `bonding_curve`) solo
+salen en el log. Para saber por qué una wallet no avisa,
+[sigpump/wallet_audit.py](sigpump/wallet_audit.py) lee en el RPC sus últimas
+transacciones y las clasifica: compras de `min_sol` o más, pequeñas, con
+stablecoin o en bonding curve (por el programa de la transacción, no por
+DexScreener), ventas y otras. Cruza las compras con `alertas.db` y da un
+diagnóstico por wallet (inactiva, solo vende, solo compras pequeñas, solo
+bonding curve, compra pero no está en la base, ok). No modifica ni
+`wallets.txt` ni la base.
+
+```bash
+python wallet_audit.py                       # todas, últimas 50 tx de 30 días
+python wallet_audit.py --wallet 5Q54 7Q54    # solo esas (dirección o su principio)
+```
+
+Gasta créditos: por wallet, una página de firmas (1 crédito) y sus últimas
+`--txs` transacciones (10 créditos por cada 100 con Helius, 1 por
+transacción con `--method rpc`). Las wallets sin transacciones en `--days`
+días no pasan de la página de firmas.
+
 ## Tests
 
 Los tests usan solo `unittest` de la stdlib (no hace falta instalar nada
@@ -332,7 +355,9 @@ sigpump/
   tracker.py                  Registro SQLite de las compras y su resultado
   blacklist.py                Lista negra de wallets (tabla lista_negra)
   buyers.py                   Herramienta aparte: quién compró un token
+  wallet_audit.py             Herramienta aparte: qué hace en la cadena cada wallet
   util.py                     Conversión defensiva y métricas de los campos de la API
 buyers.py                 CLI de sigpump/buyers.py (gasta créditos del RPC)
+wallet_audit.py           CLI de sigpump/wallet_audit.py (gasta créditos del RPC)
 tests/                    Tests (stdlib unittest, sin red)
 ```

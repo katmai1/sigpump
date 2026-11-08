@@ -26,7 +26,7 @@ Reglas:
 - No arrancar, parar ni reiniciar el bot sin que se pida. Para probar, usar
   los tests, no `run.py` contra el config real: manda avisos de verdad a
   Telegram.
-- `buyers.py` gasta créditos del RPC: ejecutarlo solo si se pide.
+- `buyers.py` y `wallet_audit.py` gastan créditos del RPC: ejecutarlos solo si se pide.
 
 ## Comandos
 
@@ -35,6 +35,7 @@ Reglas:
 .venv/bin/python -m unittest tests.test_avisos         # un módulo
 .venv/bin/python run.py --config config.toml           # el bot (no lanzarlo sin pedirlo)
 .venv/bin/python buyers.py <MINT> --minutes 10         # quién compró un token (gasta créditos)
+.venv/bin/python wallet_audit.py --txs 50              # qué hace cada wallet en la cadena (gasta créditos)
 ```
 
 Python 3.11+ (usa `tomllib`); el `.venv` es 3.13. Dependencias en
@@ -64,6 +65,8 @@ consultarlo.
   +5m…+24h), `blacklist.py` (tabla `lista_negra`), `config.py` (carga y
   validación del TOML), `util.py` (conversión defensiva de campos de la API).
 - `sigpump/buyers.py`: herramienta aparte, a mano (`buyers.py` en la raíz la lanza).
+- `sigpump/wallet_audit.py`: herramienta aparte, a mano: clasifica las últimas
+  transacciones de cada wallet del fichero y las cruza con la base (solo lee).
 
 Todo es asyncio. Los tests usan dobles para la sesión HTTP, el RPC y el bot:
 ningún test toca la red.

@@ -119,6 +119,12 @@ class Config:
     # con el que se mide esa mediana. A 30 min muchas parecían buenas y se
     # hundían horas después.
     wallets_loser_checkpoint_minutes: int = _key("wallets.loser_checkpoint_minutes", 30)
+    # Una wallet con al menos loser_hit_min_tokens tokens medidos cuyos
+    # aciertos (hit_pct antes que hit_max_drop_pct, los del aviso) no llegan
+    # a loser_hit_min_pct entra en la lista negra sola: se deja de consultar
+    # en el RPC. 0 = no hacerlo.
+    wallets_loser_hit_min_tokens: int = _key("wallets.loser_hit_min_tokens", 0)
+    wallets_loser_hit_min_pct: float = _key("wallets.loser_hit_min_pct", 50.0)
     # Hora local (0-23) a la que se manda cada día por Telegram el ranking de
     # las wallets seguidas por su historial en el registro. -1 = no mandarlo.
     wallets_ranking_hour: int = _key("wallets.ranking_hour", -1)
@@ -218,6 +224,14 @@ class Config:
         if self.wallets_loser_min_signals < 0:
             raise ValueError(
                 f"[wallets].loser_min_signals debe ser >= 0 ({self.wallets_loser_min_signals})"
+            )
+        if self.wallets_loser_hit_min_tokens < 0:
+            raise ValueError(
+                f"[wallets].loser_hit_min_tokens debe ser >= 0 ({self.wallets_loser_hit_min_tokens})"
+            )
+        if not 0 <= self.wallets_loser_hit_min_pct <= 100:
+            raise ValueError(
+                f"[wallets].loser_hit_min_pct debe estar entre 0 y 100 ({self.wallets_loser_hit_min_pct})"
             )
         for name in (
             "min_pair_age_minutes", "max_price_change_h1_pct", "max_price_change_m5_pct", "min_market_cap_usd",

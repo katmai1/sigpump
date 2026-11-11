@@ -93,6 +93,18 @@ loser_max_median_ret_pct = -50
 # A 30 min casi todas las compras parecían buenas y se hundían horas o días
 # después; a 24 h se ve.
 loser_checkpoint_minutes = 1440
+# Lista negra automática por aciertos: una wallet con al menos
+# loser_hit_min_tokens tokens medidos que acierta menos de loser_hit_min_pct
+# (hit_pct antes que hit_max_drop_pct, lo mismo que dice el aviso) entra sola
+# en la lista negra (requiere blacklist) y se deja de consultar en el RPC.
+# 0 = no hacerlo. 2026-11-11: la media de todas es 58%. Simulado en el tiempo
+# (cada compra con lo cerrado antes), con 30 tokens y el 50% habrían caído 3
+# wallets y 18 de 1275 avisos, peores a 4 h y 24 h (-3% y -11% de mediana
+# frente a -1% y -8%) aunque sus tokens acertaban el 71% (el resto, el 61%).
+# Con el 60% caían 94 avisos que daban mejor (+0% y -4%): no predecía. Es un
+# corte para ir limpiando la lista y hacer sitio a wallets nuevas.
+loser_hit_min_tokens = 30
+loser_hit_min_pct = 50
 # Hora local (0-23) a la que llega cada día por Telegram el ranking de las
 # wallets seguidas por la mediana de sus tokens a 1 h, 4 h y 24 h, para ver
 # cuáles sobran. -1 = no mandarlo. 2026-10-24: ordenando

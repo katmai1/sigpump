@@ -122,11 +122,14 @@ compra cae `rug_drop_pct` (90% por defecto) en el seguimiento, y las que con
 al menos `loser_min_signals` tokens medidos tienen una mediana de
 `loser_max_median_ret_pct` o peor en el checkpoint `loser_checkpoint_minutes`
 (30 min por defecto; en 1440, a 24 h, se ven las que a 30 min parecían
-buenas y se hundían después). Se quitan del fichero de wallets y, si se
-vuelven a añadir, se quitan otra vez. La de rugs solo cuenta las compras
+buenas y se hundían después), y las que con al menos `loser_hit_min_tokens`
+tokens medidos aciertan menos de `loser_hit_min_pct` (50% por defecto; los
+mismos aciertos del aviso, ver abajo): así la lista se va limpiando de las
+que rinden peor y se deja de gastar RPC en ellas. Se quitan del fichero de
+wallets y, si se vuelven a añadir, se quitan otra vez. La de rugs solo cuenta las compras
 cuyo par pasó los filtros (dex, moneda, edad, cambio 1h, market cap,
 actividad, volumen sobre market cap y autoridades): un rug en un par de 3 minutos que nunca se iba a
-avisar no dice nada de la wallet. La de resultados las cuenta todas (menos
+avisar no dice nada de la wallet. Las de resultados y aciertos las cuentan todas (menos
 las de bonding curve): elegir mal tokens es elegir mal aunque no se avisen,
 y con los filtros estrictos casi nunca llegaría a tener tokens medidos.
 
@@ -289,7 +292,8 @@ Secciones disponibles:
   tienen que coincidir en un token para avisar), un aviso por token
   (`token_cooldown_minutes`, `realert_new_wallets`), tope de actividad
   (`max_tokens_per_hour`), bots (`max_txs_per_hour`), abandonadas (`max_inactive_days`), lista negra (`blacklist`, `rug_drop_pct`,
-  `loser_min_signals`, `loser_max_median_ret_pct`, `loser_checkpoint_minutes`), ranking diario
+  `loser_min_signals`, `loser_max_median_ret_pct`, `loser_checkpoint_minutes`,
+  `loser_hit_min_tokens`, `loser_hit_min_pct`), ranking diario
   (`ranking_hour`), aciertos del aviso (`hit_pct`, `hit_max_drop_pct`), advertencia de volumen
   de bots (`bot_volume_min_txns_m5`, `bot_volume_max_usd_per_tx`,
   `bot_volume_buy_margin_pct`) y filtros del par

@@ -60,6 +60,8 @@ class TestConfigValidation(unittest.TestCase):
             dict(wallets_max_inactive_days=-1),
             dict(wallets_rug_drop_pct=150),
             dict(wallets_loser_min_signals=-1),
+            dict(wallets_loser_hit_min_tokens=-1),
+            dict(wallets_loser_hit_min_pct=101),
             dict(wallets_token_cooldown_minutes=-1),
             dict(wallets_min_pair_age_minutes=-1),
             dict(wallets_max_price_change_h1_pct=-1),

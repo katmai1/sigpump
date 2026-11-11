@@ -462,6 +462,40 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list(radar._wallet_watcher.wallets), [])
         self.assertIn("ballena: mediana -60% a 24 h en 3 tokens", _motivos(negra))
 
+    async def test_wallet_con_pocos_aciertos_va_a_la_lista_negra(self):
+        """WALLET acierta 1 de 3 (33%) y OTRA 2 de 3 (67%), con un mínimo de
+        50%. La tercera wallet acierta 0 de 2: con menos de 3 tokens no se juzga."""
+        tmp = self.path.parent
+        tercera = "3" * 44
+        wallets_txt, negra = tmp / "wallets.txt", _abrir_negra(self, tmp / "negra.db")
+        wallets_txt.write_text(f"{WALLET}  # ballena\n{OTRA}  # buena\n{tercera}  # nueva\n", encoding="utf-8")
+        compras = (
+            [_buy(mint=f"T{i}") for i in range(3)] + [_buy(wallet=OTRA, mint=f"T{i}") for i in range(3)]
+            + [_buy(wallet=tercera, mint=f"T{i}") for i in range(2)]
+        )
+        radar = self._radar(
+            compras, wallets_blacklist=True, wallets_loser_hit_min_tokens=3, wallets_loser_hit_min_pct=50,
+        )
+        await radar.run_once(_FakeClient(pairs=[_pair(f"T{i}") for i in range(3)]), _FakeAlerter())
+        acierto, fallo = '{"peor": -3, "picos": [[12, -3]]}', '{"peor": -20, "picos": []}'
+        for row, camino in zip(self._rows(), [acierto, fallo, fallo, acierto, acierto, fallo, fallo, fallo]):
+            self._anotar(radar, row["id"], {"camino_precio": camino})
+        self._seguir(radar, wallets_txt, negra)
+        radar._blacklist_low_hits()
+        self.assertEqual(sorted(radar._wallet_watcher.wallets), sorted([OTRA, tercera]))
+        self.assertIn("ballena: aciertos 33% en 3 tokens", _motivos(negra))
+
+    async def test_lista_negra_por_aciertos_apagada(self):
+        tmp = self.path.parent
+        wallets_txt, negra = tmp / "wallets.txt", _abrir_negra(self, tmp / "negra.db")
+        wallets_txt.write_text(f"{WALLET}  # ballena\n", encoding="utf-8")
+        radar = self._radar([_buy()], wallets_blacklist=True, wallets_loser_hit_min_tokens=0)
+        await radar.run_once(_FakeClient(pairs=[_pair("TOK")]), _FakeAlerter())
+        self._anotar(radar, self._rows()[0]["id"], {"camino_precio": '{"peor": -20, "picos": []}'})
+        self._seguir(radar, wallets_txt, negra)
+        radar._blacklist_low_hits()
+        self.assertEqual(list(radar._wallet_watcher.wallets), [WALLET])
+
     async def test_wallet_con_pocas_senales_no_se_juzga(self):
         tmp = self.path.parent
         wallets_txt, negra = tmp / "wallets.txt", _abrir_negra(self, tmp / "negra.db")

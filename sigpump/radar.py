@@ -197,6 +197,25 @@ class MemecoinRadar:
                 wallet, info.label, f"mediana {median:+.0f}% a {format_minutes(minutes)} en {len(returns)} tokens"
             )
 
+    def _blacklist_low_hits(self) -> None:
+        """Mete en la lista negra las wallets seguidas que, con al menos
+        [wallets].loser_hit_min_tokens tokens medidos, aciertan menos de
+        loser_hit_min_pct (los aciertos del aviso): no vale la pena seguir
+        gastando RPC en ellas y su hueco es para wallets nuevas. Cuenta lo
+        mismo que el aviso (hit_rates): las compras avisadas y las descartadas."""
+        watcher = self._wallet_watcher
+        cfg = self._config
+        if not (self._tracker and watcher and cfg.wallets_loser_hit_min_tokens and cfg.wallets_blacklist):
+            return
+        rates = self._tracker.hit_rates(cfg.wallets_hit_pct, cfg.wallets_hit_max_drop_pct)
+        for wallet, (hits, total) in rates.items():
+            info = watcher.wallets.get(wallet)
+            if info is None or total < cfg.wallets_loser_hit_min_tokens:
+                continue
+            if hits / total * 100 >= cfg.wallets_loser_hit_min_pct:
+                continue
+            watcher.ban(wallet, info.label, f"aciertos {hits / total:.0%} en {total} tokens")
+
     def _blacklist_hyperactive(self, buy: WalletBuy) -> None:
         """Mete en la lista negra la wallet de `buy` si pasó de
         [wallets].max_tokens_per_hour: compra de todo y no sirve copiarla."""
@@ -230,6 +249,7 @@ class MemecoinRadar:
                 log.exception("Error actualizando el registro de alertas")
         self._blacklist_ruggers()
         self._blacklist_losers()
+        self._blacklist_low_hits()
         buys = await self._wallet_watcher.poll()
         if not buys:
             return

@@ -23,6 +23,18 @@ verbose = false
 # (mintAuthority) ni congelar (freezeAuthority). Si el RPC no responde, la
 # señal sale igual y queda el aviso en el log.
 check_token_authorities = true
+# Registra en la base cuánto supply tienen el creador del token (dev_pct) y
+# sus 10 mayores holders (top10_pct, sin pools, bonding curves ni lo quemado)
+# en cada compra, avisada o descartada, y lo pone en el aviso. No filtra:
+# 2026-11-11, había señales con el dev muy cargado pero ningún dato para
+# saber si esos tokens dan peor; con un par de semanas registradas se mide.
+# Gasta unas 3-5 llamadas al RPC por token (más las páginas de abajo la
+# primera vez). Apagado por defecto.
+check_token_holders = true
+# Páginas de 1000 firmas que se buscan hacia atrás en el historial del mint
+# para dar con su creación (quién la pagó es el dev). Un token con más
+# transacciones que esto queda con dev_pct vacío. 0 = no buscar el dev.
+creator_max_pages = 3
 rpc_url = "https://api.mainnet-beta.solana.com"
 
 [wallets]

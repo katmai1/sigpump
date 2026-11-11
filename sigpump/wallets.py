@@ -29,6 +29,7 @@ import aiohttp  # type: ignore[import-not-found]
 
 from sigpump.activity import WalletActivity
 from sigpump.blacklist import ABANDONED_REASON, Blacklist
+from sigpump.holders import Holdings
 from sigpump.solana import RpcClient, redact
 from sigpump.wallet_list import FollowedWallet, WalletList
 
@@ -103,13 +104,16 @@ class WalletSignal:
     todavía no se graduó a un AMM. `transfer_fee_bps` es la comisión de
     transferencia del token (Token-2022), None si no se sabe. `hits` son
     los (aciertos, tokens medidos) de la wallet en el registro: (0, 0) si
-    todavía no tiene ninguno medido y None si no hay registro."""
+    todavía no tiene ninguno medido y None si no hay registro. `holdings`
+    es cuánto supply tienen el creador y los mayores holders, None si
+    [solana].check_token_holders está apagado."""
     buy: WalletBuy
     others: tuple[str, ...] = field(default_factory=tuple)
     update: bool = False
     bonding_curve: bool = False
     transfer_fee_bps: int | None = None
     hits: tuple[int, int] | None = None
+    holdings: Holdings | None = None
 
 
 def _token_amounts(balances: object, owner: str) -> dict[str, float]:

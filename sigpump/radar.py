@@ -22,6 +22,7 @@ from sigpump.blacklist import Blacklist, import_blacklist_file
 from sigpump.config import Config
 from sigpump.cooldowns import Cooldowns
 from sigpump.filters import first_failing, pair_rejection, venue_reason
+from sigpump.holders import Holdings, TokenHolders
 from sigpump.screener import DexScreenerClient
 from sigpump.solana import RpcClient, TokenAuthorities
 from sigpump.summary import Summary
@@ -63,6 +64,17 @@ def _symbol(pair: dict) -> object:
     return (pair.get("baseToken") or {}).get("symbol")
 
 
+def _holdings_columns(holdings: Holdings | None) -> dict[str, object]:
+    """Columnas del registro con la concentración del supply (todas NULL sin medir)."""
+    holdings = holdings or Holdings()
+    return {
+        "top10_pct": holdings.top10_pct,
+        "mayor_holder_pct": holdings.max_holder_pct,
+        "dev_wallet": holdings.dev_wallet,
+        "dev_pct": holdings.dev_pct,
+    }
+
+
 @dataclasses.dataclass(frozen=True)
 class _Decision:
     """Qué hacer con una compra: `reason` es el motivo para no avisar (None =
@@ -82,6 +94,7 @@ class MemecoinRadar:
         self._tracker = AlertTracker(Path(config.alert_log_path)) if config.alert_log_path else None
         # Se crean en run(), con la sesión HTTP.
         self._authorities: TokenAuthorities | None = None
+        self._holders: TokenHolders | None = None
         self._wallet_watcher: WalletWatcher | None = None
         self._cooldowns = Cooldowns(config)
         self._summary = Summary()
@@ -269,6 +282,7 @@ class MemecoinRadar:
 
         pairs, curve_mints = await self._pairs_for(client, [s.buy.mint for s in signals])
         unsafe = await self._unsafe_reasons(list(pairs.values()))
+        holdings = await self._holdings(list(pairs))
 
         for signal in signals:
             buy = signal.buy
@@ -278,7 +292,10 @@ class MemecoinRadar:
                 summary.no_pool += 1
                 continue
             signal = dataclasses.replace(
-                signal, bonding_curve=buy.mint in curve_mints, transfer_fee_bps=self._transfer_fee_bps(buy.mint)
+                signal,
+                bonding_curve=buy.mint in curve_mints,
+                transfer_fee_bps=self._transfer_fee_bps(buy.mint),
+                holdings=holdings.get(buy.mint),
             )
             # Una wallet que compra en varias tx seguidas da una señal por tx
             # en la misma vuelta: solo cuenta la primera.
@@ -314,6 +331,15 @@ class MemecoinRadar:
                 pairs[mint] = pair
                 curve_mints.add(mint)
         return pairs, curve_mints
+
+    async def _holdings(self, mints: list[str]) -> dict[str, Holdings]:
+        """Cuánto supply tienen el creador y los mayores holders de cada
+        token, para el registro. {} con [solana].check_token_holders apagado.
+        Se mide también en las compras que luego se descartan: para decidir
+        un filtro hace falta comparar las dos."""
+        if self._holders is None:
+            return {}
+        return await self._holders.holdings(mints)
 
     def _transfer_fee_bps(self, mint: str) -> int | None:
         """Comisión de transferencia del token, de la consulta de autoridades
@@ -397,6 +423,7 @@ class MemecoinRadar:
             "pasa_filtros_par": int(pair_ok),
             "bonding_curve": int(signal.bonding_curve),
             "comision_transferencia_bps": signal.transfer_fee_bps,
+            **_holdings_columns(signal.holdings),
         })
 
     async def run(self) -> None:
@@ -465,6 +492,8 @@ class MemecoinRadar:
             rpc = self._rpc = RpcClient(session, self._config.solana_rpc_url)
             if self._config.check_token_authorities:
                 self._authorities = TokenAuthorities(rpc)
+            if self._config.check_token_holders:
+                self._holders = TokenHolders(rpc, self._config.creator_max_pages)
             self._wallet_watcher = WalletWatcher(
                 rpc,
                 Path(self._config.wallets_file),

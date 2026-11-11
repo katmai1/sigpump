@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+from sigpump.holders import Holdings
 from sigpump.radar import RANKING_MIN_TOKENS, MemecoinRadar, next_daily
 from sigpump.solana import RpcClient
 from sigpump.telegram import TelegramAlerter
@@ -153,6 +154,37 @@ class TestAvisosDeWallets(unittest.IsolatedAsyncioTestCase):
         await radar.run_once(_FakeClient(pairs=[_pair("TOK")]), alerter)
         self.assertIsNone(alerter.wallet[0][1].transfer_fee_bps)
         self.assertIsNone(self._rows()[0]["comision_transferencia_bps"])
+
+    async def test_el_supply_del_dev_llega_al_aviso_y_al_registro_tambien_si_se_descarta(self):
+        medidas = {"TOK": Holdings(35.0, 9.0, "DEV", 12.0)}
+
+        class _Holders:
+            pedidos: list[list[str]] = []
+
+            async def holdings(self, mints):
+                self.pedidos.append(mints)
+                return {m: medidas[m] for m in mints if m in medidas}
+
+        radar = self._radar([_buy(), _buy(wallet=OTRA, label="b2", mint="MALO")], unsafe={"MALO": "se pueden congelar"})
+        radar._holders = _Holders()
+        alerter = _FakeAlerter()
+        await radar.run_once(_FakeClient(pairs=[_pair("TOK"), _pair("MALO")]), alerter)
+        self.assertEqual(alerter.wallet[0][1].holdings, medidas["TOK"])
+        filas = {f["token"]: f for f in self._rows()}
+        self.assertEqual(
+            [filas["TOK"][c] for c in ("top10_pct", "mayor_holder_pct", "dev_wallet", "dev_pct")], [35.0, 9.0, "DEV", 12.0]
+        )
+        # La descartada también se mide (para comparar), aunque aquí el RPC no dio nada.
+        self.assertEqual(sorted(_Holders.pedidos[0]), ["MALO", "TOK"])
+        self.assertIsNone(filas["MALO"]["dev_pct"])
+
+    async def test_sin_check_token_holders_el_supply_queda_vacio(self):
+        radar = self._radar([_buy()])
+        alerter = _FakeAlerter()
+        await radar.run_once(_FakeClient(pairs=[_pair("TOK")]), alerter)
+        self.assertIsNone(alerter.wallet[0][1].holdings)
+        fila = self._rows()[0]
+        self.assertEqual([fila[c] for c in ("top10_pct", "dev_wallet", "dev_pct")], [None, None, None])
 
     async def test_el_resumen_cuenta_cada_caso(self):
         radar = self._radar(

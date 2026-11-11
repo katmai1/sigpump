@@ -135,6 +135,15 @@ COLUMNS: dict[str, str] = {
     # sin comisión, NULL si no se pudo consultar. Los retornos no la
     # descuentan. 2026-10-24: 22 de 604 avisos eran de tokens con un 1% o un 3%.
     "comision_transferencia_bps": "INTEGER",
+    # Supply (%) de los 10 mayores holders y del mayor (sin pools, curvas ni
+    # lo quemado), el creador del token y lo que tenía al comprar. NULL sin
+    # [solana].check_token_holders, si el RPC falló o, en dev_*, si el token
+    # era demasiado viejo para encontrar su creación. Solo se registran: de
+    # aquí saldrá si conviene un filtro (2026-11-11, sin datos todavía).
+    "top10_pct": "REAL",
+    "mayor_holder_pct": "REAL",
+    "dev_wallet": "TEXT",
+    "dev_pct": "REAL",
     "simbolo": "TEXT",
     "token": "TEXT",
     "pool": "TEXT",

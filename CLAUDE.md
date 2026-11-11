@@ -69,6 +69,8 @@ consultarlo.
   `telegram.py` (formato y envío), `tracker.py` (SQLite y retornos a
   +5m…+24h), `blacklist.py` (tabla `lista_negra`), `config.py` (carga y
   validación del TOML), `util.py` (conversión defensiva de campos de la API).
+- `sigpump/holders.py`: `TokenHolders`, supply del creador y de los 10 mayores
+  holders en cada compra (solo se registra, no filtra; gasta RPC).
 - `sigpump/buyers.py`: herramienta aparte, a mano (`buyers.py` en la raíz la lanza).
 - `sigpump/wallet_audit.py`: herramienta aparte, a mano: clasifica las últimas
   transacciones de cada wallet del fichero y las cruza con la base (solo lee).

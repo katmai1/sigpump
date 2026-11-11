@@ -15,6 +15,7 @@ from telegram.constants import ParseMode  # type: ignore[import-not-found]
 from telegram.error import RetryAfter  # type: ignore[import-not-found]
 from telegram.warnings import PTBDeprecationWarning  # type: ignore[import-not-found]
 
+from sigpump.holders import Holdings
 from sigpump.tracker import TRACK_RECORD_MINUTES, TrackRecord, format_minutes
 from sigpump.util import bot_volume_m5, buy_ratio_m5, liquidity_usd, market_cap_usd, to_float, volume_acceleration
 from sigpump.wallets import WalletSignal
@@ -33,6 +34,22 @@ def format_track_record(record: TrackRecord) -> str:
     historial, con los tokens medidos del checkpoint que más tiene."""
     medians = ", ".join(f"{median:+.0f}% a {format_minutes(minutes)}" for minutes, median, _ in record)
     return f"{medians} ({max(count for _, _, count in record)} tokens)"
+
+
+def format_holdings(holdings: Holdings | None) -> str:
+    """'dev 12% · top 10 35% (mayor 9%)' con lo que se haya podido medir, ""
+    sin nada. Solo informa: todavía no se sabe a partir de cuánto es malo."""
+    if holdings is None:
+        return ""
+    parts = []
+    if holdings.dev_pct is not None:
+        parts.append(f"dev {holdings.dev_pct:.0f}%")
+    elif holdings.dev_wallet is None and holdings.top10_pct is not None:
+        parts.append("dev ?")
+    if holdings.top10_pct is not None:
+        biggest = f" (mayor {holdings.max_holder_pct:.0f}%)" if holdings.max_holder_pct is not None else ""
+        parts.append(f"top 10 {holdings.top10_pct:.0f}%{biggest}")
+    return " · ".join(parts)
 
 
 def format_ranking(rows: list[tuple[str, TrackRecord]], without_data: int, min_tokens: int) -> str:
@@ -161,6 +178,9 @@ class TelegramAlerter:
                 f"⚠️ <b>Comisión de transferencia: {signal.transfer_fee_bps / 100:g}%</b>"
                 " al comprar y al vender\n"
             )
+        supply = format_holdings(signal.holdings)
+        if supply:
+            header += f"👥 Supply: {supply}\n"
         bots = bot_volume_m5(pair, *self._bot_volume)
         if bots:
             # Mucho movimiento de céntimos y mitad compras, mitad ventas: un

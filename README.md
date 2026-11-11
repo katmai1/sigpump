@@ -218,6 +218,12 @@ después:
 - `comision_transferencia_bps`: comisión de transferencia del token en
   puntos básicos (300 = 3%), 0 si no tiene y NULL si no se pudo consultar o
   `check_token_authorities` está apagado.
+- `top10_pct`, `mayor_holder_pct`, `dev_wallet` y `dev_pct`: porcentaje del
+  supply de los 10 mayores holders y del mayor al comprar (sin el pool, la
+  bonding curve, lockers ni lo quemado), quién creó el token y cuánto le
+  quedaba. NULL con `check_token_holders` apagado, si el RPC falló o, en
+  `dev_*`, si el token tenía más historial que `creator_max_pages`. Solo se
+  registran: sirven para decidir si conviene un filtro por concentración.
 
 Las bases creadas por versiones anteriores conservan las filas y columnas
 del radar de trending (`tipo` 'alerta' o 'prealerta', `score`, velas...):
@@ -286,6 +292,9 @@ Secciones disponibles:
   `check_token_authorities`: comprueba en la blockchain que nadie pueda
   acuñar más tokens (mintAuthority) ni congelar los tuyos (freezeAuthority).
   Si el RPC no responde la señal sale igual y queda el aviso en el log.
+  `check_token_holders` registra cuánto supply tienen el creador y los 10
+  mayores holders (ver `dev_pct` y `top10_pct` abajo) y lo muestra en el
+  aviso, sin filtrar; `creator_max_pages` limita cuánto se busca el creador.
 - `[wallets]` — seguimiento de wallets: `file` con las direcciones,
   intervalo, `min_sol` (gasto mínimo para contar como compra), cooldown por
   wallet y token, ventana de confluencia, `min_wallets` (cuántas wallets
@@ -408,6 +417,7 @@ sigpump/
   summary.py                Resumen periódico en el log
   screener.py                 Cliente HTTP async de DexScreener
   solana.py                   Cliente del RPC y comprobación de mint/freeze authority
+  holders.py                  Supply del creador y de los mayores holders
   telegram.py                 Formateo y envío de los avisos por Telegram
   tracker.py                  Registro SQLite de las compras y su resultado
   blacklist.py                Lista negra de wallets (tabla lista_negra)

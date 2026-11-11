@@ -172,6 +172,11 @@ class Config:
     verbose: bool = _key("radar.verbose", False)
     # Comprobación en la blockchain de que el token no se pueda acuñar ni congelar.
     check_token_authorities: bool = _key("solana.check_token_authorities", True)
+    # Registro de cuánto supply tienen el creador y los 10 mayores holders.
+    # Apagado por defecto: gasta créditos del RPC en cada token.
+    check_token_holders: bool = _key("solana.check_token_holders", False)
+    # Páginas de 1000 firmas que se buscan hacia atrás para dar con el creador.
+    creator_max_pages: int = _key("solana.creator_max_pages", 3)
     solana_rpc_url: str = _key("solana.rpc_url", MAINNET_RPC_URL)
     telegram_bot_token: str = _key("telegram.bot_token", "")
     telegram_chat_id: str = _key("telegram.chat_id", "")
@@ -266,6 +271,8 @@ class Config:
             raise ValueError("[wallets].file no puede estar vacío")
         if self.wallets_blacklist and not self.alert_log_path:
             raise ValueError("[wallets].blacklist necesita [radar].alert_log_path: la lista negra se guarda en esa base")
+        if self.creator_max_pages < 0:
+            raise ValueError(f"[solana].creator_max_pages debe ser >= 0 ({self.creator_max_pages})")
         if self.wallets_full_poll_minutes <= 0:
             raise ValueError(
                 f"[wallets].full_poll_minutes debe ser > 0 ({self.wallets_full_poll_minutes})"
